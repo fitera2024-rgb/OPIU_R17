@@ -19,6 +19,7 @@
     <div class="safety" aria-label="Режим безопасности">
       <strong>REPORT_ONLY</strong>
       <span>Запись в 1С отключена</span>
+      <button type="button" class="link-button" id="openArticleApprovals">Утверждения статей</button>
       <button type="button" class="link-button" data-view="structural-groups" id="openStructuralGroups">Группы блоков</button>
       <button type="button" class="link-button" data-view="empty-article-bindings" id="openEmptyArticleBindings">Привязки пустых статей</button>
     </div>
@@ -220,6 +221,52 @@
     </section>
   </main>
 
+  <dialog id="article-approval-dialog" class="article-approval-dialog" aria-labelledby="article-approval-title">
+    <div class="article-approval-shell">
+      <div class="article-approval-heading">
+        <div>
+          <p class="eyebrow">REPORT_ONLY · БЕЗ ПРОВОДКИ</p>
+          <h2 id="article-approval-title">Утверждение соответствий статей</h2>
+          <p class="muted compact">Утверждение задаёт направление поиска, но не подтверждает сумму или физическую строку ERP.</p>
+        </div>
+        <button type="button" class="secondary" id="article-approval-close">Закрыть</button>
+      </div>
+
+      <div class="article-approval-loader">
+        <label>Завершённая сверка
+          <select id="article-approval-run"><option value="">Нет завершённых сверок</option></select>
+        </label>
+        <button type="button" class="primary" id="article-approval-load">Открыть очередь</button>
+        <button type="button" class="secondary" id="article-approval-reload" disabled>Загрузить очередь заново</button>
+      </div>
+
+      <div id="article-approval-scope" class="article-approval-scope" hidden></div>
+      <p id="article-approval-status" class="notice" role="status" aria-live="polite">Выберите завершённую сверку.</p>
+
+      <div id="article-approval-workspace" hidden>
+        <div class="article-approval-toolbar">
+          <label>Показать
+            <select id="article-approval-filter">
+              <option value="НУЖНА ПРОВЕРКА">НУЖНА ПРОВЕРКА</option>
+              <option value="ВСЕ">Все строки</option>
+            </select>
+          </label>
+          <div id="article-approval-counters" class="article-approval-counters" aria-live="polite"></div>
+          <button type="button" class="secondary" id="article-approval-bulk" disabled>Утвердить все однозначные</button>
+        </div>
+
+        <div id="article-approval-errors" class="article-approval-errors" role="alert" aria-live="assertive" hidden></div>
+        <div id="article-approval-rows" class="article-approval-rows"></div>
+
+        <div class="article-approval-actions">
+          <button type="button" class="secondary" id="article-approval-validate" disabled>Проверить решения</button>
+          <button type="button" class="primary" id="article-approval-fix" disabled>Зафиксировать утверждения</button>
+        </div>
+        <div id="article-approval-result" class="notice good" role="status" aria-live="polite" hidden></div>
+      </div>
+    </div>
+  </dialog>
+
   <footer>
     <span>ООО «ФИТЭРА»</span>
     <span>REPORT_ONLY</span>
@@ -227,6 +274,7 @@
     <span>live 1C = запрещено</span>
   </footer>
   <script src="/app.js" defer></script>
+  <script src="/article-approval-ui.js" defer></script>
   <script src="/results-ui.js" defer></script>
   <script src="/diagnostics-ui.js" defer></script>
   <script src="/service-journal-ui.js" defer></script>

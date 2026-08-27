@@ -98,6 +98,16 @@ function render(snapshot) {
   renderRuns(snapshot.runs || []);
   if (typeof renderStructuralRunOptions === "function") renderStructuralRunOptions(snapshot);
   if (typeof renderEmptyArticleBindingRunOptions === "function") renderEmptyArticleBindingRunOptions(snapshot);
+  window.opiuArticleApprovalRuns = (snapshot.runs || []).map((run) => ({
+    id: run.id,
+    status: run.status,
+    stage: run.stage,
+    message: run.message,
+    finished_at: run.finished_at,
+  }));
+  window.dispatchEvent(new CustomEvent("opiu:bootstrap-updated", {
+    detail: { runs: window.opiuArticleApprovalRuns },
+  }));
 }
 
 function renderContexts(contexts) {

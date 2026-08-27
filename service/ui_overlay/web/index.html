@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Автоматическая сверка ОПИУ</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="app-header">
+  <div class="brand-block"><div class="brand-mark">ОП</div><div><p class="eyebrow">Локальный сервис экономиста</p><div class="brand-title-row"><h1>Автоматическая сверка ОПИУ</h1><span class="brand-version" aria-label="Версия сервиса 1.9.4">1.9.4</span></div><p class="subtitle">Инталев ↔ ERP · файлы · правила · инструкции · два подключаемых движка</p></div></div>
+  <div class="header-status"><span class="status-dot"></span><div><strong>Только проверка</strong><small>Проводки и загрузка в 1С не запускаются</small></div></div>
+</header>
+<nav class="main-nav" aria-label="Разделы">
+  <button class="nav-item active" data-view="overview"><span>1</span>Обзор</button>
+  <button class="nav-item" data-view="files"><span>2</span>Файлы и пакеты</button>
+  <button class="nav-item" data-view="rules"><span>3</span>Правила</button>
+  <button class="nav-item" data-view="structural-groups"><span>4</span>Группы блоков</button>
+  <button class="nav-item" data-view="exchange"><span>5</span>Обмен правилами</button>
+  <button class="nav-item" data-view="instructions"><span>6</span>Инструкции</button>
+  <button class="nav-item" data-view="materials"><span>7</span>Материалы</button>
+  <button class="nav-item" data-view="engines"><span>8</span>Движки</button>
+  <button class="nav-item" data-view="journal"><span>9</span>Журнал</button>
+</nav>
+<main class="app-shell">
+  <div class="release-strip"><div><strong>Рабочий релиз 1.9.4</strong><small>Дельта раскрывается до операций, регистраторов и строк журнала; безопасные базовые правила подтверждаются автоматически.</small></div><span class="badge green">Проводки видны, выпуск остаётся безопасным</span></div>
+  <section class="global-run-dashboard section-card" aria-label="Текущий контекст и дельты">
+    <div class="global-dashboard-head"><div><p class="section-kicker">Текущий запуск</p><h2>Контекст и дельты ОПИУ</h2></div><div class="global-stage"><span>Этап</span><strong id="global-stage">Сервис готов</strong></div></div>
+    <div class="context-summary global-context-summary"><div><span>Организация / ЦФО</span><strong id="overview-organization">—</strong></div><div><span>Период</span><strong id="overview-period">—</strong></div><div><span>Автор</span><strong id="overview-author">—</strong></div><div><span>ID запуска</span><strong id="overview-run">—</strong></div></div>
+    <div class="global-delta-grid"><div><span>Исходная дельта</span><strong id="overview-source-delta">Ожидает сверку</strong></div><div><span>Дельта после правил</span><strong id="overview-project-delta">Ожидает подтверждение</strong></div><div><span>Требуют решения</span><strong id="global-pending-rules">0</strong></div><div><span>Файлов текущего контекста</span><strong id="global-context-files">0</strong></div></div>
+    <div class="quick-actions global-dashboard-actions"><button class="button primary" data-go="files">Изменить контекст</button><button class="button secondary" data-go="rules">Открыть правила</button><button class="button secondary" data-go="engines">Открыть движки</button></div>
+  </section>
+
+  <section id="view-overview" class="view active">
+    <div class="notice success"><div class="notice-icon">✓</div><div><strong id="workflow-stage">Сервис готов</strong><p id="workflow-next">Загрузите входные данные и выберите организацию.</p></div><button class="button secondary" data-go="files">Открыть данные</button></div>
+    <section class="section-card intro-card">
+      <div class="section-title-row"><div><p class="section-kicker">Рабочий маршрут</p><h2>Один сервис — полный маршрут экономиста</h2></div><div class="version-chip">Релиз 1.9.4</div></div>
+      <div class="workflow-grid" id="workflow-grid"></div>
+    </section>
+    <section class="metrics-grid">
+      <article class="metric"><span>Входных файлов</span><strong id="metric-inputs">0</strong><small>Источники Инталев и ERP</small></article>
+      <article class="metric"><span>Артефактов</span><strong id="metric-artifacts">0</strong><small>Результаты движков</small></article>
+      <article class="metric"><span>Правил</span><strong id="metric-rules">0</strong><small>Только актуальные редакции</small></article>
+      <article class="metric"><span>Применений</span><strong id="metric-applications">0</strong><small>Суммы и доказательства отдельно</small></article>
+      <article class="metric accent"><span>Инструкций</span><strong id="metric-instructions">0</strong><small>Версии и публикация</small></article>
+    </section>
+    <section class="dashboard-grid">
+      <article class="section-card dashboard-main"><div class="section-title-row compact"><div><p class="section-kicker">Быстрый доступ</p><h2>Продолжить работу</h2></div></div><div class="quick-actions"><button class="button primary" data-go="files">Загрузить файлы</button><button class="button secondary" data-go="rules">Открыть правила</button><button class="button secondary" data-go="engines">Открыть движки</button></div><div class="quick-downloads"><a href="/api/materials/download?id=MAT-INTALEV-EPF">Скачать обработку Инталев</a><a href="/api/materials/download?id=MAT-ERP-MSFO-EPF">Скачать обработку ERP–МСФО</a><a href="/api/instructions/download?id=INST-RECONCILIATION-R005">Инструкция R005</a><a href="/api/instructions/download?id=INST-ERP-MSFO-V35-V19">Инструкция ERP–МСФО</a></div></article>
+      <aside class="section-card safety-card"><p class="section-kicker">Контроль безопасности</p><h2>Режимы исполнения закрыты</h2><ul class="check-list"><li><span>posting_rows</span><strong>0</strong></li><li><span>ready_to_upload</span><strong>false</strong></li><li><span>release_allowed</span><strong>false</strong></li><li><span>posting_generation_allowed</span><strong>false</strong></li></ul></aside>
+    </section>
+  </section>
+
+  <section id="view-files" class="view">
+    <div class="page-heading"><div><p class="section-kicker">Входные и выходные данные</p><h2>Файлы и пакеты</h2><p>Слева — источники пользователя, справа — результаты и артефакты этапов.</p></div><button class="button secondary" id="open-data-folder">Открыть локальную папку</button></div>
+    <section class="section-card context-card">
+      <div class="section-title-row compact"><div><p class="section-kicker">Параметры запуска</p><h3>Организация, ЦФО и период</h3></div><span class="hint-chip">Справочник ERP верифицирован</span></div>
+      <div class="org-search-row"><input id="organization-search" type="search" placeholder="Найти организацию, ЦФО или код ERP"><span id="organization-source-label"></span></div>
+      <div class="form-grid context-fields">
+        <label class="span-2"><span>Организация / ЦФО</span><select id="setting-organization"></select><small id="setting-organization-path"></small></label>
+        <label class="check-field"><input type="checkbox" id="setting-descendants"><span><strong>Включать дочерние узлы</strong><small>Для верхней организации или ветки</small></span></label>
+        <label><span>Режим</span><select id="setting-mode"><option value="month">Месяц</option><option value="quarter">Квартал</option><option value="year">Год</option></select></label>
+        <label><span>Дата проверки</span><input id="setting-period-calendar" type="date" aria-label="Дата для выбора периода"><input id="setting-period" type="hidden"><small><strong id="setting-period-value">—</strong> · <span id="setting-period-hint">Выберите дату в календаре.</span></small></label>
+        <label><span>Экономист / автор</span><input id="setting-author" placeholder="Имя пользователя"></label>
+        <button class="button primary align-end" id="save-context">Сохранить контекст</button>
+      </div>
+    </section>
+    <section class="section-card catalog-manager">
+      <div class="section-title-row compact"><div><p class="section-kicker">Постоянные справочники</p><h3>ERP зафиксирован в сервисе, Инталев считывается из пакета</h3><p>Общие организации, статьи и план счетов ERP одинаковы для всех. ЦФО Инталев и статьи БДР распознаются по структуре и содержанию файлов при загрузке папки или ZIP и сохраняются как неизменяемая версия.</p></div><span class="hint-chip">Не удаляются</span></div>
+      <div id="catalog-manager-grid" class="catalog-manager-grid"></div>
+      <div class="reference-policy-note"><strong>Что загружает пользователь:</strong> выберите папку или ZIP пакета Инталев ниже. Сервис ищет одну выгрузку ЦФО и одну выгрузку статей БДР по содержанию и обязательным полям, поэтому допустимы разные имена файлов. Неоднозначный или неполный пакет не активируется. Отчёты Инталев и ERP остаются обычными входными файлами сверки.</div>
+      <div id="catalog-upload-result" class="inline-result" hidden></div>
+    </section>
+    <div class="upload-grid">
+      <section class="section-card upload-card"><div class="numbered-title"><span>1</span><div><h3>Входные данные</h3><p>Один выбор для Excel, ZIP или целой папки.</p></div></div><div class="drop-zone"><input type="file" id="input-files" multiple accept=".xlsx,.xls,.xlsm,.zip" hidden><input type="file" id="input-folder" webkitdirectory directory multiple hidden><span class="upload-icon">⇧</span><strong>Загрузить или заменить источник</strong><small>Загрузите точные пакеты ERP и Инталев для выбранной организации и периода.</small><div class="source-picker-actions"><button type="button" class="button primary" id="choose-input-files">Выбрать Excel / ZIP</button><button type="button" class="button secondary" id="choose-input-folder">Выбрать папку</button></div></div><p class="source-retention-note">Сервис проверит состав и целостность пакетов и сохранит их версию.</p><div class="role-summary" id="input-role-summary"></div><div id="reference-status-panel" class="reference-status-panel"></div><div class="file-list" id="input-file-list"></div></section>
+      <section class="section-card upload-card output-card"><div class="numbered-title"><span>2</span><div><h3>Результаты и артефакты</h3><p>Сверка R005, доказательства, корректировки R001 и контроль 1С.</p></div></div><label class="drop-zone output-zone"><input type="file" id="output-files" multiple accept=".xlsx,.xls,.zip,.json,.csv"><span class="upload-icon">⇧</span><strong>Добавить готовый результат</strong><small>или дождитесь автоматической регистрации движка</small></label><div class="artifact-list" id="artifact-list"></div><div class="file-list" id="output-file-list"></div></section>
+    </div>
+  </section>
+
+  <section id="view-rules" class="view">
+    <div class="page-heading rules-page-heading"><div><p class="section-kicker">Реестр логики</p><h2>Правила сверки</h2><p>Финальный вид правила: <strong>организация / ЦФО → иерархия ОПИУ Инталев → статья Инталев → иерархия ОПИУ ERP → статья ERP → счета обеих систем</strong>. Суммы и операции хранятся отдельно в применениях.</p></div><button class="button primary" id="new-rule">+ Новое правило</button></div>
+    <section class="section-card catalog-strip-card">
+      <div class="section-title-row compact"><div><p class="section-kicker">Активные справочники</p><h3>На чём построены фильтры и правила</h3></div><button class="text-button" data-go="files">Заменить справочники →</button></div>
+      <div id="rules-catalog-strip" class="catalog-strip"></div>
+    </section>
+    <section class="section-card rules-filter-panel">
+      <div class="rules-filter-head"><div><p class="section-kicker">Все фильтры зафиксированы</p><h3>Отбор по организации, иерархии ОПИУ, статьям и счетам</h3></div><strong id="rules-count-label">0 правил</strong></div>
+      <div class="rules-filter-grid rules-filter-grid-main final-filter-row">
+        <label class="filter-search"><span>Поиск по всем полям</span><input id="rules-search" type="search" placeholder="Код, статья, путь, счёт, организация или основание"></label>
+        <label><span>Организация / ЦФО</span><select id="rules-organization-filter"><option value="all">Все организации</option></select></label>
+        <label class="inline-filter-check"><span>Иерархия организации</span><span class="check-line"><input type="checkbox" id="rules-descendants-filter"> Включать дочерние узлы</span></label>
+        <label><span>Статус решения</span><select id="rules-status-filter"><option value="all">Все статусы</option><option value="UNCONFIRMED">Не подтверждено</option><option value="ADOPTED">Подтверждено</option><option value="DISPUTED">Спорно</option><option value="REJECTED">Отклонено</option><option value="REVIEW">На проверке</option><option value="DRAFT">Черновик</option><option value="ORGANIZATION_UNMATCHED">Организация не сопоставлена</option></select></label>
+        <label><span>Источник правила</span><select id="rules-origin-filter"><option value="all">Все источники</option><option value="base">Базовые</option><option value="organization">Локальные</option><option value="imported">Импортированные / Хабаровск</option></select></label>
+        <label><span>Действие</span><select id="rules-action-filter"><option value="all">Все действия</option></select></label>
+        <label><span>Год действия</span><select id="rules-year-filter"><option value="all">Все годы</option></select></label>
+      </div>
+      <div class="system-filter-block intalev-filter-block"><div class="system-filter-title"><strong>ИНТАЛЕВ</strong><span>Иерархия ОПИУ и счета из проводок/каталога</span></div><div class="rules-filter-grid system-filter-grid">
+        <label><span>Блок / ветка ОПИУ Инталев</span><select id="rules-intalev-block-filter"><option value="all">Все блоки Инталев</option></select></label>
+        <label><span>Статья Инталев</span><select id="rules-intalev-article-filter"><option value="all">Все статьи Инталев</option></select></label>
+        <label><span>Счёт Дт Инталев</span><select id="rules-intalev-debit-filter"><option value="all">Все счета Дт Инталев</option></select></label>
+        <label><span>Счёт Кт Инталев</span><select id="rules-intalev-credit-filter"><option value="all">Все счета Кт Инталев</option></select></label>
+      </div></div>
+      <div class="system-filter-block erp-filter-block"><div class="system-filter-title"><strong>ERP</strong><span>Иерархия ОПИУ, статьи и план счетов ERP</span></div><div class="rules-filter-grid system-filter-grid">
+        <label><span>Блок / ветка ОПИУ ERP</span><select id="rules-erp-block-filter"><option value="all">Все блоки ERP</option></select></label>
+        <label><span>Статья ERP</span><select id="rules-erp-article-filter"><option value="all">Все статьи ERP</option></select></label>
+        <label><span>Счёт Дт ERP</span><select id="rules-erp-debit-filter"><option value="all">Все счета Дт ERP</option></select></label>
+        <label><span>Счёт Кт ERP</span><select id="rules-erp-credit-filter"><option value="all">Все счета Кт ERP</option></select></label>
+      </div></div>
+      <div class="rules-filter-actions"><label class="select-all"><input type="checkbox" id="rules-select-all"> Выбрать видимые для передачи</label><button class="button secondary" id="reset-rule-filters">Сбросить все фильтры</button><button class="button primary" id="approve-selected" title="Сервис сам проверит тип, статус, год, область действия и источник каждого правила">Подтвердить применимые базовые</button><button class="button secondary" id="export-selected-rules">Передать выбранные правила</button></div>
+    </section>
+    <div class="rules-grid" id="rules-grid"></div>
+  </section>
+
+  <section id="view-structural-groups" class="view">
+    <div class="page-heading"><div><p class="section-kicker">Настройка для выбранной организации</p><h2>Группы блоков Инталев и ERP</h2><p>Объедините верхние блоки, которые из-за смены иерархии показываются в системах по-разному. Можно добавить несколько групп.</p></div><button type="button" class="button primary" id="structural-new-set">+ Добавить соответствие</button></div>
+    <section class="section-card structural-context-card">
+      <div class="context-summary four"><div><span>Организация / ЦФО</span><strong id="structural-organization">—</strong></div><div><span>Период</span><strong id="structural-period">—</strong></div><div><span>Текущий запуск</span><strong id="structural-run">—</strong></div><div><span>Состояние расчёта</span><strong id="structural-inventory-status">Ожидает сверку</strong></div></div>
+      <p class="structural-policy-note">Группа закрепляется за верхним уровнем выбранной организации. Ожидаемая сумма дельт — <strong>0</strong>. Нулевая сумма закрывает только различие иерархий. Дочерние строки всё равно проверяются. Если сумма не равна нулю, это открытый межгрупповой пересорт.</p>
+    </section>
+    <div class="structural-control-layout">
+      <aside class="section-card structural-set-sidebar">
+        <div class="section-title-row compact"><div><p class="section-kicker">Сохранённые соответствия</p><h3>Группы организации</h3></div><span class="hint-chip" id="structural-set-count">0</span></div>
+        <div id="structural-control-set-list" class="control-set-list"><p class="muted">Группы ещё не созданы.</p></div>
+      </aside>
+      <section class="section-card structural-set-editor" aria-labelledby="structural-editor-title">
+        <div class="section-title-row"><div><p class="section-kicker">Состав группы</p><h3 id="structural-editor-title">Новое соответствие блоков</h3><p>Выберите блоки каждой системы отдельно. Сервис сравнивает только два итоговых значения и не создаёт искусственные пары строк.</p></div><span class="structural-version-chip" id="structural-version">Черновик · версия 1</span></div>
+        <div class="form-grid structural-set-fields">
+          <label class="span-2"><span>Название группы</span><input id="structural-set-name" placeholder="Например: финансовые и внереализационные расходы"></label>
+          <label><span>Режим проверки</span><input value="Сумма дельт" readonly></label>
+          <label><span>Ожидаемая дельта</span><input value="0,00" readonly></label>
+        </div>
+        <div class="structural-member-pickers">
+          <section class="structural-system-picker intalev"><div class="system-filter-title"><div><strong>Блоки Инталев</strong><span>Текущая иерархия Инталев</span></div><strong id="structural-intalev-selected">0 выбрано</strong></div><div id="structural-intalev-inventory" class="structural-member-list"><p class="muted">Ожидаем проверенный расчёт.</p></div></section>
+          <section class="structural-system-picker erp"><div class="system-filter-title"><div><strong>Блоки ERP</strong><span>Текущая иерархия ERP</span></div><strong id="structural-erp-selected">0 выбрано</strong></div><div id="structural-erp-inventory" class="structural-member-list"><p class="muted">Ожидаем проверенный расчёт.</p></div></section>
+        </div>
+        <section class="structural-preview" aria-live="polite"><div class="section-title-row compact"><div><p class="section-kicker">Проверка суммы</p><h3>Итог выбранных блоков</h3></div><button type="button" class="button secondary" id="structural-refresh-preview">Обновить расчёт</button></div><div class="structural-preview-grid"><div><span>Итого Инталев</span><strong id="structural-intalev-total">0,00</strong></div><div><span>Итого ERP</span><strong id="structural-erp-total">0,00</strong></div><div><span>Дельта контроля</span><strong id="structural-control-delta">0,00</strong><small>Должна быть равна нулю</small></div></div><div id="structural-preview-state" class="structural-preview-state unverified">Расчёт ещё не проверен: загрузите источники текущего запуска. Состав можно сохранить как черновик.</div></section>
+        <div id="structural-editor-message" class="inline-result" hidden></div>
+        <div class="structural-editor-actions"><button type="button" class="button secondary" id="structural-save-draft">Сохранить черновик</button><button type="button" class="button primary" id="structural-fix-version">Зафиксировать версию</button><button type="button" class="button secondary" id="structural-edit-version">Изменить новой версией</button><button type="button" class="button warning" id="structural-disable-set">Отключить</button></div>
+        <p class="structural-safety-note">Настройка управляет только сверкой. Она не создаёт проводки, не заполняет неизвестные физические поля и не разрешает загрузку в 1С.</p>
+      </section>
+    </div>
+  </section>
+
+  <section id="view-exchange" class="view">
+    <div class="page-heading"><div><p class="section-kicker">Обмен между экономистами и чатами</p><h2>Пакет правил ОПИУ</h2><p>Один файл <strong>.opiu-rules</strong>. Он содержит только актуальную логику и подтверждения, без сумм и финансовых файлов.</p></div></div>
+    <div class="exchange-grid">
+      <section class="section-card exchange-card"><div class="exchange-icon">⇩</div><h3>Забрать правила</h3><p>Выберите пакет другого экономиста. Правила попадут на проверку и не активируются автоматически.</p><label class="file-button"><input type="file" id="rule-pack-file" accept=".opiu-rules,.json">Выбрать пакет правил</label><div id="import-result" class="inline-result" hidden></div></section>
+      <section class="section-card exchange-card"><div class="exchange-icon">⇧</div><h3>Передать правила</h3><p>Экспортируются актуальные редакции. Автор можно изменить перед выгрузкой.</p><label><span>Автор пакета</span><input id="export-author"></label><label class="select-all"><input type="checkbox" id="export-selected-only"> Только выбранные на странице «Правила»</label><button class="button primary wide" id="export-rules">Выгрузить пакет правил</button><small>Формат: Правила_ОПИУ_дата_ID.opiu-rules</small></section>
+    </div>
+    <section class="section-card identity-explainer"><div><p class="section-kicker">Состав пакета</p><h3>Понятно пользователю, проверяемо системой</h3></div><div class="identity-flow"><article><span>RULE-ID</span><strong>Постоянное правило</strong><p>Не меняется у разных пользователей.</p></article><b>→</b><article><span>REVISION-ID</span><strong>Актуальная редакция</strong><p>Содержит логику без суммы.</p></article><b>→</b><article><span>APPROVAL</span><strong>Решение организации</strong><p>Применение подтверждается отдельно.</p></article></div><div class="notice neutral compact"><div class="notice-icon">i</div><div><strong>Внутри: manifest, rules, approvals, organizations, README и checksums</strong><p>При конфликте локальное правило не перезаписывается. Несопоставленная организация сохраняется со статусом «Организация не сопоставлена».</p></div></div></section>
+  </section>
+
+  <section id="view-instructions" class="view"><div class="page-heading"><div><p class="section-kicker">Версии и публикация</p><h2>Инструкции пользователя</h2><p>Системные инструкции доступны только для чтения. Пользовательские инструкции создаются и версионируются отдельно.</p></div><a class="button secondary" href="#" target="_blank" rel="noreferrer">Открыть материалы ↗</a></div><section class="section-card user-instruction-create"><div><p class="section-kicker">Новая пользовательская инструкция</p><h3>Добавить свой документ</h3></div><div class="form-grid"><label><span>Название</span><input id="instruction-title"></label><label><span>Версия</span><input id="instruction-version" placeholder="1.0"></label><label><span>Автор</span><input id="instruction-author"></label><label><span>Файл DOCX или PDF</span><input id="instruction-file" type="file" accept=".docx,.pdf"></label></div><button type="button" class="button primary" id="create-user-instruction">Создать пользовательскую инструкцию</button></section><div class="instructions-grid" id="instructions-grid"></div></section>
+
+  <section id="view-materials" class="view"><div class="page-heading"><div><p class="section-kicker">Ссылки и обработки</p><h2>Материалы проекта</h2><p>Обработки 1С, инструкции, контракт и примеры.</p></div></div><div class="materials-grid" id="materials-grid"></div><section class="section-card material-editor-card"><div><p class="section-kicker">Основная ссылка</p><h3>Папка опубликованных материалов</h3></div><div class="material-edit-row"><input id="materials-root-url" type="url"><button class="button primary" id="save-materials-url">Сохранить ссылку</button></div></section></section>
+
+  <section id="view-engines" class="view">
+    <div class="page-heading"><div><p class="section-kicker">Связанный маршрут</p><h2>Движки R005 и R001</h2><p>Перед R005 сервис проверяет выбранные пакеты ERP и Инталев для организации и периода. R001 открывается только после завершённой сверки.</p></div><button class="button secondary" id="refresh-artifacts">Обновить результаты</button></div>
+    <div class="notice success"><div class="notice-icon">✓</div><div><strong>Чёрные консольные окна скрыты в обычном сценарии</strong><p>Запуск выполняется фоновым процессом, а рабочее окно движка открывается с уже заполненным контекстом.</p></div></div>
+    <section class="section-card source-readiness" id="source-readiness-panel" aria-live="polite"><p class="muted">Проверяем готовность пакетов…</p></section>
+    <section class="section-card engine-context"><div class="form-grid"><label><span>Готовая сверка для R001</span><select id="engine-reconciliation-file"></select><small><strong>По умолчанию:</strong> отчёт R005 именно для активного запуска вместе с его companion и manifest. Произвольный старый XLSX автоматически не выбирается.</small></label><div class="engine-context-status"><span>Активный запуск</span><strong id="engine-active-run">—</strong></div></div></section>
+    <div class="engine-grid" id="engine-grid"></div>
+    <section class="section-card rules-engine-result-card" aria-labelledby="rules-engine-result-title"><div class="section-title-row compact"><div><p class="section-kicker">Результат движка правил</p><h3 id="rules-engine-result-title">Применённые правила и кандидаты</h3><p>Основание результата: ОПИУ и иерархия Инталев вместе с проводками ERP. Журнал проводок Инталев в этом сценарии не используется; непривязанные операции ERP остаются отдельными.</p></div><div class="rules-engine-heading-actions"><button type="button" class="button primary" id="rerun-r001-top" disabled>R001 пока недоступен</button><button type="button" class="button secondary" data-go="rules">Перейти к правилам</button></div></div><div id="rules-engine-result" class="rules-engine-result"><p class="muted">Результат ещё не запрошен.</p></div></section>
+    <section class="section-card r001-blocker-help"><div><p class="section-kicker">Как читать R001</p><h3>Почему результат может оставаться заблокированным</h3></div><div class="blocker-help-grid"><article><strong>Нет подтверждённого источника</strong><p>Не хватает исходного документа, листа, строки или операции. Нужен исходный документ, а не ручное предположение.</p></article><article><strong>Не доказана организация</strong><p>ERP и Инталев не подтвердили одну организацию / ЦФО. Проверьте пару источников и активный контекст.</p></article><article><strong>Только проверка</strong><p>Отчёт сформирован для проверки, но проводки, загрузка и публикация по-прежнему запрещены.</p></article></div></section>
+    <section class="section-card"><div class="section-title-row compact"><div><p class="section-kicker">Артефакты маршрута</p><h3>Результаты передаются на следующий этап</h3></div><button class="button secondary" id="collect-artifacts">Забрать результаты движков</button></div><div class="artifact-list" id="engine-artifact-list"></div></section>
+  </section>
+
+  <section id="view-journal" class="view"><div class="page-heading"><div><p class="section-kicker">Прослеживаемость и поддержка</p><h2>Журнал действий и ошибок</h2><p>Загрузки, правила, подтверждения, пакеты, инструкции, запуски и отдельные диагностические ошибки.</p></div><div class="journal-actions"><button type="button" class="button secondary" id="refresh-journal">Обновить</button><button type="button" class="button primary" id="download-support-bundle">Выгрузить пакет для ИТ</button></div></div><div class="journal-grid"><section class="section-card journal-card"><div class="section-title-row compact"><div><p class="section-kicker">История</p><h3>Действия пользователя и сервиса</h3></div></div><div id="journal-list" class="journal-list"></div></section><section class="section-card error-journal-card"><div class="section-title-row compact"><div><p class="section-kicker">Ошибки</p><h3>Что помешало завершить шаг</h3><p>Показываются код, сообщение, источник, запуск и время. Для передачи специалисту используйте пакет для ИТ.</p></div></div><div id="error-journal-list" class="error-journal-list"><p class="muted">Ошибки ещё не загружены.</p></div></section></div></section>
+</main>
+
+<dialog id="rule-dialog" class="modal large-modal">
+<form method="dialog" id="rule-form">
+  <div class="modal-header"><div><p class="section-kicker">Карточка правила</p><h2 id="rule-dialog-title">Новое правило</h2></div><button type="button" class="icon-button" data-rule-cancel aria-label="Закрыть карточку правила">×</button></div>
+  <input type="hidden" id="rule-id"><input type="hidden" id="rule-origin-id">
+  <div class="rule-form-section"><h3>Общие сведения</h3><div class="form-grid two-cols"><label class="full"><span>Название правила</span><input id="rule-name" required></label><label class="full"><span>Описание / основание</span><textarea id="rule-description" rows="3"></textarea></label><label><span>Тип</span><select id="rule-type"><option value="organization">Локальное</option><option value="base">Базовое</option><option value="imported">Импортированное</option></select></label><label><span>Действие</span><select id="rule-action"><option value="REVIEW">Выберите действие</option><option value="CONTROL_ONLY">Только контроль</option><option value="STORNO_REPOST">Парная корректировка</option><option value="PROCESS_AS_PAIR">Обрабатывать парой</option><option value="ACCEPT_DIFFERENCE">Принять расхождение</option><option value="EXCLUDE">Исключить</option><option value="INCLUDE">Включить</option><option value="CONTROL_PENDING_CONFIRMATION">Контроль до подтверждения</option><option value="PROCESS_OR_ACCEPT_EXCEPTION">Обработать или принять исключение</option></select></label><label><span>Год начала</span><input id="rule-year-from" type="number" min="2000" max="2100"></label><label><span>Год окончания</span><input id="rule-year-to" type="number" min="2000" max="2100" placeholder="Бессрочно"></label><label><span>Статус</span><select id="rule-status"><option value="DRAFT">Черновик</option><option value="CURRENT">Актуальное</option><option value="REVIEW">На проверке</option><option value="ORGANIZATION_UNMATCHED">Организация не сопоставлена</option><option value="RETIRED">Архив</option></select></label><label class="check-field"><input type="checkbox" id="rule-enabled"><span><strong>Правило включено</strong><small>Начинает участвовать только после подтверждения области</small></span></label></div></div>
+  <div class="rule-form-section"><h3>Область действия</h3><div class="form-grid two-cols"><label><span>Область</span><select id="rule-scope-type"><option value="ORG_ONLY">Только организация / ЦФО</option><option value="ORG_WITH_DESCENDANTS">Организация и дочерние узлы</option><option value="ALL_ORGS">Все организации</option><option value="ORG_OR_BRANCH">Выбранная ветка иерархии</option></select></label><label><span>Организация / ЦФО из ERP</span><select id="rule-node"></select></label><label class="check-field full"><input type="checkbox" id="rule-descendants"><span><strong>Включать дочерние узлы</strong><small>Для верхней организации или ветки</small></span></label></div></div>
+  <div class="mapping-columns"><div class="rule-form-section"><h3>Инталев — исходная статья</h3><label><span>Выбор из текущего пакета Инталев</span><select id="rule-intalev-source-catalog" data-rule-catalog="INTALEV" data-rule-side="intalev-source"></select></label><label><span>Блок ОПИУ Инталев</span><input id="rule-intalev-source-block" readonly></label><label><span>Код статьи</span><input id="rule-intalev-source-code" readonly></label><label><span>Наименование статьи</span><input id="rule-intalev-source-article" readonly></label><label><span>Полный путь</span><textarea id="rule-intalev-source-path" rows="3" readonly></textarea></label></div><div class="rule-form-section"><h3>Инталев — целевая статья</h3><label><span>Выбор из текущего пакета Инталев</span><select id="rule-intalev-target-catalog" data-rule-catalog="INTALEV" data-rule-side="intalev-target"></select></label><label><span>Блок ОПИУ Инталев</span><input id="rule-intalev-target-block" readonly></label><label><span>Код статьи</span><input id="rule-intalev-target-code" readonly></label><label><span>Наименование статьи</span><input id="rule-intalev-target-article" readonly></label><label><span>Полный путь</span><textarea id="rule-intalev-target-path" rows="3" readonly></textarea></label></div></div>
+  <div class="mapping-columns"><div class="rule-form-section"><h3>ERP — исходное соответствие</h3><label><span>Выбор из фиксированного справочника ERP</span><select id="rule-erp-source-catalog" data-rule-catalog="ERP" data-rule-side="erp-source"></select></label><label><span>Блок ОПИУ ERP</span><input id="rule-erp-source-block" readonly></label><label><span>Код статьи ERP</span><input id="rule-erp-source-code" readonly></label><label><span>Статья ERP</span><input id="rule-erp-source-article" readonly></label><label><span>Полный путь ERP</span><textarea id="rule-erp-source-path" rows="2" readonly></textarea></label></div><div class="rule-form-section"><h3>ERP — целевое соответствие</h3><label><span>Выбор из фиксированного справочника ERP</span><select id="rule-erp-target-catalog" data-rule-catalog="ERP" data-rule-side="erp-target"></select></label><label><span>Блок ОПИУ ERP</span><input id="rule-erp-target-block" readonly></label><label><span>Код статьи ERP</span><input id="rule-erp-target-code" readonly></label><label><span>Статья ERP</span><input id="rule-erp-target-article" readonly></label><label><span>Полный путь ERP</span><textarea id="rule-erp-target-path" rows="2" readonly></textarea></label></div></div>
+  <div class="mapping-columns accounting-dual">
+    <div class="rule-form-section accounting-section"><h3>Счета Инталев</h3><div class="form-grid two-cols"><label><span>Счёт Дт Инталев</span><input id="rule-intalev-debit-account"></label><label><span>Счёт Кт Инталев</span><input id="rule-intalev-credit-account"></label><label class="full"><span>Источник счетов Инталев</span><input id="rule-intalev-account-status" placeholder="Не переданы: журнал Инталев не выбран"></label></div></div>
+    <div class="rule-form-section accounting-section"><h3>Счета и аналитики ERP</h3><div class="form-grid two-cols"><label><span>Счёт Дт ERP</span><select id="rule-erp-debit-account"><option value="">Выберите счёт ERP</option></select></label><label><span>Счёт Кт ERP</span><select id="rule-erp-credit-account"><option value="">Выберите счёт ERP</option></select></label><label><span>Аналитики Дт</span><textarea id="rule-debit-analytics" rows="2"></textarea></label><label><span>Аналитики Кт</span><textarea id="rule-credit-analytics" rows="2"></textarea></label><label><span>Подразделение / ЦФО</span><input id="rule-department"></label><label><span>Дополнительное условие</span><input id="rule-accounting-note"></label></div></div>
+  </div>
+  <input type="hidden" id="rule-debit-account"><input type="hidden" id="rule-credit-account"><input type="hidden" id="rule-erp-source-account"><input type="hidden" id="rule-erp-source-side"><input type="hidden" id="rule-erp-target-account"><input type="hidden" id="rule-erp-target-side">
+  <div class="rule-form-section"><h3>Условия и доказательства</h3><div class="form-grid two-cols"><label><span>Блок ОПИУ</span><input id="rule-opiu-block"></label><label><span>Кандидаты статей, через запятую</span><input id="rule-candidates"></label><label class="full"><span>Условие применения — без суммы</span><textarea id="rule-condition" rows="3"></textarea></label><label class="full"><span>Источники / строки, по одной на строку</span><textarea id="rule-source-rows" rows="3"></textarea></label></div></div>
+  <div class="rule-form-section"><div class="section-title-row compact"><div><h3>Применения правила</h3><p>Суммы и доказательства конкретных запусков — отдельная сущность.</p></div></div><div id="rule-applications" class="application-list"></div></div>
+  <div id="rule-form-message" class="inline-result" hidden></div>
+  <div class="modal-footer"><button type="button" class="button secondary" data-rule-cancel>Отмена</button><button class="button primary" type="submit" value="default">Сохранить правило</button></div>
+</form>
+</dialog>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

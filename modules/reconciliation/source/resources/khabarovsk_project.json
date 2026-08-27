@@ -1,0 +1,151 @@
+{
+  "organization_code": "AT",
+  "display_name": "Хабаровск",
+  "output_stem": "khabarovsk_error_audit",
+  "year": 2025,
+  "tolerance": 1.0,
+  "reconciliation_rules": "reconciliation_rules.json",
+  "input_subdir": "AT",
+  "output_subdir": "AT",
+  "rules_subdirs": [
+    "rules/erp_admin",
+    "rules/intalev_admin_AT"
+  ],
+  "required_rule_roles": [
+    "erp_source_registry",
+    "report_settings",
+    "report_structure"
+  ],
+  "article_reference": "article_account_reference.xlsx",
+  "audit_accounts": [
+    "26",
+    "44.1",
+    "44.2",
+    "44.3",
+    "91.1",
+    "91.2"
+  ],
+  "metadata_required_accounts": [
+    "26",
+    "44.1",
+    "44.2",
+    "44.3",
+    "91.1",
+    "91.2"
+  ],
+  "ignore_missing_metadata_accounts": [
+    "90.1",
+    "90.2"
+  ],
+  "technical_content_markers": [
+    "распределение остатков и оборотов",
+    "распределение остатков",
+    "закрытие месяца",
+    "закрытие счетов",
+    "регламентная операция",
+    "распределение расходов",
+    "списание затрат",
+    "финансовый результат",
+    "реформация баланса",
+    "корректировка себестоимости"
+  ],
+  "expected_blocks": {
+    "26": [
+      "Административные расходы"
+    ],
+    "44.1": [
+      "Коммерческие расходы"
+    ],
+    "44.2": [
+      "Расходы на складскую логистику"
+    ],
+    "44.3": [
+      "Расходы на транспортную логистику"
+    ]
+  },
+  "correction_policy": {
+    "account_block_map": {
+      "26": "Административные расходы",
+      "44.1": "Коммерческие расходы",
+      "44.2": "Складская логистика",
+      "44.3": "Транспортные расходы",
+      "90.1": "Выручка",
+      "90.2": "Себестоимость",
+      "91.1": "Прочие доходы",
+      "91.2": "Прочие расходы"
+    }
+  },
+  "translation_patterns": [
+    "ПроводкиАТ_2025.xlsx",
+    "Проводки*АТ*2025*.xlsx",
+    "XABAR*_TRANSL*.xlsx",
+    "TR_AT_*.xlsx",
+    "TR_*_2025.xlsx",
+    "*translation*.xlsx",
+    "*трансляц*.xlsx"
+  ],
+  "translation_required_headers": {
+    "debit_account": [
+      "Счет дт"
+    ],
+    "credit_account": [
+      "Счет кт"
+    ],
+    "period": [
+      "Период",
+      "Дата"
+    ],
+    "organization": [
+      "Трансляция.Организация",
+      "Организация"
+    ],
+    "amount": [
+      "Значение",
+      "Сумма в валюте учета"
+    ]
+  },
+  "minimum_translation_rows": 90000,
+  "required_months": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+  "expected_input_files": [
+    {
+      "role": "translation",
+      "filename": "XABAR_2025_TRANSL.xlsx",
+      "patterns": [
+        "ПроводкиАТ_2025.xlsx",
+        "Проводки*АТ*2025*.xlsx",
+        "TR_AT_*.xlsx",
+        "XABAR*_TRANSL*.xlsx"
+      ]
+    },
+    {
+      "role": "osv_intalev_26",
+      "filename": "Хабаровск  ОСВ 26 ИНТ.xlsx"
+    },
+    {
+      "role": "osv_intalev",
+      "filename": "Хабаровск  ОСВ Инталев.xlsx"
+    },
+    {
+      "role": "opiu_erp",
+      "filename": "ОПИУ_Хаб_ерп2025.xlsx",
+      "patterns": [
+        "ОПИУ*АТ*2025*.xlsx",
+        "ОПИУ*_АТ_*.xlsx",
+        "*ОПИУ*ерп*2025*.xlsx",
+        "*ОПИУ*ЕРП*.xlsx"
+      ]
+    },
+    {
+      "role": "opiu_intalev",
+      "filename": "Хабаровск ОПИУ ИНТ.xlsx"
+    },
+    {
+      "role": "osv_intalev_44",
+      "filename": "Хабаровск ОСВ 44 ИНТ.xlsx"
+    },
+    {
+      "role": "osv_erp",
+      "filename": "Хабаровск ОСВ ЕРП.xlsx"
+    }
+  ]
+}

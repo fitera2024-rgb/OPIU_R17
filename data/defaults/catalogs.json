@@ -1,0 +1,42 @@
+{
+  "schema_version": "opiu-catalog-registry.v2",
+  "updated_at": "2026-08-11T00:00:00Z",
+  "catalogs": [
+    {
+      "catalog_id": "ERP-SHARED-ORGANIZATIONS",
+      "catalog_type": "ORGANIZATIONS_CFO",
+      "system": "ERP",
+      "title": "Организации и иерархия ERP",
+      "status": "PINNED",
+      "scope": "GLOBAL",
+      "items_count": 357,
+      "source_file": "resources/reference/ОрганизациииерархияЕРП.xlsx",
+      "sha256": "3342603C0782FE12871AD55E7E19E778A97651E8CFF2E00F0CE6774295C57522",
+      "items": []
+    },
+    {
+      "catalog_id": "ERP-SHARED-CHART_OF_ACCOUNTS",
+      "catalog_type": "CHART_OF_ACCOUNTS",
+      "system": "ERP",
+      "title": "План счетов ERP",
+      "status": "PINNED",
+      "scope": "GLOBAL",
+      "items_count": 102,
+      "source_file": "resources/reference/ПланСчетов_ERP.mxl",
+      "sha256": "867E493B4458975D2EF798452F4AD5C249DB9DD378454E5332188D200755A1CD",
+      "items": []
+    },
+    {
+      "catalog_id": "ERP-SHARED-OPIU_ARTICLES",
+      "catalog_type": "OPIU_ARTICLES",
+      "system": "ERP",
+      "title": "Статьи доходов и расходов ERP",
+      "status": "PINNED",
+      "scope": "GLOBAL",
+      "items_count": 271,
+      "source_file": "modules/reconciliation/source/resources/СтатьиДоходовИРасходовЕРП.xlsx",
+      "sha256": "8C7CA0E3884BB78F610A95E01A935DEBF55871312D3193728B248E7C4A197BBF",
+      "items": []
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "status": "ACTIVE_DEVELOPMENT_TREE_DERIVED_FROM_VERIFIED_RC_BASELINE",
+  "development_source_baseline_commit": "fd41a903051b94b73f85cc27dbf32253e097c4e6",
+  "immutable_snapshot_path": "source_baselines/OPIU_1.9.4_RC",
+  "immutable_snapshot_status": "MATERIALIZED_FROM_VERIFIED_RC_ARTIFACT",
+  "artifact_name": "OPIU_Engines_1.9.4_RC.zip",
+  "artifact_sha256": "C0949793B4299BF866B8FF2985694CFE6B9F68D42F5C2706A47FD80CE345E936",
+  "source_inventory_rows": 76,
+  "module_source_counts": {
+    "corrections": 8,
+    "reconciliation": 52,
+    "rules-engine": 16
+  },
+  "future_r001_active_path": "development/OPIU_1.9.4/modules/corrections/source/**",
+  "r001_subset_source_rows": 8,
+  "hash_basis": "raw_worktree_sha256_and_unfiltered_git_blob",
+  "dec_r001_implemented": false,
+  "product_behavior_changed": false,
+  "mapping_formula_or_source_rule_changed": false,
+  "release_approved": false,
+  "live_1c_authorized": false
+}

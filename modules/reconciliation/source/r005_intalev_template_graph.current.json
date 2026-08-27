@@ -1,0 +1,1324 @@
+{
+  "schema": "opiu-r005-approved-intalev-template-graph-v1",
+  "graph_id": "R005-INTALEV-TEMPLATE-STRUCTURE-796DE3D261F8",
+  "version": "2026-08-17",
+  "approval": {
+    "status": "APPROVED_R005_PRESENTATION_ONLY",
+    "authority": "OWNER_TASK_CONTRACT",
+    "work_id": "OPIU-2026-08-17-R005-TREE-01",
+    "rules_authority": false,
+    "r001_authority": false,
+    "financial_authority": false
+  },
+  "source": {
+    "system": "INTALEV",
+    "kind": "REFERENCE_INTALEV_STRUCTURE",
+    "template_file": "ОПИУ_по_образцу_ШАБЛОН.xlsx",
+    "template_sha256": "796DE3D261F879ADDDA7C542595C58311C2895A27878D257E2D8EA214E5FE915",
+    "sheet": "02_Месяц",
+    "range": "B7:D71",
+    "structure_basis": "INTALEV_LABEL_INDENT",
+    "excel_outline_levels_present": false
+  },
+  "validation": {
+    "exact_code_set": true,
+    "source_derived": true,
+    "erp_used": false,
+    "node_count": 65
+  },
+  "nodes": [
+    {
+      "order": 1,
+      "code": "R001",
+      "label": "Административные расходы",
+      "source_row": 7,
+      "code_cell": "B7",
+      "label_cell": "D7",
+      "indent_units": 2,
+      "outline_level": 1,
+      "parent_code": "",
+      "path_codes": [
+        "R001"
+      ],
+      "path_labels": [
+        "Административные расходы"
+      ]
+    },
+    {
+      "order": 2,
+      "code": "R002",
+      "label": "Аренда и содержание офисных помещений",
+      "source_row": 8,
+      "code_cell": "B8",
+      "label_cell": "D8",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R001",
+      "path_codes": [
+        "R001",
+        "R002"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Аренда и содержание офисных помещений"
+      ]
+    },
+    {
+      "order": 3,
+      "code": "R003",
+      "label": "Аренда офиса внешняя",
+      "source_row": 9,
+      "code_cell": "B9",
+      "label_cell": "D9",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R002",
+      "path_codes": [
+        "R001",
+        "R002",
+        "R003"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Аренда и содержание офисных помещений",
+        "Аренда офиса внешняя"
+      ]
+    },
+    {
+      "order": 4,
+      "code": "R004",
+      "label": "Аренда офиса внутренняя",
+      "source_row": 10,
+      "code_cell": "B10",
+      "label_cell": "D10",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R002",
+      "path_codes": [
+        "R001",
+        "R002",
+        "R004"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Аренда и содержание офисных помещений",
+        "Аренда офиса внутренняя"
+      ]
+    },
+    {
+      "order": 5,
+      "code": "R005",
+      "label": "Коммунальные расходы",
+      "source_row": 11,
+      "code_cell": "B11",
+      "label_cell": "D11",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R002",
+      "path_codes": [
+        "R001",
+        "R002",
+        "R005"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Аренда и содержание офисных помещений",
+        "Коммунальные расходы"
+      ]
+    },
+    {
+      "order": 6,
+      "code": "R006",
+      "label": "Охрана",
+      "source_row": 12,
+      "code_cell": "B12",
+      "label_cell": "D12",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R002",
+      "path_codes": [
+        "R001",
+        "R002",
+        "R006"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Аренда и содержание офисных помещений",
+        "Охрана"
+      ]
+    },
+    {
+      "order": 7,
+      "code": "R007",
+      "label": "Текущий ремонт",
+      "source_row": 13,
+      "code_cell": "B13",
+      "label_cell": "D13",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R002",
+      "path_codes": [
+        "R001",
+        "R002",
+        "R007"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Аренда и содержание офисных помещений",
+        "Текущий ремонт"
+      ]
+    },
+    {
+      "order": 8,
+      "code": "R008",
+      "label": "Уборка и прочее содержание",
+      "source_row": 14,
+      "code_cell": "B14",
+      "label_cell": "D14",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R002",
+      "path_codes": [
+        "R001",
+        "R002",
+        "R008"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Аренда и содержание офисных помещений",
+        "Уборка и прочее содержание"
+      ]
+    },
+    {
+      "order": 9,
+      "code": "R009",
+      "label": "Электроэнергия",
+      "source_row": 15,
+      "code_cell": "B15",
+      "label_cell": "D15",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R002",
+      "path_codes": [
+        "R001",
+        "R002",
+        "R009"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Аренда и содержание офисных помещений",
+        "Электроэнергия"
+      ]
+    },
+    {
+      "order": 10,
+      "code": "R010",
+      "label": "Командировочные",
+      "source_row": 16,
+      "code_cell": "B16",
+      "label_cell": "D16",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R001",
+      "path_codes": [
+        "R001",
+        "R010"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Командировочные"
+      ]
+    },
+    {
+      "order": 11,
+      "code": "R011",
+      "label": "Налоги зарплатные",
+      "source_row": 17,
+      "code_cell": "B17",
+      "label_cell": "D17",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R001",
+      "path_codes": [
+        "R001",
+        "R011"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Налоги зарплатные"
+      ]
+    },
+    {
+      "order": 12,
+      "code": "R012",
+      "label": "Прочие административные расходы",
+      "source_row": 18,
+      "code_cell": "B18",
+      "label_cell": "D18",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R001",
+      "path_codes": [
+        "R001",
+        "R012"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Прочие административные расходы"
+      ]
+    },
+    {
+      "order": 13,
+      "code": "R013",
+      "label": "Канцелярские расходы",
+      "source_row": 19,
+      "code_cell": "B19",
+      "label_cell": "D19",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R012",
+      "path_codes": [
+        "R001",
+        "R012",
+        "R013"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Прочие административные расходы",
+        "Канцелярские расходы"
+      ]
+    },
+    {
+      "order": 14,
+      "code": "R014",
+      "label": "МБП прочие",
+      "source_row": 20,
+      "code_cell": "B20",
+      "label_cell": "D20",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R012",
+      "path_codes": [
+        "R001",
+        "R012",
+        "R014"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Прочие административные расходы",
+        "МБП прочие"
+      ]
+    },
+    {
+      "order": 15,
+      "code": "R015",
+      "label": "ПО рабочее для функций (ЭДО и т.д.)",
+      "source_row": 21,
+      "code_cell": "B21",
+      "label_cell": "D21",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R012",
+      "path_codes": [
+        "R001",
+        "R012",
+        "R015"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Прочие административные расходы",
+        "ПО рабочее для функций (ЭДО и т.д.)"
+      ]
+    },
+    {
+      "order": 16,
+      "code": "R016",
+      "label": "Почтовые расходы",
+      "source_row": 22,
+      "code_cell": "B22",
+      "label_cell": "D22",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R012",
+      "path_codes": [
+        "R001",
+        "R012",
+        "R016"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Прочие административные расходы",
+        "Почтовые расходы"
+      ]
+    },
+    {
+      "order": 17,
+      "code": "R017",
+      "label": "Прочие адм.расходы",
+      "source_row": 23,
+      "code_cell": "B23",
+      "label_cell": "D23",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R012",
+      "path_codes": [
+        "R001",
+        "R012",
+        "R017"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Прочие административные расходы",
+        "Прочие адм.расходы"
+      ]
+    },
+    {
+      "order": 18,
+      "code": "R018",
+      "label": "Юридические расходы",
+      "source_row": 24,
+      "code_cell": "B24",
+      "label_cell": "D24",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R012",
+      "path_codes": [
+        "R001",
+        "R012",
+        "R018"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Прочие административные расходы",
+        "Юридические расходы"
+      ]
+    },
+    {
+      "order": 19,
+      "code": "R019",
+      "label": "Расходы ИТ",
+      "source_row": 25,
+      "code_cell": "B25",
+      "label_cell": "D25",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R001",
+      "path_codes": [
+        "R001",
+        "R019"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Расходы ИТ"
+      ]
+    },
+    {
+      "order": 20,
+      "code": "R020",
+      "label": "Абонентское обслуживание ПО (1С, Windows и пр)",
+      "source_row": 26,
+      "code_cell": "B26",
+      "label_cell": "D26",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R019",
+      "path_codes": [
+        "R001",
+        "R019",
+        "R020"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Расходы ИТ",
+        "Абонентское обслуживание ПО (1С, Windows и пр)"
+      ]
+    },
+    {
+      "order": 21,
+      "code": "R021",
+      "label": "Обслуживание орг.техники",
+      "source_row": 27,
+      "code_cell": "B27",
+      "label_cell": "D27",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R019",
+      "path_codes": [
+        "R001",
+        "R019",
+        "R021"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Расходы ИТ",
+        "Обслуживание орг.техники"
+      ]
+    },
+    {
+      "order": 22,
+      "code": "R022",
+      "label": "Орг.техника и комплектующие",
+      "source_row": 28,
+      "code_cell": "B28",
+      "label_cell": "D28",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R019",
+      "path_codes": [
+        "R001",
+        "R019",
+        "R022"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Расходы ИТ",
+        "Орг.техника и комплектующие"
+      ]
+    },
+    {
+      "order": 23,
+      "code": "R023",
+      "label": "Расходы на персонал",
+      "source_row": 29,
+      "code_cell": "B29",
+      "label_cell": "D29",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R001",
+      "path_codes": [
+        "R001",
+        "R023"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Расходы на персонал"
+      ]
+    },
+    {
+      "order": 24,
+      "code": "R024",
+      "label": "Корпоративные мероприятия",
+      "source_row": 30,
+      "code_cell": "B30",
+      "label_cell": "D30",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R023",
+      "path_codes": [
+        "R001",
+        "R023",
+        "R024"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Расходы на персонал",
+        "Корпоративные мероприятия"
+      ]
+    },
+    {
+      "order": 25,
+      "code": "R025",
+      "label": "Мат помощь и прочие выплаты",
+      "source_row": 31,
+      "code_cell": "B31",
+      "label_cell": "D31",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R023",
+      "path_codes": [
+        "R001",
+        "R023",
+        "R025"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Расходы на персонал",
+        "Мат помощь и прочие выплаты"
+      ]
+    },
+    {
+      "order": 26,
+      "code": "R026",
+      "label": "Обучение сотрудников",
+      "source_row": 32,
+      "code_cell": "B32",
+      "label_cell": "D32",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R023",
+      "path_codes": [
+        "R001",
+        "R023",
+        "R026"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Расходы на персонал",
+        "Обучение сотрудников"
+      ]
+    },
+    {
+      "order": 27,
+      "code": "R027",
+      "label": "Подбор персонала",
+      "source_row": 33,
+      "code_cell": "B33",
+      "label_cell": "D33",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R023",
+      "path_codes": [
+        "R001",
+        "R023",
+        "R027"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Расходы на персонал",
+        "Подбор персонала"
+      ]
+    },
+    {
+      "order": 28,
+      "code": "R028",
+      "label": "Прочие расходы на персонал",
+      "source_row": 34,
+      "code_cell": "B34",
+      "label_cell": "D34",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R023",
+      "path_codes": [
+        "R001",
+        "R023",
+        "R028"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Расходы на персонал",
+        "Прочие расходы на персонал"
+      ]
+    },
+    {
+      "order": 29,
+      "code": "R029",
+      "label": "Связь",
+      "source_row": 35,
+      "code_cell": "B35",
+      "label_cell": "D35",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R001",
+      "path_codes": [
+        "R001",
+        "R029"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Связь"
+      ]
+    },
+    {
+      "order": 30,
+      "code": "R030",
+      "label": "Интернет",
+      "source_row": 36,
+      "code_cell": "B36",
+      "label_cell": "D36",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R029",
+      "path_codes": [
+        "R001",
+        "R029",
+        "R030"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Связь",
+        "Интернет"
+      ]
+    },
+    {
+      "order": 31,
+      "code": "R031",
+      "label": "Корпоративная связь",
+      "source_row": 37,
+      "code_cell": "B37",
+      "label_cell": "D37",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R029",
+      "path_codes": [
+        "R001",
+        "R029",
+        "R031"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Связь",
+        "Корпоративная связь"
+      ]
+    },
+    {
+      "order": 32,
+      "code": "R032",
+      "label": "Офисный телефон",
+      "source_row": 38,
+      "code_cell": "B38",
+      "label_cell": "D38",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R029",
+      "path_codes": [
+        "R001",
+        "R029",
+        "R032"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Связь",
+        "Офисный телефон"
+      ]
+    },
+    {
+      "order": 33,
+      "code": "R033",
+      "label": "ФЗП и компенсационные выплаты",
+      "source_row": 39,
+      "code_cell": "B39",
+      "label_cell": "D39",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R001",
+      "path_codes": [
+        "R001",
+        "R033"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "ФЗП и компенсационные выплаты"
+      ]
+    },
+    {
+      "order": 34,
+      "code": "R034",
+      "label": "Компенсации",
+      "source_row": 40,
+      "code_cell": "B40",
+      "label_cell": "D40",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R033",
+      "path_codes": [
+        "R001",
+        "R033",
+        "R034"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "ФЗП и компенсационные выплаты",
+        "Компенсации"
+      ]
+    },
+    {
+      "order": 35,
+      "code": "R035",
+      "label": "НДФЛ",
+      "source_row": 41,
+      "code_cell": "B41",
+      "label_cell": "D41",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R033",
+      "path_codes": [
+        "R001",
+        "R033",
+        "R035"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "ФЗП и компенсационные выплаты",
+        "НДФЛ"
+      ]
+    },
+    {
+      "order": 36,
+      "code": "R036",
+      "label": "ФЗП",
+      "source_row": 42,
+      "code_cell": "B42",
+      "label_cell": "D42",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R033",
+      "path_codes": [
+        "R001",
+        "R033",
+        "R036"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "ФЗП и компенсационные выплаты",
+        "ФЗП"
+      ]
+    },
+    {
+      "order": 37,
+      "code": "R037",
+      "label": "Финансовые расходы",
+      "source_row": 43,
+      "code_cell": "B43",
+      "label_cell": "D43",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R001",
+      "path_codes": [
+        "R001",
+        "R037"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Финансовые расходы"
+      ]
+    },
+    {
+      "order": 38,
+      "code": "R038",
+      "label": "Обслуживание р/сч",
+      "source_row": 44,
+      "code_cell": "B44",
+      "label_cell": "D44",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R037",
+      "path_codes": [
+        "R001",
+        "R037",
+        "R038"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Финансовые расходы",
+        "Обслуживание р/сч"
+      ]
+    },
+    {
+      "order": 39,
+      "code": "R039",
+      "label": "Хозяйственные расходы",
+      "source_row": 45,
+      "code_cell": "B45",
+      "label_cell": "D45",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R001",
+      "path_codes": [
+        "R001",
+        "R039"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Хозяйственные расходы"
+      ]
+    },
+    {
+      "order": 40,
+      "code": "R040",
+      "label": "Хоз нужды и прочие (вода, продукты и т.д.)",
+      "source_row": 46,
+      "code_cell": "B46",
+      "label_cell": "D46",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R039",
+      "path_codes": [
+        "R001",
+        "R039",
+        "R040"
+      ],
+      "path_labels": [
+        "Административные расходы",
+        "Хозяйственные расходы",
+        "Хоз нужды и прочие (вода, продукты и т.д.)"
+      ]
+    },
+    {
+      "order": 41,
+      "code": "R041",
+      "label": "EBITDA",
+      "source_row": 47,
+      "code_cell": "B47",
+      "label_cell": "D47",
+      "indent_units": 0,
+      "outline_level": 0,
+      "parent_code": "",
+      "path_codes": [
+        "R041"
+      ],
+      "path_labels": [
+        "EBITDA"
+      ]
+    },
+    {
+      "order": 42,
+      "code": "R042",
+      "label": "Амортизация",
+      "source_row": 48,
+      "code_cell": "B48",
+      "label_cell": "D48",
+      "indent_units": 0,
+      "outline_level": 0,
+      "parent_code": "",
+      "path_codes": [
+        "R042"
+      ],
+      "path_labels": [
+        "Амортизация"
+      ]
+    },
+    {
+      "order": 43,
+      "code": "R043",
+      "label": "Налоги с доходов текущего периода",
+      "source_row": 49,
+      "code_cell": "B49",
+      "label_cell": "D49",
+      "indent_units": 0,
+      "outline_level": 0,
+      "parent_code": "",
+      "path_codes": [
+        "R043"
+      ],
+      "path_labels": [
+        "Налоги с доходов текущего периода"
+      ]
+    },
+    {
+      "order": 44,
+      "code": "R044",
+      "label": "Операционная прибыль",
+      "source_row": 50,
+      "code_cell": "B50",
+      "label_cell": "D50",
+      "indent_units": 0,
+      "outline_level": 0,
+      "parent_code": "",
+      "path_codes": [
+        "R044"
+      ],
+      "path_labels": [
+        "Операционная прибыль"
+      ]
+    },
+    {
+      "order": 45,
+      "code": "R045",
+      "label": "Итоги по финансовой деятельности",
+      "source_row": 51,
+      "code_cell": "B51",
+      "label_cell": "D51",
+      "indent_units": 0,
+      "outline_level": 0,
+      "parent_code": "",
+      "path_codes": [
+        "R045"
+      ],
+      "path_labels": [
+        "Итоги по финансовой деятельности"
+      ]
+    },
+    {
+      "order": 46,
+      "code": "R046",
+      "label": "Доходы по финансовой деятельности",
+      "source_row": 52,
+      "code_cell": "B52",
+      "label_cell": "D52",
+      "indent_units": 2,
+      "outline_level": 1,
+      "parent_code": "R045",
+      "path_codes": [
+        "R045",
+        "R046"
+      ],
+      "path_labels": [
+        "Итоги по финансовой деятельности",
+        "Доходы по финансовой деятельности"
+      ]
+    },
+    {
+      "order": 47,
+      "code": "R047",
+      "label": "% по депозитам",
+      "source_row": 53,
+      "code_cell": "B53",
+      "label_cell": "D53",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R046",
+      "path_codes": [
+        "R045",
+        "R046",
+        "R047"
+      ],
+      "path_labels": [
+        "Итоги по финансовой деятельности",
+        "Доходы по финансовой деятельности",
+        "% по депозитам"
+      ]
+    },
+    {
+      "order": 48,
+      "code": "R048",
+      "label": "% по кредитам сотрудников",
+      "source_row": 54,
+      "code_cell": "B54",
+      "label_cell": "D54",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R046",
+      "path_codes": [
+        "R045",
+        "R046",
+        "R048"
+      ],
+      "path_labels": [
+        "Итоги по финансовой деятельности",
+        "Доходы по финансовой деятельности",
+        "% по кредитам сотрудников"
+      ]
+    },
+    {
+      "order": 49,
+      "code": "R049",
+      "label": "Расходы по финансовой деятельности",
+      "source_row": 55,
+      "code_cell": "B55",
+      "label_cell": "D55",
+      "indent_units": 2,
+      "outline_level": 1,
+      "parent_code": "R045",
+      "path_codes": [
+        "R045",
+        "R049"
+      ],
+      "path_labels": [
+        "Итоги по финансовой деятельности",
+        "Расходы по финансовой деятельности"
+      ]
+    },
+    {
+      "order": 50,
+      "code": "R050",
+      "label": "Административные расходы",
+      "source_row": 56,
+      "code_cell": "B56",
+      "label_cell": "D56",
+      "indent_units": 4,
+      "outline_level": 2,
+      "parent_code": "R049",
+      "path_codes": [
+        "R045",
+        "R049",
+        "R050"
+      ],
+      "path_labels": [
+        "Итоги по финансовой деятельности",
+        "Расходы по финансовой деятельности",
+        "Административные расходы"
+      ]
+    },
+    {
+      "order": 51,
+      "code": "R051",
+      "label": "Финансовые расходы",
+      "source_row": 57,
+      "code_cell": "B57",
+      "label_cell": "D57",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R050",
+      "path_codes": [
+        "R045",
+        "R049",
+        "R050",
+        "R051"
+      ],
+      "path_labels": [
+        "Итоги по финансовой деятельности",
+        "Расходы по финансовой деятельности",
+        "Административные расходы",
+        "Финансовые расходы"
+      ]
+    },
+    {
+      "order": 52,
+      "code": "R052",
+      "label": "Расходы по получению кредитов (госпошлины и пр.)",
+      "source_row": 58,
+      "code_cell": "B58",
+      "label_cell": "D58",
+      "indent_units": 8,
+      "outline_level": 4,
+      "parent_code": "R051",
+      "path_codes": [
+        "R045",
+        "R049",
+        "R050",
+        "R051",
+        "R052"
+      ],
+      "path_labels": [
+        "Итоги по финансовой деятельности",
+        "Расходы по финансовой деятельности",
+        "Административные расходы",
+        "Финансовые расходы",
+        "Расходы по получению кредитов (госпошлины и пр.)"
+      ]
+    },
+    {
+      "order": 53,
+      "code": "R053",
+      "label": "Расходы по финансовой деятельности",
+      "source_row": 59,
+      "code_cell": "B59",
+      "label_cell": "D59",
+      "indent_units": 4,
+      "outline_level": 2,
+      "parent_code": "R049",
+      "path_codes": [
+        "R045",
+        "R049",
+        "R053"
+      ],
+      "path_labels": [
+        "Итоги по финансовой деятельности",
+        "Расходы по финансовой деятельности",
+        "Расходы по финансовой деятельности"
+      ]
+    },
+    {
+      "order": 54,
+      "code": "R054",
+      "label": "Обслуживание кредитного портфеля",
+      "source_row": 60,
+      "code_cell": "B60",
+      "label_cell": "D60",
+      "indent_units": 6,
+      "outline_level": 3,
+      "parent_code": "R053",
+      "path_codes": [
+        "R045",
+        "R049",
+        "R053",
+        "R054"
+      ],
+      "path_labels": [
+        "Итоги по финансовой деятельности",
+        "Расходы по финансовой деятельности",
+        "Расходы по финансовой деятельности",
+        "Обслуживание кредитного портфеля"
+      ]
+    },
+    {
+      "order": 55,
+      "code": "R055",
+      "label": "Итоги по внереализационной деятельности",
+      "source_row": 61,
+      "code_cell": "B61",
+      "label_cell": "D61",
+      "indent_units": 0,
+      "outline_level": 0,
+      "parent_code": "",
+      "path_codes": [
+        "R055"
+      ],
+      "path_labels": [
+        "Итоги по внереализационной деятельности"
+      ]
+    },
+    {
+      "order": 56,
+      "code": "R056",
+      "label": "Внутрихолдинговые проценты",
+      "source_row": 62,
+      "code_cell": "B62",
+      "label_cell": "D62",
+      "indent_units": 2,
+      "outline_level": 1,
+      "parent_code": "R055",
+      "path_codes": [
+        "R055",
+        "R056"
+      ],
+      "path_labels": [
+        "Итоги по внереализационной деятельности",
+        "Внутрихолдинговые проценты"
+      ]
+    },
+    {
+      "order": 57,
+      "code": "R057",
+      "label": "Прочие внереализационные доходы",
+      "source_row": 63,
+      "code_cell": "B63",
+      "label_cell": "D63",
+      "indent_units": 2,
+      "outline_level": 1,
+      "parent_code": "R055",
+      "path_codes": [
+        "R055",
+        "R057"
+      ],
+      "path_labels": [
+        "Итоги по внереализационной деятельности",
+        "Прочие внереализационные доходы"
+      ]
+    },
+    {
+      "order": 58,
+      "code": "R058",
+      "label": "Прочие внереализационные расходы",
+      "source_row": 64,
+      "code_cell": "B64",
+      "label_cell": "D64",
+      "indent_units": 2,
+      "outline_level": 1,
+      "parent_code": "R055",
+      "path_codes": [
+        "R055",
+        "R058"
+      ],
+      "path_labels": [
+        "Итоги по внереализационной деятельности",
+        "Прочие внереализационные расходы"
+      ]
+    },
+    {
+      "order": 59,
+      "code": "R059",
+      "label": "Убытки прошлых периодов",
+      "source_row": 65,
+      "code_cell": "B65",
+      "label_cell": "D65",
+      "indent_units": 2,
+      "outline_level": 1,
+      "parent_code": "R055",
+      "path_codes": [
+        "R055",
+        "R059"
+      ],
+      "path_labels": [
+        "Итоги по внереализационной деятельности",
+        "Убытки прошлых периодов"
+      ]
+    },
+    {
+      "order": 60,
+      "code": "R060",
+      "label": "Чистая прибыль",
+      "source_row": 66,
+      "code_cell": "B66",
+      "label_cell": "D66",
+      "indent_units": 0,
+      "outline_level": 0,
+      "parent_code": "",
+      "path_codes": [
+        "R060"
+      ],
+      "path_labels": [
+        "Чистая прибыль"
+      ]
+    },
+    {
+      "order": 61,
+      "code": "R061",
+      "label": "Внутрихолдинговые дивиденды",
+      "source_row": 67,
+      "code_cell": "B67",
+      "label_cell": "D67",
+      "indent_units": 0,
+      "outline_level": 0,
+      "parent_code": "",
+      "path_codes": [
+        "R061"
+      ],
+      "path_labels": [
+        "Внутрихолдинговые дивиденды"
+      ]
+    },
+    {
+      "order": 62,
+      "code": "R062",
+      "label": "Дивиденды начисленные",
+      "source_row": 68,
+      "code_cell": "B68",
+      "label_cell": "D68",
+      "indent_units": 0,
+      "outline_level": 0,
+      "parent_code": "",
+      "path_codes": [
+        "R062"
+      ],
+      "path_labels": [
+        "Дивиденды начисленные"
+      ]
+    },
+    {
+      "order": 63,
+      "code": "R063",
+      "label": "Дивиденды учредителям",
+      "source_row": 69,
+      "code_cell": "B69",
+      "label_cell": "D69",
+      "indent_units": 2,
+      "outline_level": 1,
+      "parent_code": "R062",
+      "path_codes": [
+        "R062",
+        "R063"
+      ],
+      "path_labels": [
+        "Дивиденды начисленные",
+        "Дивиденды учредителям"
+      ]
+    },
+    {
+      "order": 64,
+      "code": "R064",
+      "label": "НДФЛ с дивидендов",
+      "source_row": 70,
+      "code_cell": "B70",
+      "label_cell": "D70",
+      "indent_units": 2,
+      "outline_level": 1,
+      "parent_code": "R062",
+      "path_codes": [
+        "R062",
+        "R064"
+      ],
+      "path_labels": [
+        "Дивиденды начисленные",
+        "НДФЛ с дивидендов"
+      ]
+    },
+    {
+      "order": 65,
+      "code": "R065",
+      "label": "Нераспределенная прибыль (9 Управляющая)",
+      "source_row": 71,
+      "code_cell": "B71",
+      "label_cell": "D71",
+      "indent_units": 0,
+      "outline_level": 0,
+      "parent_code": "",
+      "path_codes": [
+        "R065"
+      ],
+      "path_labels": [
+        "Нераспределенная прибыль (9 Управляющая)"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "schema": "opiu-empty-article-binding-settings.v1",
+  "settings_id": "OWNER-UK9-2025-EMPTY-ARTICLE-FZP-001",
+  "organization_scope": {
+    "organization_id": "ERP-000000224",
+    "organization_name": "9 Управляющая компания",
+    "organization_hierarchy_path": [
+      "9 Управляющая компания"
+    ]
+  },
+  "authority": {
+    "type": "OWNER_APPROVED",
+    "scope": "CLASSIFICATION_BINDING_ONLY",
+    "approval_id": "OWNER-20260825-UK9-EMPTY-ARTICLE-FZP-001",
+    "approved_by": "Владелец продукта",
+    "approved_at": "2026-08-25T09:30:00.000Z",
+    "evidence_ref": "CR-R005-20260825-ORG-EMPTY-ARTICLE-BINDING-ONLY-001"
+  },
+  "safety": {
+    "mode": "REPORT_ONLY",
+    "classification_only": true,
+    "decision_type": "NO_POSTING",
+    "correction_authority": false,
+    "physical_posting_authority": false,
+    "financial_rows": 0,
+    "posting_rows": 0,
+    "ready_to_upload": false,
+    "release_allowed": false,
+    "execution_allowed": false,
+    "live_1c_allowed": false,
+    "report_only": true,
+    "executed_posting_rows": 0,
+    "live_posting_rows": 0,
+    "live_delete_allowed": false
+  },
+  "bindings": [
+    {
+      "binding_id": "OWNER-UK9-2025-R033-EMPTY-TO-R036-FZP-001",
+      "validity": {
+        "from": "2025-01",
+        "to": "2025-12"
+      },
+      "source": {
+        "parent_path": [
+          "Расходы по основной деятельности ИТОГО",
+          "_Статьи ОПиУ 2025",
+          "1_Административные расходы",
+          "ФЗП и компенсационные выплаты",
+          "<пустое значение>"
+        ],
+        "leaf_labels": [
+          "Заработная плата",
+          "Отпускные",
+          "Премия",
+          "Больничный лист"
+        ],
+        "blank_ancestor_required": true
+      },
+      "target": {
+        "target_code": "R036",
+        "target_node_identity": "ERP-000000224|R036|АДМИНИСТРАТИВНЫЕ РАСХОДЫ|ФЗП",
+        "display_path": [
+          "Административные расходы",
+          "ФЗП и компенсационные выплаты",
+          "ФЗП"
+        ],
+        "display_article": "ФЗП"
+      },
+      "mode": "CLASSIFICATION_ONLY",
+      "decision_type": "NO_POSTING",
+      "authority_ref": "OWNER-20260825-UK9-EMPTY-ARTICLE-FZP-001"
+    }
+  ]
+}

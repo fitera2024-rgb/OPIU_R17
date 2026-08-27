@@ -1,0 +1,47 @@
+{
+  "schema": "opiu-economic-route-proofs.v1",
+  "run_id": "OWNER-CONTRACT-20260824-UK9-2025-10",
+  "organization": "9 Управляющая компания",
+  "period": "2025-10",
+  "authority": {
+    "type": "OWNER_APPROVED",
+    "approval_id": "CONTRACT-OWNER-20260824-ORDERED-RECLASS-PHYSICAL-PROOF",
+    "approved_by": "OWNER",
+    "approved_at": "2026-08-24",
+    "evidence_ref": "governance/changes/CR-OWNER-20260824-ORDERED-RECLASS-PHYSICAL-PROOF-CONTRACT.md#8"
+  },
+  "routes": [
+    {
+      "route_id": "OWNER-UK9-2025-10-R033-R023",
+      "organization": "9 Управляющая компания",
+      "period": "2025-10",
+      "proof_status": "ECONOMIC_RECLASS_PROVEN",
+      "authority_ref": "CONTRACT-OWNER-20260824-ORDERED-RECLASS-PHYSICAL-PROOF",
+      "source_codes": [
+        "R033"
+      ],
+      "target_codes": [
+        "R023"
+      ],
+      "amount": 244745
+    }
+  ],
+  "intragroup_confirmations": [
+    {
+      "confirmation_id": "OWNER-UK9-2025-10-R033-INTRAGROUP",
+      "organization": "9 Управляющая компания",
+      "period": "2025-10",
+      "authority_ref": "CONTRACT-OWNER-20260824-ORDERED-RECLASS-PHYSICAL-PROOF",
+      "intergroup_route_id": "OWNER-UK9-2025-10-R033-R023",
+      "root_code": "R033",
+      "descendant_codes": [
+        "R034",
+        "R036",
+        "R035"
+      ],
+      "economic_status": "OWNER_CONFIRMED_ECONOMIC_INTRA_RECLASS",
+      "exact_allocation_status": "BLOCKED_EXACT_ALLOCATION",
+      "physical_erp_status": "BLOCKED_PHYSICAL_ERP_PROOF"
+    }
+  ]
+}

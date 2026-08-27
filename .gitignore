@@ -1,0 +1,37 @@
+# Runtime and generated results
+results/
+work/
+modules/reconciliation/source/work/
+build/
+dist/
+tmp/
+_baseline.tar
+
+# Release artifacts are generated, not source-controlled
+release/*
+!release/README.md
+*.zip
+*.7z
+
+# Local runtime state
+data/*
+!data/defaults/
+!data/defaults/**
+*.db
+*.sqlite
+
+# Dependencies and caches
+node_modules/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+
+# Logs and editor files
+*.log
+*.tmp
+*.bak
+~$*
+.DS_Store
+Thumbs.db
+

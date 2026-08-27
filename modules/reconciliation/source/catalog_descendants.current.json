@@ -1,0 +1,15 @@
+{
+  "schema": "opiu-d04-catalog-descendants-manifest-v1",
+  "reference_catalog": "StatD_R.xlsx",
+  "reference_catalog_sha256": "95CE3A53F1FAC502B29CCCB30BF329A9EFBB6A1D034F0820FDF735BE76D39124",
+  "runtime_catalog": "СтатьиДоходовИРасходовЕРП.xlsx",
+  "runtime_catalog_sha256": "8C7CA0E3884BB78F610A95E01A935DEBF55871312D3193728B248E7C4A197BBF",
+  "root_path": "Административные расходы",
+  "required_account": "Счет затрат 26",
+  "target_parent_codes": ["R002", "R011", "R012", "R019", "R023", "R029", "R037", "R039"],
+  "expected_leaf_count": 34,
+  "expected_graph_sha256": "4939CD26668F989CFA0133E4666FFFF6A981ABBE5950E569E334C0F1BF06BD63",
+  "posting_rows": 0,
+  "ready_to_upload": false,
+  "release_allowed": false
+}

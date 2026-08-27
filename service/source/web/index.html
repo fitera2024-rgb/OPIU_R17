@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OPIU_STABLE — сверка ERP и Инталев</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-block">
+      <img class="brand-logo" src="/fitera-logo.png" alt="ФИТЭРА">
+      <div>
+        <p class="eyebrow">ООО «ФИТЭРА» · OPIU_STABLE 1.9.4</p>
+        <h1>Сверка ERP и Инталев</h1>
+        <p class="subtitle">Практический взгляд на процессы, учёт и автоматизацию</p>
+      </div>
+    </div>
+    <div class="safety" aria-label="Режим безопасности">
+      <strong>REPORT_ONLY</strong>
+      <span>Запись в 1С отключена</span>
+      <button type="button" class="link-button" data-view="structural-groups" id="openStructuralGroups">Группы блоков</button>
+      <button type="button" class="link-button" data-view="empty-article-bindings" id="openEmptyArticleBindings">Привязки пустых статей</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="notice" id="serviceNotice" role="status">Загружаем состояние сервиса…</section>
+
+    <section class="card">
+      <div class="section-heading">
+        <div><span class="step">1</span><h2>Исходные файлы</h2></div>
+        <button type="button" class="secondary" id="reselectButton">Перевыбрать пакеты ERP и Инталев</button>
+      </div>
+      <div class="source-grid">
+        <label class="upload-box">
+          <span class="upload-title">ERP</span>
+          <span class="upload-help">ОСВ или ZIP-пакет</span>
+          <input id="erpFile" type="file" accept=".xlsx,.xls,.zip">
+          <span class="selected" id="erpSelected">Файл не выбран</span>
+        </label>
+        <label class="upload-box">
+          <span class="upload-title">Инталев</span>
+          <span class="upload-help">ОПИУ или ZIP-пакет</span>
+          <input id="intalevFile" type="file" accept=".xlsx,.xls,.zip">
+          <span class="selected" id="intalevSelected">Файл не выбран</span>
+        </label>
+      </div>
+      <button type="button" class="primary" id="uploadButton">Загрузить файлы</button>
+      <p class="muted" id="uploadStatus"></p>
+    </section>
+
+    <section class="card">
+      <div class="section-heading"><div><span class="step">2</span><h2>Область сверки</h2></div></div>
+      <div class="form-grid">
+        <label>Организация
+          <select id="organization"><option value="">Загружаем иерархию организаций…</option></select>
+        </label>
+        <label>ЦФО
+          <input id="cfo" type="text" maxlength="200" placeholder="Необязательно">
+        </label>
+        <label>Период
+          <input id="period" type="month">
+        </label>
+      </div>
+      <p class="muted" id="organizationStatus"></p>
+      <button type="button" class="primary" id="contextButton">Создать контекст</button>
+      <p class="muted" id="contextStatus"></p>
+    </section>
+
+    <section class="card accent-card">
+      <div class="section-heading">
+        <div><span class="step">3</span><h2>Сверка</h2></div>
+        <span class="pill" id="adapterState">Проверка движков</span>
+      </div>
+      <p>Сервис проверит источники, выполнит сверку и подготовит безопасный отчётный результат. Проводки, загрузка и изменения в 1С не выполняются.</p>
+      <label>Активный контекст
+        <select id="contextSelect"><option value="">Контекст пока не создан</option></select>
+      </label>
+      <button type="button" class="primary large" id="runButton">Запустить сверку</button>
+      <p class="muted" id="runStatus"></p>
+    </section>
+
+    <section id="view-structural-groups" data-view="structural-groups" class="card structural-card">
+      <div class="section-heading structural-heading">
+        <div><span class="step">4</span><div><h2>Группы блоков Инталев и ERP</h2><p class="muted compact">Настройка для выбранной организации и точного запуска сверки.</p></div></div>
+        <span class="pill" id="structural-inventory-status">Инвентарь не выбран</span>
+      </div>
+      <div class="form-grid structural-scope-grid">
+        <label>Организация
+          <select id="structural-organization" aria-readonly="true"><option value="">Определяется по запуску</option></select>
+        </label>
+        <label>Запуск сверки
+          <select id="structural-run"><option value="">Выберите запуск</option></select>
+        </label>
+        <label>Название группы
+          <input id="structural-set-name" type="text" maxlength="200" placeholder="Например, финансовые и внереализационные">
+        </label>
+      </div>
+      <div class="structural-toolbar">
+        <button type="button" class="secondary" id="structural-new-set">Новая группа</button>
+        <span class="muted">Можно добавить несколько групп соответствий для одной организации.</span>
+      </div>
+      <div class="structural-selector-grid">
+        <fieldset class="structural-inventory">
+          <legend>Блоки Инталев</legend>
+          <div id="structural-intalev-inventory" class="structural-member-list empty">Нет проверенного инвентаря</div>
+        </fieldset>
+        <fieldset class="structural-inventory">
+          <legend>Блоки ERP</legend>
+          <div id="structural-erp-inventory" class="structural-member-list empty">Нет проверенного инвентаря</div>
+        </fieldset>
+      </div>
+      <div class="structural-preview" aria-live="polite">
+        <div><span>Итого Инталев</span><strong id="structural-intalev-total">—</strong></div>
+        <div><span>Итого ERP</span><strong id="structural-erp-total">—</strong></div>
+        <div><span>Дельта контроля</span><strong id="structural-control-delta">—</strong></div>
+      </div>
+      <p id="structural-preview-message" class="notice structural-message" role="status" aria-live="polite">Выберите блоки с обеих сторон для серверной проверки.</p>
+      <label id="structural-control-declaration-wrap" class="structural-declaration" hidden>
+        <input id="structural-control-declaration" type="checkbox" aria-describedby="structural-control-declaration-help">
+        <span><strong>Объявляю выбранные строки контрольными блоками для этой сверки.</strong><small id="structural-control-declaration-help">Кандидаты не признаны бизнес-блоками автоматически. Выбор действует только как контроль структуры, не создаёт проводок и не даёт права на корректировку.</small></span>
+      </label>
+      <div class="structural-actions">
+        <button type="button" class="secondary" id="structural-save-draft">Сохранить черновик</button>
+        <button type="button" class="primary" id="structural-fix-version" disabled>Зафиксировать версию</button>
+        <button type="button" class="secondary" id="structural-edit-version" disabled>Изменить новой версией</button>
+        <button type="button" class="danger-link structural-disable" id="structural-disable-set" disabled>Отключить</button>
+      </div>
+      <label class="structural-disable-reason">Причина отключения
+        <input id="structural-disable-reason" type="text" maxlength="500" placeholder="Например, изменилась иерархия блоков">
+      </label>
+      <h3 class="structural-list-title">Настроенные группы</h3>
+      <div id="structural-control-set-list" class="list empty">Групп пока нет</div>
+      <p class="muted structural-safety-note">Настройка не создаёт проводки, не заполняет неизвестные физические поля и не разрешает загрузку в 1С. Нулевая сумма закрывает только структурный эффект: дочерние записи всё равно остаются на полной проверке.</p>
+    </section>
+
+    <section id="view-empty-article-bindings" data-view="empty-article-bindings" class="card empty-binding-card">
+      <div class="section-heading empty-binding-heading">
+        <div><span class="step">5</span><div><h2>Привязки пустых статей Инталев</h2><p class="muted compact">Настройки действуют только для выбранной организации верхнего уровня и заданного периода.</p></div></div>
+        <span class="pill good" id="empty-binding-safety-status">UPDATE_MAPPING / БЕЗ ПРОВОДКИ</span>
+      </div>
+      <div class="form-grid empty-binding-scope-grid">
+        <label>Организация верхнего уровня
+          <select id="empty-binding-organization"><option value="">Загружаем организации…</option></select>
+        </label>
+        <label>Справочник из сверки
+          <select id="empty-binding-run"><option value="">Выберите проверенный запуск</option></select>
+        </label>
+        <label>Название соответствия
+          <input id="empty-binding-name" type="text" maxlength="200" placeholder="Например, пустые строки → выбранная статья ERP">
+        </label>
+      </div>
+      <div class="form-grid empty-binding-validity-grid">
+        <label>Действует с
+          <input id="empty-binding-valid-from" type="month">
+        </label>
+        <label>Действует по
+          <input id="empty-binding-valid-through" type="month">
+        </label>
+      </div>
+      <p class="muted" id="empty-binding-catalog-status">Выберите организацию и проверенный запуск для точного справочника.</p>
+      <div class="empty-binding-selector-grid">
+        <label>Родитель Инталев
+          <select id="empty-binding-source-parent" disabled><option value="">Выберите точного родителя из справочника</option></select>
+          <small>Свободный ввод запрещён: сохраняются точный код, статья и путь в бизнес-иерархии.</small>
+        </label>
+        <label>Целевая статья ERP
+          <select id="empty-binding-erp-target" disabled><option value="">Выберите точную статью из справочника</option></select>
+          <small>Сервис блокирует неоднозначный справочник и не подбирает цель автоматически.</small>
+        </label>
+      </div>
+      <fieldset class="empty-binding-labels">
+        <legend>Пустые дочерние строки Инталев из результата R005</legend>
+        <p class="muted compact">Отметьте одну или несколько фактически найденных строк выбранного родителя. Свободный ввод и автоматическая подстановка запрещены.</p>
+        <div id="empty-binding-label-list" class="empty-binding-label-list empty">Сначала выберите точного родителя Инталев из результата R005.</div>
+      </fieldset>
+      <p id="empty-binding-message" class="notice empty-binding-message" role="status" aria-live="polite">Настройка меняет только классификацию отчёта. Проводка не создаётся.</p>
+      <div class="empty-binding-actions">
+        <button type="button" class="secondary" id="empty-binding-new">Новое соответствие</button>
+        <button type="button" class="secondary" id="empty-binding-save-draft">Сохранить черновик</button>
+        <button type="button" class="primary" id="empty-binding-fix" disabled>Зафиксировать</button>
+        <button type="button" class="secondary" id="empty-binding-edit" disabled>Изменить новой версией</button>
+        <button type="button" class="danger-link empty-binding-disable" id="empty-binding-disable" disabled>Отключить</button>
+      </div>
+      <label class="empty-binding-disable-reason">Причина отключения
+        <input id="empty-binding-disable-reason" type="text" maxlength="500" placeholder="Например, изменилась структура статей ERP">
+      </label>
+      <h3 class="empty-binding-list-title">Настроенные соответствия</h3>
+      <div id="empty-binding-list" class="list empty">Соответствий пока нет</div>
+      <p class="muted empty-binding-safety-note"><strong>UPDATE_MAPPING / БЕЗ ПРОВОДКИ.</strong> Привязка только переносит известную пустую строку Инталев в выбранную статью ERP для сверки. Она не доказывает физический источник, не создаёт STORNO/REPOST и не разрешает загрузку в 1С.</p>
+    </section>
+
+    <section class="card diagnostics-card">
+      <div class="section-heading">
+        <div>
+          <span class="journal-icon">!</span>
+          <div><h2>Журнал ошибок и действий</h2><p class="muted compact">Браузерный журнал доступен всегда. Журнал сервиса сохраняется на диске и остаётся после падения процесса.</p></div>
+        </div>
+        <div class="diagnostics-actions">
+          <button type="button" class="primary diagnostics-download" id="downloadLatestDiagnostics">Выгрузить ошибки</button>
+          <button type="button" class="secondary diagnostics-download" id="downloadActionJournal">Выгрузить журнал действий</button>
+          <button type="button" class="secondary diagnostics-download" id="downloadServiceJournal">Журнал сервиса</button>
+          <button type="button" class="secondary diagnostics-download" id="downloadCrashJournal">Журнал падений</button>
+        </div>
+      </div>
+      <div id="diagnosticsList" class="list empty">Ошибок пока нет</div>
+      <p class="muted" id="diagnosticsStatus"></p>
+    </section>
+
+    <section class="two-columns">
+      <article class="card">
+        <div class="section-heading"><h2>Контексты</h2><button type="button" class="link-button" id="refreshContexts">Обновить</button></div>
+        <div id="contextsList" class="list empty">Контекстов пока нет</div>
+      </article>
+      <article class="card">
+        <div class="section-heading"><h2>Запуски и результаты</h2><button type="button" class="link-button" id="refreshRuns">Обновить</button></div>
+        <div id="runsList" class="list empty">Запусков пока нет</div>
+      </article>
+    </section>
+  </main>
+
+  <footer>
+    <span>ООО «ФИТЭРА»</span>
+    <span>REPORT_ONLY</span>
+    <span>posting_rows = 0</span>
+    <span>live 1C = запрещено</span>
+  </footer>
+  <script src="/app.js" defer></script>
+  <script src="/results-ui.js" defer></script>
+  <script src="/diagnostics-ui.js" defer></script>
+  <script src="/service-journal-ui.js" defer></script>
+  <script src="/structural-control-ui.js" defer></script>
+  <script src="/empty-article-binding-ui.js" defer></script>
+</body>
+</html>

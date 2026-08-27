@@ -1,0 +1,113 @@
+{
+  "schema": "opiu-reference-catalog-manifest-v1",
+  "version": "1.9.4-relative",
+  "status": "BLOCKED_INTALEV_CATALOG_NOT_EXPORTED",
+  "required_roles": [
+    "erp_structure",
+    "erp_formula",
+    "erp_source",
+    "erp_uid",
+    "intalev_structure",
+    "intalev_formula",
+    "intalev_source",
+    "intalev_uid"
+  ],
+  "catalogs": [
+    {
+      "id": "erp-structure-20260711",
+      "role": "erp_structure",
+      "path": "external_reference/erp/ОПИУ_Структура_ерп.xlsx",
+      "version": "2026-07-11T08:03:53.9281407Z",
+      "status": "CURRENT",
+      "sha256": "707BD796E4774A3DCE2995D423C7D3665A406FFE4ACBCB7BA468D8AF0167ADD5",
+      "usage": [
+        "calculation",
+        "validation"
+      ]
+    },
+    {
+      "id": "erp-formula-20260711",
+      "role": "erp_formula",
+      "path": "external_reference/erp/ОПИУ_ФОРМУЛЫ_ерп.xlsx",
+      "version": "2026-07-11T08:03:08.1150035Z",
+      "status": "CURRENT",
+      "sha256": "EE729E13305DAFC34EA3AE45EF7EF6C6817301E4F64F7461AD3FFB93509DAE49",
+      "usage": [
+        "calculation",
+        "validation"
+      ]
+    },
+    {
+      "id": "erp-source-20260711",
+      "role": "erp_source",
+      "path": "external_reference/erp/ИстчникиОтчетовЕРП.xlsx",
+      "version": "2026-07-11T07:59:45.9793545Z",
+      "status": "CURRENT",
+      "sha256": "CCBDA86E5770E094EBA869FC1FB4A506856376D9BBC76FF76D9D94B0D69A1CE2",
+      "usage": [
+        "calculation",
+        "validation"
+      ]
+    },
+    {
+      "id": "erp-uid-20260708",
+      "role": "erp_uid",
+      "path": "external_reference/erp/StatD_R.xlsx",
+      "version": "2026-07-08T06:33:13.0034757Z",
+      "status": "CURRENT",
+      "sha256": "95CE3A53F1FAC502B29CCCB30BF329A9EFBB6A1D034F0820FDF735BE76D39124",
+      "usage": [
+        "calculation",
+        "validation"
+      ]
+    },
+    {
+      "id": "intalev-structure-20260702",
+      "role": "intalev_structure",
+      "path": "external_reference/intalev/ОтчетПоСтруктуреОтчетов2.mxl",
+      "version": "2026-07-02T03:58:22.9239683Z",
+      "status": "CURRENT",
+      "sha256": "E2A4BD322D80D07F8C8E4EAB4629149EB3697F6FF47717DE2B79B328B594C96B",
+      "usage": [
+        "calculation",
+        "validation"
+      ]
+    },
+    {
+      "id": "intalev-formula-20260702",
+      "role": "intalev_formula",
+      "path": "external_reference/intalev/Z_J_X.mxl",
+      "version": "2026-07-02T06:39:54.4327939Z",
+      "status": "CURRENT",
+      "sha256": "BE230E807B208ABB68B99E61D3AF161EB345420DBE95768BB480E94589E98329",
+      "usage": [
+        "calculation",
+        "validation"
+      ]
+    },
+    {
+      "id": "intalev-source-20260702",
+      "role": "intalev_source",
+      "path": "external_reference/intalev/отчетПоФильтрам2.mxl",
+      "version": "2026-07-02T04:21:01.2680346Z",
+      "status": "CURRENT",
+      "sha256": "F187AD4FA40149B6E8872EFF96C5998183C8702CAB9E9322ECF75CE15BF2FDDD",
+      "usage": [
+        "calculation",
+        "validation"
+      ]
+    },
+    {
+      "id": "intalev-uid-not-exported",
+      "role": "intalev_uid",
+      "path": "external_reference/intalev/01_Показатели.csv",
+      "version": "not-exported",
+      "status": "MISSING",
+      "sha256": null,
+      "usage": [
+        "calculation",
+        "validation"
+      ]
+    }
+  ]
+}

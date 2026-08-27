@@ -1,0 +1,264 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestStructuralControlManifestAndR005ProofAreOneImmutableChain(t *testing.T) {
+	context := newStructuralSourceTestContext(t)
+	draft := structuralSourceCreateDraft(t, context, "Финансовые расходы", []string{"I-R045"}, []string{"E-R045"}, 0)
+	status, _, raw := structuralSourceFixDraft(t, context, draft)
+	if status != 201 {
+		t.Fatalf("fix failed: %d %s", status, raw)
+	}
+	run, _ := context.store.Run(context.runID)
+	contextValue, _ := context.store.Context(context.contextID)
+	runDir := filepath.Join(context.store.RunsDir(), run.ID)
+	writeStructuralControlInitialRunManifest(t, runDir, run, contextValue)
+
+	pipeline := &Pipeline{store: context.store}
+	_, audit, err := pipeline.materializeActiveStructuralControlSettings(run, contextValue, runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bindStructuralControlRunManifest(run, contextValue, runDir, audit); err != nil {
+		t.Fatal(err)
+	}
+	var manifest internalRunManifest
+	if err := readStrictJSONFile(filepath.Join(runDir, "run_manifest.json"), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.StructuralControl == nil || manifest.StructuralControl.RunID != run.ID ||
+		manifest.StructuralControl.ContextID != contextValue.ID ||
+		manifest.StructuralControl.OrganizationID != contextValue.OrganizationID ||
+		manifest.StructuralControl.Settings.SHA256 != audit.SettingsSHA256 ||
+		manifest.StructuralControl.Registry.SHA256 != audit.RegistrySHA256 ||
+		len(manifest.StructuralControl.AppliedVersions) != 1 {
+		t.Fatalf("run manifest lost exact structural-control provenance: %#v", manifest.StructuralControl)
+	}
+	if err := bindStructuralControlRunManifest(run, contextValue, runDir, audit); err == nil {
+		t.Fatal("immutable run manifest accepted a second structural-control bind")
+	}
+
+	r005Dir := filepath.Join(runDir, "r005")
+	if err := os.MkdirAll(r005Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	codexPath := filepath.Join(r005Dir, "reconciliation.codex-input.json")
+	writeStructuralControlCodexProofFixture(t, codexPath, audit)
+	proofPath, proof, err := materializeStructuralControlProof(run, contextValue, runDir, codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proof.Status != "ACTIVE_VERIFIED" || proof.FinancialRows != 0 || proof.PostingRows != 0 || proof.CorrectionAuthority ||
+		!validSHA256(proof.StructuralControlProofSHA256) || !regularFile(proofPath) {
+		t.Fatalf("unsafe or incomplete proof: %#v", proof)
+	}
+	if _, err := verifyStructuralControlProofArtifact(run, contextValue, runDir, codexPath, proofPath); err != nil {
+		t.Fatalf("fresh proof was rejected: %v", err)
+	}
+
+	var codex map[string]any
+	if err := readStrictJSONFile(codexPath, &codex); err != nil {
+		t.Fatal(err)
+	}
+	codex["posting_rows"] = 1
+	if err := atomicWritePrivateJSON(codexPath, codex); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyStructuralControlProofArtifact(run, contextValue, runDir, codexPath, proofPath); err == nil {
+		t.Fatal("post-R005 codex-input drift was accepted")
+	}
+}
+
+func TestStructuralControlProofHandoffMustMatchServiceArtifact(t *testing.T) {
+	run := Run{ID: "RUN-PROOF-HANDOFF", ContextID: "CTX-PROOF-HANDOFF"}
+	contextValue := Context{ID: run.ContextID, Organization: "9 Управляющая компания", OrganizationID: "ORG-9",
+		OrganizationName: "9 Управляющая компания", OrganizationPath: "Холдинг / 9 Управляющая компания", Period: "2025-10"}
+	root := t.TempDir()
+	codexPath := filepath.Join(root, "reconciliation.codex-input.json")
+	audit := structuralControlPipelineAudit{Status: "NO_ACTIVE_UI_FIXED_SETS", RunID: run.ID, ContextID: contextValue.ID,
+		Organization: contextValue.Organization, OrganizationID: contextValue.OrganizationID, OrganizationName: contextValue.OrganizationName,
+		OrganizationPath: contextValue.OrganizationPath, Period: contextValue.Period, ControlSetIDs: []string{}, AppliedVersions: []structuralControlPipelineVersionRef{}}
+	writeStructuralControlInitialRunManifest(t, root, run, contextValue)
+	if err := bindStructuralControlRunManifest(run, contextValue, root, audit); err != nil {
+		t.Fatal(err)
+	}
+	writeStructuralControlCodexProofFixture(t, codexPath, audit)
+	proofPath, proof, err := materializeStructuralControlProof(run, contextValue, root, codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoffPath := filepath.Join(root, "handoff.json")
+	if err := atomicWritePrivateJSON(handoffPath, map[string]any{
+		"run_id":                   run.ID,
+		"organization":             map[string]any{"id": contextValue.OrganizationID, "name": contextValue.OrganizationName, "path": contextValue.OrganizationPath},
+		"period":                   contextValue.Period,
+		"reconciliation":           map[string]any{"codex_input_path": codexPath, "codex_input_sha256": mustStructuralControlSHA256File(t, codexPath)},
+		"structural_control_proof": proof,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyStructuralControlProofHandoff(handoffPath, run, contextValue, codexPath, proofPath); err != nil {
+		t.Fatalf("exact service proof handoff was rejected: %v", err)
+	}
+	var handoff map[string]any
+	if err := readStrictJSONFile(handoffPath, &handoff); err != nil {
+		t.Fatal(err)
+	}
+	handoffProof := handoff["structural_control_proof"].(map[string]any)
+	handoffProof["posting_rows"] = float64(1)
+	if err := atomicWritePrivateJSON(handoffPath, handoff); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyStructuralControlProofHandoff(handoffPath, run, contextValue, codexPath, proofPath); err == nil {
+		t.Fatal("Rules handoff proof drift was accepted")
+	}
+}
+
+func TestStructuralControlProofCanonicalDescriptorMatchesRulesImplementation(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node runtime is unavailable")
+	}
+	root := t.TempDir()
+	codexPath := filepath.Join(root, "codex.json")
+	audit := structuralControlPipelineAudit{
+		Status: "ACTIVE_UI_FIXED_SETS_MATERIALIZED", RunID: "RUN-PARITY", ContextID: "CTX-PARITY",
+		Organization: "9 Управляющая компания", OrganizationID: "ORG-9", OrganizationName: "9 Управляющая компания",
+		OrganizationPath: "Холдинг / 9 Управляющая компания", Period: "2025-10",
+		SettingsSHA256: strings.Repeat("A", 64), SourceCSVSHA256: strings.Repeat("B", 64), RegistrySHA256: strings.Repeat("C", 64),
+		RegistryRevision: 17, ControlSetIDs: []string{"SC-17"}, SetCount: 1,
+		AppliedVersions: []structuralControlPipelineVersionRef{{
+			ControlSetID: "SC-17", LineageID: "LINEAGE-17", Version: 3, PayloadSHA256: strings.Repeat("D", 64),
+			MaterializedSetID: "USER-STRUCTURAL-17", OriginRunID: "RUN-ORIGIN", OriginContextID: "CTX-ORIGIN",
+			OriginInventoryID: "INV-ORIGIN", OriginInventoryBindingSHA256: strings.Repeat("E", 64),
+		}},
+	}
+	writeStructuralControlCodexProofFixture(t, codexPath, audit)
+	payload, _, err := readStructuralControlCodexPayload(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goProof, err := structuralControlProofFromCodexPayload(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modulePath, err := filepath.Abs(filepath.Join("..", "..", "modules", "rules-engine", "source", "structural_control_proof.mjs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptPath := filepath.Join(root, "proof-parity.mjs")
+	script := `import fs from "node:fs/promises";
+import { pathToFileURL } from "node:url";
+const [modulePath, payloadPath] = process.argv.slice(2);
+const module = await import(pathToFileURL(modulePath));
+const payload = JSON.parse(await fs.readFile(payloadPath, "utf8"));
+process.stdout.write(JSON.stringify(module.structuralControlProofFromCodexPayload(payload)));
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command(node, scriptPath, modulePath, codexPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("Rules proof implementation failed: %v: %s", err, output)
+	}
+	var rulesProof structuralControlProofDescriptor
+	if err := decodeJSONRejectDuplicateKeys(output, &rulesProof, true); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(goProof, rulesProof) {
+		t.Fatalf("Service proof differs from Rules proof:\nService=%#v\nRules=%#v", goProof, rulesProof)
+	}
+}
+
+func writeStructuralControlInitialRunManifest(t *testing.T, runDir string, run Run, contextValue Context) {
+	t.Helper()
+	if err := atomicWriteJSON(filepath.Join(runDir, "run_manifest.json"), internalRunManifest{
+		SchemaVersion: "opiu-stable-run.v1", RunID: run.ID, ContextID: contextValue.ID,
+		Organization: contextValue.Organization, OrganizationID: contextValue.OrganizationID,
+		OrganizationName: contextValue.OrganizationName, OrganizationPath: contextValue.OrganizationPath,
+		Period: contextValue.Period, Safety: reportOnlySafety(), CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeStructuralControlCodexProofFixture(t *testing.T, path string, audit structuralControlPipelineAudit) {
+	t.Helper()
+	binding := any(nil)
+	results := []any{}
+	if audit.Status == "ACTIVE_UI_FIXED_SETS_MATERIALIZED" {
+		applied := make([]any, 0, len(audit.AppliedVersions))
+		for _, ref := range audit.AppliedVersions {
+			var value map[string]any
+			data, _ := json.Marshal(ref)
+			_ = json.Unmarshal(data, &value)
+			applied = append(applied, value)
+		}
+		binding = map[string]any{
+			"status": "ACTIVE_EXACT_ORGANIZATION_MONTH", "input_sha256": audit.SettingsSHA256,
+			"source_sha256": audit.SourceCSVSHA256, "set_count": audit.SetCount,
+			"sets": []any{map[string]any{"id": audit.AppliedVersions[0].MaterializedSetID}},
+			"ui_fixed_registry": map[string]any{
+				"status": "ACTIVE_UI_FIXED_REGISTRY_VERIFIED", "registry_revision": audit.RegistryRevision,
+				"registry_sha256": audit.RegistrySHA256, "organization_id": audit.OrganizationID,
+				"run_id": audit.RunID, "context_id": audit.ContextID, "set_count": audit.SetCount,
+				"control_set_ids": audit.ControlSetIDs, "applied_versions": applied,
+				"correction_authority": false, "financial_rows": 0, "posting_rows": 0,
+			},
+			"correction_authority": false, "financial_rows": 0, "posting_rows": 0, "execution_allowed": false,
+		}
+		results = []any{map[string]any{"control_set_id": audit.ControlSetIDs[0], "financial_rows": 0, "posting_rows": 0,
+			"execution_allowed": false, "posting_allowed": false}}
+	} else {
+		binding = map[string]any{
+			"status": "MISSING_DEFAULT_ALL_GROUPS", "set_count": 0, "sets": []any{},
+			"correction_authority": false, "financial_rows": 0, "posting_rows": 0, "execution_allowed": false,
+		}
+	}
+	if err := atomicWritePrivateJSON(path, map[string]any{
+		"report_only": true, "posting_rows": 0, "ready_to_upload": false, "release_allowed": false,
+		"structural_control_settings_binding": binding, "structural_group_control_results": results,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustStructuralControlSHA256File(t *testing.T, path string) string {
+	t.Helper()
+	value, err := sha256File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.ToUpper(value)
+}
+
+func writeStructuralControlHandoffFixture(path string, run Run, contextValue Context, codexPath, proofPath string) error {
+	var proof structuralControlProofDescriptor
+	proofBytes, err := os.ReadFile(proofPath)
+	if err != nil {
+		return err
+	}
+	if err := decodeJSONRejectDuplicateKeys(proofBytes, &proof, true); err != nil {
+		return err
+	}
+	codexSHA, err := sha256File(codexPath)
+	if err != nil {
+		return err
+	}
+	return atomicWritePrivateJSON(path, map[string]any{
+		"run_id":                   run.ID,
+		"organization":             map[string]any{"id": contextValue.OrganizationID, "name": contextValue.OrganizationName, "path": contextValue.OrganizationPath},
+		"period":                   contextValue.Period,
+		"reconciliation":           map[string]any{"codex_input_path": codexPath, "codex_input_sha256": codexSHA},
+		"structural_control_proof": proof,
+	})
+}

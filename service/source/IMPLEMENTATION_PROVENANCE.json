@@ -1,0 +1,25 @@
+{
+  "schema_version": "opiu-stable-service-provenance.v1",
+  "implementation": "NEW_COMPATIBLE_IMPLEMENTATION",
+  "historical_byte_identity": false,
+  "reason": "The historical OPIU_Service_Installer_0.4.5_Source folder was deleted and its exact 27-file byte set was not present in available Git refs, release assets, or retained Actions artifacts.",
+  "work_id": "OPIU-2026-08-13-SVC-REBUILD-001",
+  "cr_id": "CR-SVC-20260813-001",
+  "base_commit": "3733288c49f091ccc2e9cf95de31251b5358366e",
+  "compatibility_targets": [
+    "REPORT_ONLY",
+    "source reselect for ERP and Intalev",
+    "organization/CFO/period context isolation",
+    "run history and archive-safe contexts",
+    "R005 to Rules to R001 orchestration boundary",
+    "normal UI without local paths or hashes"
+  ],
+  "safety": {
+    "posting_rows": 0,
+    "ready_to_upload": false,
+    "release_allowed": false,
+    "live_1c_allowed": false
+  },
+  "release_approved": false,
+  "live_1c_approved": false
+}

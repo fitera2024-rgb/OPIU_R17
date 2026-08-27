@@ -1,0 +1,210 @@
+{
+  "inventory": {
+    "schema_version": "opiu-structural-control-inventory.v3",
+    "artifact_type": "STRUCTURAL_CONTROL_INVENTORY",
+    "status": "VERIFIED",
+    "run_id": "fixture-run-2025-10",
+    "context_id": "fixture-context-2025-10",
+    "organization": {
+      "id": "ORG-9-UK",
+      "name": "9 Управляющая компания",
+      "path": "Холдинг / 9 Управляющая компания"
+    },
+    "period": "2025-10",
+    "generated_at": "2026-08-25T00:00:00.000Z",
+    "hierarchy_versions": {
+      "intalev": "1B978E4B53C6443B042C0024D54F4485FCAD3EA421149EB062AA5FE90BFB73E1",
+      "erp": "4531DCB8183EF2FD6B2EA758736AF3FFC8C15B10A2C62A271F073022527FB075"
+    },
+    "member_hashes": {
+      "intalev": "D34BCD73CF881BB30BE6EDCC0CC93E15C28BF7AC174926A42BFF7BF82A360D0D",
+      "erp": "F573E44190BA0E3FD110903063EB34CE858CE25CF60436F81E2D822E0D8870B3"
+    },
+    "input_hashes": {
+      "intalev": [
+        {
+          "file": "intalev.xlsx",
+          "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      ],
+      "erp": [
+        {
+          "file": "erp.xlsx",
+          "sha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+        }
+      ]
+    },
+    "current_run_provenance": {
+      "report": {
+        "file": "fixture/reconciliation.xlsx",
+        "sha256": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+      },
+      "codex_input": {
+        "file": "fixture/reconciliation.codex-input.json",
+        "sha256": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+      },
+      "manifest": {
+        "file": "fixture/reconciliation.manifest.json",
+        "sha256": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"
+      },
+      "scope_verified": true,
+      "verification_blockers": [],
+      "run_id": "fixture-run-2025-10",
+      "context_id": "fixture-context-2025-10",
+      "organization": {
+        "id": "ORG-9-UK",
+        "name": "9 Управляющая компания",
+        "path": "Холдинг / 9 Управляющая компания"
+      },
+      "period": "2025-10",
+      "inventory_id": "SCI-CB6F858523C926766AE5F9B9D362C405"
+    },
+    "source_scope": {
+      "intalev": {
+        "node_count": 3,
+        "root_count": 1,
+        "sources": [
+          {
+            "file": "intalev.xlsx",
+            "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "sheets": ["OPIU"],
+            "first_row": 7,
+            "last_row": 9
+          }
+        ]
+      },
+      "erp": {
+        "node_count": 3,
+        "root_count": 1,
+        "sources": [
+          {
+            "file": "erp.xlsx",
+            "sha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+            "sheets": ["OPIU"],
+            "first_row": 7,
+            "last_row": 9
+          }
+        ]
+      }
+    },
+    "intalev_members": [
+      {
+        "identity": "INTALEV:f7b9515373f07f7af862c9750ad61e8c0bbf07a18f625b3f214db219763d948e",
+        "parent_identity": "INTALEV:77461086420655c59d8ec3eb68de962d2869785b1033b0584541f87677f3d397",
+        "source_identity": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|OPIU|8",
+        "source_identity_scope": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|OPIU|2025-10",
+        "dimension_key": "",
+        "dimension_identity_status": "",
+        "source": {
+          "file": "intalev.xlsx",
+          "sheet": "OPIU",
+          "row": 8,
+          "source_cell": "D8",
+          "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        },
+        "code": "",
+        "name": "User-declarable block candidate",
+        "hierarchy_path": "Global report root / User-declarable block candidate",
+        "amount_cents": 10000,
+        "source_order": 0,
+        "level": 1,
+        "is_group": true,
+        "selectable_root": false,
+        "candidate_selectable": true,
+        "business_block_declared": false,
+        "semantic_status": "BUSINESS_BLOCK_UNPROVEN",
+        "requires_user_declaration": true,
+        "correction_authority": false
+      }
+    ],
+    "erp_members": [
+      {
+        "identity": "ERP:92150632e02331b6f05ad5094069c0ae6545f81674c8a0150afec72e1c03a247",
+        "parent_identity": "ERP:a5b37081d3420cc6650a22aca2934ac2877e98abc2003ef72d3705090fb39cf7",
+        "source_identity": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB|OPIU|8",
+        "source_identity_scope": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB|OPIU|2025-10",
+        "dimension_key": "",
+        "dimension_identity_status": "",
+        "source": {
+          "file": "erp.xlsx",
+          "sheet": "OPIU",
+          "row": 8,
+          "source_cell": "D8",
+          "sha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+        },
+        "code": "",
+        "name": "User-declarable block candidate",
+        "hierarchy_path": "Global report root / User-declarable block candidate",
+        "amount_cents": 10000,
+        "source_order": 0,
+        "level": 1,
+        "is_group": true,
+        "selectable_root": false,
+        "candidate_selectable": true,
+        "business_block_declared": false,
+        "semantic_status": "BUSINESS_BLOCK_UNPROVEN",
+        "requires_user_declaration": true,
+        "correction_authority": false
+      }
+    ],
+    "blockers": [],
+    "default_behavior": "PROCESS_ALL_DISCREPANCIES",
+    "optional_control_only": true,
+    "candidate_semantics": "USER_DECLARED_CONTROL_ONLY",
+    "automatic_business_block_classification": false,
+    "user_declaration_required": true,
+    "correction_authority": false,
+    "financial_rows": 0,
+    "safety": {
+      "mode": "REPORT_ONLY",
+      "posting_rows": 0,
+      "ready_to_upload": false,
+      "release_allowed": false,
+      "execution_allowed": false,
+      "live_1c_allowed": false
+    },
+    "inventory_id": "SCI-CB6F858523C926766AE5F9B9D362C405"
+  },
+  "binding": {
+    "schema_version": "opiu-structural-control-inventory-binding.v3",
+    "artifact_type": "STRUCTURAL_CONTROL_INVENTORY",
+    "run_id": "fixture-run-2025-10",
+    "context_id": "fixture-context-2025-10",
+    "organization_id": "ORG-9-UK",
+    "organization_name": "9 Управляющая компания",
+    "organization_path": "Холдинг / 9 Управляющая компания",
+    "period": "2025-10",
+    "inventory_id": "SCI-CB6F858523C926766AE5F9B9D362C405",
+    "inventory_file": "structural-control-inventory.json",
+    "sha256": "CEC190C9AC5FAD3DF39C5393A24B6E80F4D29CB776022BC5250B3257F57212D9",
+    "input_hashes": {
+      "intalev": [{"file": "intalev.xlsx", "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}],
+      "erp": [{"file": "erp.xlsx", "sha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"}]
+    },
+    "hierarchy_versions": {
+      "intalev": "1B978E4B53C6443B042C0024D54F4485FCAD3EA421149EB062AA5FE90BFB73E1",
+      "erp": "4531DCB8183EF2FD6B2EA758736AF3FFC8C15B10A2C62A271F073022527FB075"
+    },
+    "member_hashes": {
+      "intalev": "D34BCD73CF881BB30BE6EDCC0CC93E15C28BF7AC174926A42BFF7BF82A360D0D",
+      "erp": "F573E44190BA0E3FD110903063EB34CE858CE25CF60436F81E2D822E0D8870B3"
+    },
+    "report": {"file": "fixture/reconciliation.xlsx", "sha256": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"},
+    "codex_input": {"file": "fixture/reconciliation.codex-input.json", "sha256": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"},
+    "manifest": {"file": "fixture/reconciliation.manifest.json", "sha256": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"},
+    "current_run_provenance_sha256": "BFE18227D5D205DD976C850D913AE0A011126F0115244E3762E33966D626EB30",
+    "verified": true,
+    "candidate_semantics": "USER_DECLARED_CONTROL_ONLY",
+    "automatic_business_block_classification": false,
+    "user_declaration_required": true,
+    "correction_authority": false,
+    "safety": {
+      "mode": "REPORT_ONLY",
+      "posting_rows": 0,
+      "ready_to_upload": false,
+      "release_allowed": false,
+      "execution_allowed": false,
+      "live_1c_allowed": false
+    }
+  }
+}

@@ -1,0 +1,121 @@
+{
+  "schema_version": "correction-decisions-1.0.0",
+  "engine_version": "opiu-correction-engine-r001",
+  "difference_formula": "intalev_minus_erp",
+  "allowed_decision_types": [
+    "STORNO_REPOST",
+    "ADD_ONE_SIDE",
+    "DELETE_OPERATION",
+    "DELETE_POSTING",
+    "NO_POSTING",
+    "UPDATE_MAPPING",
+    "UPDATE_FORMULA"
+  ],
+  "approval_values": [
+    "ДОКАЗАНО_СВЕРКОЙ",
+    "УТВЕРЖДЕНО",
+    "APPROVED"
+  ],
+  "upload_contract": {
+    "sheet": "Загрузка_A_AA",
+    "columns": 27,
+    "range": "A:AA",
+    "storno_amount_sign": "positive; semantic reversal is set by ВидОперации=STORNO",
+    "repost_amount_sign": "positive; semantic posting is set by ВидОперации=REPOST",
+    "pair_id_location": "Содержание and audit register",
+    "upload_id_location": "ИдентификаторФинЗаписи and Содержание"
+  },
+  "hard_gates": {
+    "require_reconciliation_sha256": true,
+    "require_erp_source_sha256": true,
+    "require_source_range": true,
+    "require_registrar": true,
+    "require_posting_number_for_existing_source": true,
+    "require_organization": true,
+    "require_period": true,
+    "require_exact_dt_kt": true,
+    "require_exact_analytics": true,
+    "require_unique_pair_id": true,
+    "require_unique_upload_id": true,
+    "require_one_side_marker": true,
+    "delete_only_operation_msfo": true,
+    "never_execute_delete": true,
+    "live_preflight_required": true,
+    "duplicate_check_required": true,
+    "post_simulation_required": true,
+    "explicit_release_required": true
+  },
+  "release_defaults": {
+    "execution_allowed": false,
+    "ready_to_upload": false,
+    "release_allowed": false
+  },
+  "zero_sum_internal_reclassification": {
+    "enabled": true,
+    "organization_source": "reconciliation_passport_top_level",
+    "operation": "REPOST",
+    "keep_disputed_when_source_subset_missing": true,
+    "global_rule": {
+      "enabled": true,
+      "difference_formula": "intalev_minus_erp",
+      "excess_delta_sign": "negative",
+      "shortage_delta_sign": "positive",
+      "account_evidence_fields": [
+        "disclosure",
+        "analytics3"
+      ],
+      "normal_side_evidence": "account must match exactly one of debit or credit",
+      "exclude_accounts": [
+        "99"
+      ],
+      "require_one_source": true,
+      "require_exact_zero_sum_cents": true,
+      "candidate_tolerance_rubles": 1,
+      "posting_tolerance_rubles": 0,
+      "require_unique_account_side_profile": true,
+      "require_same_normal_side": true,
+      "debit_direction": "Dr target account/article; Cr source account/article",
+      "credit_direction": "Dr source account/article; Cr target account/article",
+      "fail_closed_on_ambiguity": true
+    },
+    "organization_reference": {
+      "path": "../../../resources/reference/ОрганизациииерархияЕРП.xlsx",
+      "sha256": "3342603C0782FE12871AD55E7E19E778A97651E8CFF2E00F0CE6774295C57522",
+      "sheet": "Лист_1",
+      "top_level_row": 539,
+      "top_level_name": "9 Управляющая компания"
+    },
+    "article_reference": {
+      "path": "../../reconciliation/source/resources/СтатьиДоходовИРасходовЕРП.xlsx",
+      "sha256": "8C7CA0E3884BB78F610A95E01A935DEBF55871312D3193728B248E7C4A197BBF",
+      "sheet": "Лист_1"
+    },
+    "rules": [
+      {
+        "parent_code": "R033",
+        "group_label": "ФЗП и компенсационные выплаты",
+        "account": "26",
+        "source": {
+          "code": "R036",
+          "label": "ФЗП",
+          "erp_article_code": "00-000036",
+          "reference_row": 126
+        },
+        "targets": [
+          {
+            "code": "R034",
+            "label": "Компенсации",
+            "erp_article_code": "00-000034",
+            "reference_row": 122
+          },
+          {
+            "code": "R035",
+            "label": "НДФЛ",
+            "erp_article_code": "ЦБ-000241",
+            "reference_row": 124
+          }
+        ]
+      }
+    ]
+  }
+}

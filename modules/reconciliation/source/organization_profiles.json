@@ -1,0 +1,181 @@
+{
+  "schema": "opiu-multi-organization-profiles-v1",
+  "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+  "ready_to_upload": false,
+  "profiles": [
+    {
+      "id": "HABAROVSK_AT_2025",
+      "organization": "1 Хабаровск",
+      "organization_code": "ERP-000000014",
+      "allowed_root": true,
+      "profile_kind": "HABAROVSK_AT",
+      "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+      "rules_path": "resources/khabarovsk_project.json",
+      "aliases": ["Хабаровск"]
+    },
+    {
+      "id": "ROOT_KAMCHATKA_REVIEW",
+      "organization": "2 Камчатка",
+      "organization_code": "ERP-000000042",
+      "allowed_root": true,
+      "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
+      "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+      "rules_path": "organization_profiles.json",
+      "aliases": ["Камчатка"]
+    },
+    {
+      "id": "ROOT_SAKHALIN_REVIEW",
+      "organization": "3 Сахалин",
+      "organization_code": "ERP-000000076",
+      "allowed_root": true,
+      "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
+      "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+      "rules_path": "organization_profiles.json",
+      "journal_organization_aliases": ["Сахалин_Без ЮЛ"],
+      "operation_bearing_codes": [
+        "R003", "R004", "R005", "R006", "R007", "R008", "R009", "R010", "R011",
+        "R013", "R014", "R015", "R016", "R017", "R020", "R021", "R022", "R024",
+        "R025", "R026", "R027", "R030", "R032", "R034", "R035", "R036", "R038",
+        "R040", "R042", "R043", "R047", "R048", "R052", "R054", "R056", "R058",
+        "R063", "R064"
+      ],
+      "show_unassigned_journal_rows": true
+    },
+    {
+      "id": "ROOT_VLADIVOSTOK_REVIEW",
+      "organization": "4 Владивосток",
+      "organization_code": "ERP-000000041",
+      "allowed_root": true,
+      "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
+      "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+      "rules_path": "organization_profiles.json"
+    },
+    {
+      "id": "ROOT_CONTRACT_HOLDER_REVIEW",
+      "organization": "7 Контрактодержатель",
+      "organization_code": "ERP-000000012",
+      "allowed_root": true,
+      "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
+      "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+      "rules_path": "organization_profiles.json"
+    },
+    {
+      "id": "ROOT_SAKHALIN_MA_REVIEW",
+      "organization": "8 Сахалин МА",
+      "organization_code": "ERP-000000150",
+      "allowed_root": true,
+      "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
+      "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+      "rules_path": "organization_profiles.json"
+    },
+    {
+      "id": "UK_R005",
+      "organization": "9 Управляющая компания",
+      "organization_code": "ERP-000000224",
+      "allowed_root": true,
+      "profile_kind": "UK_R005",
+      "status": "BLOCKED_R005_REPASS_REQUIRED",
+      "rules_path": "resources/UK_Актуальные_правила_сверки_2026-07-30_R005_CONSOLIDATED.xlsx",
+      "aliases": ["Управляющая компания"],
+      "journal_organization_aliases": [
+        "ООО \"Группа компаний \"Планета\"",
+        "ООО \"Планета Инноваций\"",
+        "ГК",
+        "ГК (СПб)",
+        "ООО \"Терминал\"",
+        "ООО \"Оазис\"",
+        "ООО \"ИНТАРГО\"",
+        "ИП Ковалев А.В.",
+        "ПИ"
+      ],
+      "operation_bearing_codes": [
+        "R003", "R004", "R005", "R006", "R007", "R008", "R009", "R010", "R011",
+        "R013", "R014", "R015", "R016", "R017", "R020", "R021", "R022", "R024",
+        "R025", "R026", "R027", "R030", "R032", "R034", "R035", "R036", "R038",
+        "R040", "R042", "R043", "R047", "R048", "R052", "R054", "R056", "R058",
+        "R063", "R064"
+      ]
+    },
+    {
+      "id": "ROOT_DISTRIBUTION_REVIEW",
+      "organization": "Дистрибьюция",
+      "organization_code": "ERP-000000342",
+      "allowed_root": true,
+      "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
+      "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+      "rules_path": "organization_profiles.json"
+    },
+    {
+      "id": "ROOT_PRODUCER_REVIEW",
+      "organization": "Производитель",
+      "organization_code": "ERP-000000040",
+      "allowed_root": true,
+      "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
+      "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+      "rules_path": "organization_profiles.json"
+    },
+    {
+      "id": "ROOT_HOLDING_REVIEW",
+      "organization": "Холдинг",
+      "organization_code": "ERP-000000343",
+      "allowed_root": true,
+      "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
+      "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+      "rules_path": "organization_profiles.json"
+    },
+    {
+      "id": "ROOT_DEVELOPMENT_FUND_REVIEW",
+      "organization": "ЦД/ЦЗ Фонд развития",
+      "organization_code": "ERP-000000038",
+      "allowed_root": true,
+      "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
+      "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+      "rules_path": "organization_profiles.json"
+    },
+    {
+      "id": "ROOT_ELIMINATION_REVIEW",
+      "organization": "Элиминирующая",
+      "organization_code": "ERP-000000341",
+      "allowed_root": true,
+      "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
+      "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+      "rules_path": "organization_profiles.json"
+    },
+    {
+      "id": "SAKHALIN_2025",
+      "organization": "Сахалин",
+      "organization_code": "ORG-SAKH"
+    },
+    {
+      "id": "VLADIVOSTOK_ICE_UNION_2025",
+      "organization": "Владивосток — Айс Юнион",
+      "organization_code": "ORG-VLAD-ICE"
+    },
+    {
+      "id": "PLANETA_WEST_2025",
+      "organization": "Планета Запад",
+      "organization_code": "ORG-PLANETA-WEST"
+    },
+    {
+      "id": "MEGA_ICE_2025",
+      "organization": "Мега Айс",
+      "organization_code": "ORG-MEGA-ICE"
+    },
+    {
+      "id": "KAMCHATKA_2025",
+      "organization": "Камчатка",
+      "organization_code": "ORG-KAMCHATKA"
+    },
+    {
+      "id": "CONSULTSERVICE_2025",
+      "organization": "КонсалтСервис",
+      "organization_code": "ORG-CONSULTSERVICE"
+    }
+  ],
+  "notes": [
+    "Поддерживаются отдельные годовые файлы Инталев и ERP.",
+    "Поддерживается одна книга с отдельными листами ОПиУ Инт и ОПиУ ERP.",
+    "Старые XLS читаются через временную XLSX-копию; оригинал не изменяется.",
+    "Результат диагностический и требует проверки сопоставлений по организации."
+  ]
+}

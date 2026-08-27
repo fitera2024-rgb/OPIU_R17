@@ -11,7 +11,7 @@
     "source reselect for ERP and Intalev",
     "organization/CFO/period context isolation",
     "run history and archive-safe contexts",
-    "R005 to Rules to R001 orchestration boundary",
+    "direct R005 to Service handoff to R001 orchestration boundary",
     "normal UI without local paths or hashes"
   ],
   "safety": {

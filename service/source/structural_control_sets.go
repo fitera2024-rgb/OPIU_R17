@@ -797,7 +797,7 @@ func (s *Server) loadStructuralControlInventory(organizationID, runID, inventory
 func (s *Server) loadStructuralControlBinding(runID string) (structuralControlInventoryBinding, Run, Context, string, string, error) {
 	runID = cleanBusinessText(runID, 200)
 	run, ok := s.store.Run(runID)
-	if !ok || (run.Status != RunCompletedReportOnly && run.Status != RunWaitingUserRules) {
+	if !ok || run.Status != RunCompletedReportOnly {
 		return structuralControlInventoryBinding{}, Run{}, Context{}, "", "", structuralControlFail(http.StatusConflict, "STRUCTURAL_CONTROL_RUN_MISMATCH")
 	}
 	contextValue, ok := s.store.Context(run.ContextID)

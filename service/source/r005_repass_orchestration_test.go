@@ -33,13 +33,11 @@ func TestNonZeroR005RemainsFailClosedEvenWhenReportArtifactsExist(t *testing.T) 
 		OrganizationName: "9 Управляющая компания", OrganizationPath: "Холдинг / 9 Управляющая компания", Period: "2025-11",
 	}
 	writeStructuralControlInitialRunManifest(t, runDir, run, contextValue)
-	rulesRegistry, rulesSeed := newTestRulesRegistry(t, store)
 	pipeline := &Pipeline{
-		store:         store,
-		rulesRegistry: rulesRegistry,
+		store: store,
 		runtime: &RuntimeAdapter{
 			Root: t.TempDir(), Node: "node", R005Script: "opiu_reconcile.mjs",
-			RulesScript: "cli.mjs", R001Script: "correction_engine_r001.mjs", RulesRegistry: rulesSeed,
+			R001Script: "correction_engine_r001.mjs",
 		},
 		active: map[string]struct{}{},
 	}

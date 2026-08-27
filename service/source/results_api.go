@@ -38,10 +38,6 @@ type verifiedResultArtifact struct {
 
 func (s *Server) handleRunResult(w http.ResponseWriter, r *http.Request, runID, stage string) {
 	stage = strings.ToLower(stage)
-	if stage == "rules" {
-		writeJSON(w, http.StatusNotFound, apiError{Error: "Rules API отключён: production использует прямую передачу R005→R001"})
-		return
-	}
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "Метод не поддерживается"})

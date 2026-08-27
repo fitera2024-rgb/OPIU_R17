@@ -19,7 +19,6 @@ func TestExternalR005ConfigurationRequiresExactScopePlaceholders(t *testing.T) {
 	}
 	t.Setenv("OPIU_RUNTIME_ROOT", "")
 	t.Setenv("OPIU_R005_CMD_JSON", `["r005"]`)
-	t.Setenv("OPIU_RULES_CMD_JSON", "")
 	t.Setenv("OPIU_R001_CMD_JSON", `["r001","--handoff","{handoff}","--handoff-sha256","{handoff_sha256}"]`)
 	if _, err := NewPipeline(store); err == nil {
 		t.Fatal("external R005 command without exact run/context/organization placeholders was accepted")
@@ -274,30 +273,6 @@ func TestArchivedContextCannotGainAnchorThroughStaleStoreHandle(t *testing.T) {
 	}
 	if _, ok := reopened.StructuralControlInventoryAnchor(run.ID); ok {
 		t.Fatal("archived context persisted a structural inventory anchor")
-	}
-}
-
-func TestResumeRevalidatesImmutableAnchorBeforeRules(t *testing.T) {
-	store, run := testWaitingRulesRun(t)
-	contextValue, ok := store.Context(run.ContextID)
-	if !ok {
-		t.Fatal("test context is missing")
-	}
-	bindingSHA := writePipelineStructuralInventory(t, store, run, contextValue)
-	if err := store.AnchorStructuralControlInventory(run.ID, bindingSHA); err != nil {
-		t.Fatal(err)
-	}
-	reportPath := filepath.Join(store.RunsDir(), run.ID, "r005", "reconciliation.xlsx")
-	if err := os.WriteFile(reportPath, []byte("drift after Rules review"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	pipeline := &Pipeline{store: store, active: map[string]struct{}{}}
-	if err := pipeline.ResumeAfterRuleDecisions(run.ID, filepath.Join(store.Root(), "unused-decisions.json")); err == nil {
-		t.Fatal("Rules resume accepted current-run artifact drift")
-	}
-	current, _ := store.Run(run.ID)
-	if current.Status != RunWaitingUserRules || current.Stage != "RULES_REVIEW" {
-		t.Fatalf("failed resume mutated run: status=%s stage=%s", current.Status, current.Stage)
 	}
 }
 

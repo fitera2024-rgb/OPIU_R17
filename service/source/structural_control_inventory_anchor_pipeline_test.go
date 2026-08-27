@@ -263,7 +263,7 @@ func TestExternalPipelineAnchorsVerifiedInventoryBeforeDirectR001(t *testing.T) 
 	}
 }
 
-func TestExternalPipelineBlocksBeforeRulesWithoutVerifiedInventory(t *testing.T) {
+func TestExternalPipelineBlocksBeforeHandoffWithoutVerifiedInventory(t *testing.T) {
 	{
 		store, contextValue, run, runDir := newPipelineStructuralContext(t)
 		erpPath, intalevPath := testServiceSourcePaths(runDir)
@@ -309,7 +309,7 @@ func TestExternalPipelineBlocksIncompleteExactOrganizationBeforeR005(t *testing.
 	}
 }
 
-func TestExternalPipelineRejectsUnverifiedStructuralInventoryBeforeRules(t *testing.T) {
+func TestExternalPipelineRejectsUnverifiedStructuralInventoryBeforeHandoff(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*testing.T, string)

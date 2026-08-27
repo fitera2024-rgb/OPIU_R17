@@ -119,11 +119,11 @@ func TestStructuralControlProofHandoffMustMatchServiceArtifact(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := verifyStructuralControlProofHandoff(handoffPath, run, contextValue, codexPath, proofPath); err == nil {
-		t.Fatal("Rules handoff proof drift was accepted")
+		t.Fatal("Service handoff proof drift was accepted")
 	}
 }
 
-func TestStructuralControlProofCanonicalDescriptorMatchesRulesImplementation(t *testing.T) {
+func TestStructuralControlProofCanonicalDescriptorMatchesR005Implementation(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node runtime is unavailable")
@@ -151,7 +151,7 @@ func TestStructuralControlProofCanonicalDescriptorMatchesRulesImplementation(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	modulePath, err := filepath.Abs(filepath.Join("..", "..", "modules", "rules-engine", "source", "structural_control_proof.mjs"))
+	modulePath, err := filepath.Abs(filepath.Join("..", "..", "modules", "reconciliation", "source", "structural_control_proof.mjs"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,14 +168,14 @@ process.stdout.write(JSON.stringify(module.structuralControlProofFromCodexPayloa
 	}
 	output, err := exec.Command(node, scriptPath, modulePath, codexPath).CombinedOutput()
 	if err != nil {
-		t.Fatalf("Rules proof implementation failed: %v: %s", err, output)
+		t.Fatalf("R005 proof implementation failed: %v: %s", err, output)
 	}
 	var rulesProof structuralControlProofDescriptor
 	if err := decodeJSONRejectDuplicateKeys(output, &rulesProof, true); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(goProof, rulesProof) {
-		t.Fatalf("Service proof differs from Rules proof:\nService=%#v\nRules=%#v", goProof, rulesProof)
+		t.Fatalf("Service proof differs from R005 proof:\nService=%#v\nR005=%#v", goProof, rulesProof)
 	}
 }
 

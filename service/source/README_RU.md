@@ -75,10 +75,8 @@ Review-пакет должен содержать рядом с EXE папку `
 ```text
 runtime/runtime/node/node.exe
 runtime/modules/reconciliation/source/opiu_reconcile.mjs
-runtime/modules/rules-engine/source/cli.mjs
 runtime/modules/corrections/source/correction_engine_r001.mjs
 runtime/node_modules
-runtime/data/defaults/rules.json
 runtime/SAFETY.json
 runtime/MANIFEST.json
 ```
@@ -89,10 +87,9 @@ runtime/MANIFEST.json
 
 ## Внешний argv-only override
 
-Для отдельного технического QA можно задать одновременно три JSON-массива:
+Для отдельного технического QA можно задать одновременно два JSON-массива:
 
 - `OPIU_R005_CMD_JSON`;
-- `OPIU_RULES_CMD_JSON`;
 - `OPIU_R001_CMD_JSON`.
 
 Частичная настройка запрещена. Shell-интерпретация не используется.

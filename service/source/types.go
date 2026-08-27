@@ -41,7 +41,6 @@ const (
 	RunPreflight                  RunStatus = "PREFLIGHT"
 	RunRunning                    RunStatus = "RUNNING"
 	RunCompletedReportOnly        RunStatus = "COMPLETED_REPORT_ONLY"
-	RunWaitingUserRules           RunStatus = "WAITING_USER_RULES"
 	RunBlockedEngineAdapter       RunStatus = "BLOCKED_ENGINE_ADAPTER"
 	RunBlockedInvalidContext      RunStatus = "BLOCKED_INVALID_CONTEXT"
 	RunBlockedStructuralInventory RunStatus = "BLOCKED_STRUCTURAL_INVENTORY"

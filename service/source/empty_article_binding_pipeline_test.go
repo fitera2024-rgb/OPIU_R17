@@ -91,12 +91,11 @@ func readEmptyBindingSnapshot(t *testing.T, path string) emptyArticleBindingSett
 func TestRuntimeR005ReceivesRunBoundFixedEmptyArticleBindingSnapshot(t *testing.T) {
 	testContext := newEmptyBindingPipelineContext(t, "2025-10", "runtime_active")
 	bindingID := fixEmptyBindingForPipeline(t, testContext.store)
-	rulesRegistry, rulesSeed := newTestRulesRegistry(t, testContext.store)
 	pipeline := &Pipeline{
-		store: testContext.store, rulesRegistry: rulesRegistry,
+		store: testContext.store,
 		runtime: &RuntimeAdapter{
 			Root: t.TempDir(), Node: "node", R005Script: "opiu_reconcile.mjs",
-			RulesScript: "cli.mjs", R001Script: "correction_engine_r001.mjs", RulesRegistry: rulesSeed,
+			R001Script: "correction_engine_r001.mjs",
 		},
 		active: map[string]struct{}{},
 	}
@@ -158,12 +157,11 @@ func TestRuntimeR005WithoutActiveFixedSettingPreservesOldArgv(t *testing.T) {
 	if status != 201 {
 		t.Fatalf("draft-only setting = %d %s", status, raw)
 	}
-	rulesRegistry, rulesSeed := newTestRulesRegistry(t, testContext.store)
 	pipeline := &Pipeline{
-		store: testContext.store, rulesRegistry: rulesRegistry,
+		store: testContext.store,
 		runtime: &RuntimeAdapter{
 			Root: t.TempDir(), Node: "node", R005Script: "opiu_reconcile.mjs",
-			RulesScript: "cli.mjs", R001Script: "correction_engine_r001.mjs", RulesRegistry: rulesSeed,
+			R001Script: "correction_engine_r001.mjs",
 		},
 		active: map[string]struct{}{},
 	}

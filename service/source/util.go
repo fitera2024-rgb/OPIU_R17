@@ -183,3 +183,12 @@ func secureBaseName(name string) (string, error) {
 	}
 	return base, nil
 }
+
+func sameCleanPath(left, right string) bool {
+	left, leftErr := filepath.Abs(left)
+	right, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+}

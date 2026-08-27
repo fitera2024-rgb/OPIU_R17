@@ -434,25 +434,25 @@ func verifyStructuralControlProofHandoff(handoffPath string, run Run, contextVal
 		return err
 	}
 	if structuralControlText(handoff["run_id"]) != run.ID || structuralControlText(handoff["period"]) != contextValue.Period {
-		return errors.New("Rules handoff structural-control run or period mismatch")
+		return errors.New("Service handoff structural-control run or period mismatch")
 	}
 	organization, ok := handoff["organization"].(map[string]any)
 	if !ok || structuralControlText(organization["id"]) != contextValue.OrganizationID ||
 		structuralControlText(organization["name"]) != contextValue.OrganizationName ||
 		structuralControlText(organization["path"]) != contextValue.OrganizationPath {
-		return errors.New("Rules handoff structural-control organization mismatch")
+		return errors.New("Service handoff structural-control organization mismatch")
 	}
 	reconciliation, ok := handoff["reconciliation"].(map[string]any)
 	if !ok || !sameFilesystemPath(structuralControlText(reconciliation["codex_input_path"]), codexPath) {
-		return errors.New("Rules handoff structural-control codex-input path mismatch")
+		return errors.New("Service handoff structural-control codex-input path mismatch")
 	}
 	codexSHA, err := sha256File(codexPath)
 	if err != nil || !strings.EqualFold(structuralControlText(reconciliation["codex_input_sha256"]), codexSHA) {
-		return errors.New("Rules handoff structural-control codex-input hash mismatch")
+		return errors.New("Service handoff structural-control codex-input hash mismatch")
 	}
 	actualProof, ok := handoff["structural_control_proof"]
 	if !ok {
-		return errors.New("Rules handoff has no structural-control proof")
+		return errors.New("Service handoff has no structural-control proof")
 	}
 	expectedHash, err := canonicalStructuralControlSHA256(expected)
 	if err != nil {
@@ -460,7 +460,7 @@ func verifyStructuralControlProofHandoff(handoffPath string, run Run, contextVal
 	}
 	actualHash, err := canonicalStructuralControlSHA256(actualProof)
 	if err != nil || actualHash != expectedHash {
-		return errors.New("Rules handoff structural-control proof differs from Service artifact")
+		return errors.New("Service handoff structural-control proof differs from Service artifact")
 	}
 	return nil
 }

@@ -14,7 +14,7 @@ import (
 
 func testServer(t *testing.T) (*Server, *Store, *Pipeline) {
 	t.Helper()
-	for _, name := range []string{"OPIU_R005_CMD_JSON", "OPIU_RULES_CMD_JSON", "OPIU_R001_CMD_JSON"} {
+	for _, name := range []string{"OPIU_R005_CMD_JSON", "OPIU_R001_CMD_JSON"} {
 		t.Setenv(name, "")
 	}
 	store, err := OpenStore(t.TempDir())

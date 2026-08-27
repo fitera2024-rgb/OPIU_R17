@@ -372,8 +372,7 @@ func (s *Store) ArchiveContext(id string) (Context, error) {
 		return Context{}, os.ErrNotExist
 	}
 	for _, run := range s.state.Runs {
-		if run.ContextID == id && (run.Status == RunQueued || run.Status == RunPreflight ||
-			run.Status == RunRunning || run.Status == RunWaitingUserRules) {
+		if run.ContextID == id && (run.Status == RunQueued || run.Status == RunPreflight || run.Status == RunRunning) {
 			return Context{}, errors.New("context has an active report-only run")
 		}
 	}

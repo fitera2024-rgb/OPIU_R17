@@ -16,15 +16,11 @@ import (
 // executes arbitrary code: every entrypoint is resolved below one explicit
 // runtime root and is launched as an argv vector without a shell.
 type RuntimeAdapter struct {
-	Root       string
-	Node       string
-	R005Script string
-	// Deprecated compatibility fields are never populated by runtime discovery
-	// and are unreachable from the production pipeline.
-	RulesScript          string
+	Root                 string
+	Node                 string
+	R005Script           string
 	R001Script           string
 	R001DiagnosticScript string
-	RulesRegistry        string
 }
 
 type runtimeSafety struct {
@@ -33,47 +29,6 @@ type runtimeSafety struct {
 	ReadyToUpload       bool   `json:"ready_to_upload"`
 	ReleaseAllowed      bool   `json:"release_allowed"`
 	OneCActionsExecuted bool   `json:"one_c_actions_executed"`
-}
-
-type rulesEngineContext struct {
-	SchemaVersion string                 `json:"schema_version"`
-	RunID         string                 `json:"run_id"`
-	Phase         string                 `json:"phase"`
-	Organization  rulesOrganization      `json:"organization"`
-	Period        string                 `json:"period"`
-	Paths         rulesPaths             `json:"paths"`
-	SourceHashes  map[string]string      `json:"source_hashes"`
-	UserDecisions []any                  `json:"user_decisions"`
-	PreviousState map[string]any         `json:"previous_state"`
-	Meta          map[string]interface{} `json:"meta,omitempty"`
-}
-
-type rulesOrganization struct {
-	ID                 string `json:"id"`
-	Name               string `json:"name"`
-	Path               string `json:"path"`
-	CFO                string `json:"cfo,omitempty"`
-	IncludeDescendants bool   `json:"include_descendants"`
-}
-
-type rulesPaths struct {
-	RulesRegistry          string `json:"rules_registry"`
-	R005Report             string `json:"r005_report"`
-	R005Codex              string `json:"r005_codex_input"`
-	StructuralControlProof string `json:"structural_control_proof"`
-	OutputDir              string `json:"output_dir"`
-	HandoffRoot            string `json:"handoff_root"`
-}
-
-type rulesWorkflow struct {
-	SchemaVersion string `json:"schema_version"`
-	RunID         string `json:"run_id"`
-	Phase         string `json:"phase"`
-	NextAction    string `json:"next_action"`
-	Handoff       struct {
-		Target      string `json:"target"`
-		HandoffPath string `json:"handoff_path"`
-	} `json:"handoff"`
 }
 
 func discoverRuntimeAdapter() (*RuntimeAdapter, error) {
@@ -257,96 +212,4 @@ func periodMode(period string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported period: %s", period)
 	}
-}
-
-func writeRulesContext(path string, run Run, contextValue Context, rulesRegistry, r005Report, r005Codex, structuralControlProof, rulesOutput, handoffRoot string) error {
-	codexSHA, err := sha256File(r005Codex)
-	if err != nil {
-		return err
-	}
-	proofSHA, err := sha256File(structuralControlProof)
-	if err != nil {
-		return err
-	}
-	value := rulesEngineContext{
-		SchemaVersion: "opiu-rules-engine-context.v1",
-		RunID:         run.ID,
-		Phase:         "AFTER_R005",
-		Organization: rulesOrganization{
-			ID:                 contextValue.OrganizationID,
-			Name:               contextValue.OrganizationName,
-			Path:               contextValue.OrganizationPath,
-			CFO:                contextValue.CFO,
-			IncludeDescendants: false,
-		},
-		Period: contextValue.Period,
-		Paths: rulesPaths{
-			RulesRegistry:          rulesRegistry,
-			R005Report:             r005Report,
-			R005Codex:              r005Codex,
-			StructuralControlProof: structuralControlProof,
-			OutputDir:              rulesOutput,
-			HandoffRoot:            handoffRoot,
-		},
-		SourceHashes: map[string]string{
-			"r005_codex_input":         strings.ToUpper(codexSHA),
-			"structural_control_proof": strings.ToUpper(proofSHA),
-		},
-		UserDecisions: []any{},
-		PreviousState: map[string]any{},
-		Meta: map[string]interface{}{
-			"service_context_id": contextValue.ID,
-			"report_only":        true,
-		},
-	}
-	return atomicWriteJSON(path, value)
-}
-
-func readRulesWorkflow(path string) (rulesWorkflow, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return rulesWorkflow{}, err
-	}
-	var workflow rulesWorkflow
-	if err := json.Unmarshal(data, &workflow); err != nil {
-		return rulesWorkflow{}, err
-	}
-	if strings.TrimSpace(workflow.NextAction) == "" {
-		return rulesWorkflow{}, errors.New("rules workflow next_action is missing")
-	}
-	return workflow, nil
-}
-
-func readValidatedRulesWorkflow(outputDir, runID, phase string) (rulesWorkflow, error) {
-	workflowPath := filepath.Join(outputDir, "workflow_decision.json")
-	workflow, err := readRulesWorkflow(workflowPath)
-	if err != nil {
-		return rulesWorkflow{}, err
-	}
-	expectedPhase := map[string]string{"initial": "AFTER_R005", "after-user": "AFTER_USER_DECISIONS"}[phase]
-	if workflow.SchemaVersion != "opiu-rules-workflow-decision.v1" || workflow.RunID != runID || workflow.Phase != expectedPhase {
-		return rulesWorkflow{}, errors.New("rules workflow schema, run or phase does not match")
-	}
-	switch workflow.NextAction {
-	case "WAIT_USER_RULES", "RERUN_R005", "COMPLETE", "FAILED", "FAILED_NO_STATE_CHANGE":
-	case "PASS_TO_R001", "RERUN_R001":
-		if workflow.Handoff.Target != "R001" || strings.TrimSpace(workflow.Handoff.HandoffPath) == "" || !regularFile(workflow.Handoff.HandoffPath) {
-			return rulesWorkflow{}, errors.New("rules workflow handoff is invalid")
-		}
-	default:
-		return rulesWorkflow{}, errors.New("rules workflow next_action is unsupported")
-	}
-	var manifest rulesEngineManifestDocument
-	if err := readStrictJSONFile(filepath.Join(outputDir, "engine_manifest.json"), &manifest); err != nil {
-		return rulesWorkflow{}, err
-	}
-	if manifest.SchemaVersion != rulesEngineManifestSchema || manifest.RunID != runID || manifest.Phase != expectedPhase {
-		return rulesWorkflow{}, errors.New("rules workflow schema, run or phase does not match")
-	}
-	expectedHash := strings.ToUpper(strings.TrimSpace(manifest.OutputHashes["workflow_decision.json"]))
-	actualHash, err := sha256File(workflowPath)
-	if err != nil || !validSHA256(expectedHash) || !strings.EqualFold(expectedHash, actualHash) {
-		return rulesWorkflow{}, errors.New("rules workflow does not match engine manifest")
-	}
-	return workflow, nil
 }

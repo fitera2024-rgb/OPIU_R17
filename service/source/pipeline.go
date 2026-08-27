@@ -18,13 +18,9 @@ type Pipeline struct {
 	store    *Store
 	commands map[string][]string
 	runtime  *RuntimeAdapter
-	// Legacy Rules storage is intentionally not initialized or reachable from
-	// the production pipeline. It remains only so old persistence helpers can
-	// be removed in a later compatibility cleanup without weakening this cutover.
-	rulesRegistry *persistentRulesRegistry
-	runner        pipelineStageRunner
-	mu            sync.Mutex
-	active        map[string]struct{}
+	runner   pipelineStageRunner
+	mu       sync.Mutex
+	active   map[string]struct{}
 }
 
 type pipelineStageRunner func(stage string, command []string, values map[string]string, runDir, runtimeRoot string) error
@@ -77,10 +73,6 @@ func NewPipeline(store *Store) (*Pipeline, error) {
 		}
 		commands[item.stage] = command
 	}
-	if strings.TrimSpace(os.Getenv("OPIU_RULES_CMD_JSON")) != "" {
-		return nil, errors.New("OPIU_RULES_CMD_JSON is forbidden: production is direct R005 to R001")
-	}
-
 	var runtimeAdapter *RuntimeAdapter
 	if len(commands) == 0 {
 		adapter, err := discoverRuntimeAdapter()
@@ -120,12 +112,11 @@ func NewPipeline(store *Store) (*Pipeline, error) {
 	}
 
 	return &Pipeline{
-		store:         store,
-		commands:      commands,
-		runtime:       runtimeAdapter,
-		rulesRegistry: nil,
-		runner:        runStage,
-		active:        map[string]struct{}{},
+		store:    store,
+		commands: commands,
+		runtime:  runtimeAdapter,
+		runner:   runStage,
+		active:   map[string]struct{}{},
 	}, nil
 }
 

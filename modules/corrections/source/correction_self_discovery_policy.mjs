@@ -1,7 +1,7 @@
 /**
  * Built-in, versioned policy for automatic discovery from the R005 evidence
  * package.  It is executable configuration shipped with the standalone
- * correction engine, not a Rules Service input and not a user rule file.
+ * correction engine, not an external input and not a user-authored file.
  */
 export const CORRECTION_SELF_DISCOVERY_POLICY = Object.freeze({
   schema_version: "opiu-correction-self-discovery-policy.v1",
@@ -35,4 +35,3 @@ export const CORRECTION_SELF_DISCOVERY_POLICY = Object.freeze({
     }),
   }),
 });
-

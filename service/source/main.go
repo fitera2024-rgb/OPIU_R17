@@ -1,9 +1,10 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
-	"net"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,22 +22,18 @@ func main() {
 	noOpen := flag.Bool("no-open", false, "do not open the browser automatically")
 	flag.Parse()
 
-	listener, err := net.Listen("tcp", *address)
-	if err != nil {
-		if existingURL, ok := openVerifiedExistingService(*address, *noOpen, nil, openBrowser); ok {
-			fmt.Printf("OPIU_STABLE already running: %s\n", existingURL)
-			return
-		}
-		fatalService("listen %s: %v", *address, err)
-	}
-
+	runtimeLogPath := filepath.Join(*dataDir, "logs", "service-runtime.log")
 	journal, err := initRuntimeJournal(*dataDir, *address)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "init runtime journal: %v\n", err)
-		os.Exit(1)
+		fatalService("init runtime journal: %v", err)
 	}
 	serviceJournal = journal
 	defer journal.close()
+
+	listener, _, err := acquireServiceListener(*address, runtimeLogPath)
+	if err != nil {
+		fatalService("listen %s: %v", *address, err)
+	}
 
 	store, err := OpenStore(*dataDir)
 	if err != nil {
@@ -50,14 +47,48 @@ func main() {
 	if err != nil {
 		fatalService("create server: %v", err)
 	}
+	lifecycleState := newServiceLifecycleState()
+	trackedHandler := trackServiceActivity(service.Handler(), lifecycleState)
 	server := &http.Server{
-		Handler:           service.Handler(),
+		Handler:           withUISessionEndpoint(trackedHandler, lifecycleState),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       5 * time.Minute,
 		WriteTimeout:      5 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    1 << 20,
 	}
+	lifecycleContext, stopLifecycle := context.WithCancel(context.Background())
+	defer stopLifecycle()
+	shutdownRequested := make(chan string, 1)
+	completedRuns := newCompletedRunTracker(store)
+	go monitorServiceLifecycle(
+		lifecycleContext,
+		lifecycleState,
+		completedRuns.hasNewCompletion,
+		func() bool { return hasActiveRuns(store) },
+		serviceResultPollInterval,
+		serviceResultShutdownGrace,
+		serviceUIReconnectGrace,
+		func(reason string) {
+			select {
+			case shutdownRequested <- reason:
+			default:
+			}
+		},
+	)
+	go func() {
+		select {
+		case reason := <-shutdownRequested:
+			log.Printf("Завершение текущего OPIU: reason=%s pid=%d endpoint=%s", reason, os.Getpid(), listener.Addr().String())
+			shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), serviceShutdownTimeout)
+			defer cancelShutdown()
+			if err := server.Shutdown(shutdownContext); err != nil {
+				log.Printf("Контролируемый shutdown: %v", err)
+				_ = server.Close()
+			}
+		case <-lifecycleContext.Done():
+		}
+	}()
 	url := "http://" + listener.Addr().String() + "/"
 	fmt.Printf("OPIU_STABLE 1.9.4: %s\n", url)
 	fmt.Println("Режим: REPORT_ONLY. Запись в 1С отключена.")
@@ -71,6 +102,15 @@ func main() {
 	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		fatalService("serve: %v", err)
 	}
+	stopLifecycle()
+	_ = listener.Close()
+	if err := terminateProcessDescendants(os.Getpid()); err != nil {
+		fatalService("post-run process tree cleanup pid=%d: %v", os.Getpid(), err)
+	}
+	if err := waitForPortRelease(*address, servicePreflightWaitTimeout); err != nil {
+		fatalService("post-run endpoint release %s pid=%d: %v", *address, os.Getpid(), err)
+	}
+	log.Printf("Текущий OPIU завершён: pid=%d endpoint=%s port_free=true", os.Getpid(), *address)
 }
 
 func defaultUserConfigDir() string {

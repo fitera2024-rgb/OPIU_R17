@@ -300,6 +300,8 @@ byId("refreshContexts").addEventListener("click", refresh);
 byId("refreshRuns").addEventListener("click", refresh);
 
 Promise.all([refresh(), loadOrganizations()]);
+const uiSession = new EventSource("/api/ui-session");
+window.addEventListener("pagehide", () => uiSession.close(), { once: true });
 setInterval(() => {
   if (!rulesReviewEditing()) refresh();
 }, 3000);

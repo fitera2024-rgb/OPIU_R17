@@ -4,6 +4,11 @@ import path from "node:path";
 
 import JSZip from "jszip";
 
+import {
+  applyArticleApprovalRules,
+  evaluateArticleApprovalFinancialGate,
+  resolveArticleApprovalCatalogTarget,
+} from "./article_approval_core.mjs";
 import { readOperationJournalRows } from "./full_operation_evidence.mjs";
 
 export const CROSS_JOURNAL_SCHEMA = "opiu-cross-journal-discrepancy-evidence-v1";
@@ -576,6 +581,191 @@ function selectTargetArticle({ intalevRow, intalevArticle, erpArticle, erpIndex 
   };
 }
 
+function approvalTargetSignature(target) {
+  return [
+    normalizeBusinessText(target?.block),
+    normalizeBusinessText(target?.article),
+    text(target?.code),
+  ].join("|");
+}
+
+function resolveApprovalForScopes({
+  scopeRows,
+  articleApprovalDocument,
+  articleApprovalScope,
+  erpCatalogNodes,
+}) {
+  const uniqueScopes = [...new Map((scopeRows ?? [])
+    .map((scopeRow) => ({
+      block: text(scopeRow?.block),
+      article: text(scopeRow?.article),
+    }))
+    .filter((scopeRow) => scopeRow.block && scopeRow.article)
+    .map((scopeRow) => [
+      `${normalizeBusinessText(scopeRow.block)}|${normalizeBusinessText(scopeRow.article)}`,
+      scopeRow,
+    ])).values()];
+  if (!articleApprovalDocument || uniqueScopes.length === 0) {
+    return {
+      article_approval_status: "NO_APPROVED_VERSION",
+      article_approval_target: null,
+      article_approval_scopes: uniqueScopes,
+    };
+  }
+  const resolved = applyArticleApprovalRules(
+    uniqueScopes,
+    articleApprovalDocument,
+    {
+      ...articleApprovalScope,
+      erpCatalog: erpCatalogNodes,
+    },
+  );
+  const forbidden = resolved.find((row) => row.article_approval_status === "FORBIDDEN");
+  if (forbidden) {
+    return {
+      ...forbidden,
+      article_approval_status: "FORBIDDEN",
+      article_approval_target: null,
+      article_approval_scopes: resolved.map((row) => row.article_approval_scope).filter(Boolean),
+    };
+  }
+  if (resolved.some((row) => row.article_approval_status !== "APPROVED_EXACT_SCOPE")) {
+    return {
+      article_approval_status: "APPROVAL_NOT_FINAL",
+      article_approval_target: null,
+      article_approval_scopes: resolved.map((row) => row.article_approval_scope).filter(Boolean),
+      article_approval_component_statuses: resolved.map((row) => row.article_approval_status),
+    };
+  }
+  const targets = new Map(resolved.map((row) => [
+    approvalTargetSignature(row.article_approval_target),
+    row.article_approval_target,
+  ]));
+  if (targets.size !== 1) {
+    return {
+      article_approval_status: "APPROVAL_COMPOSITE_TARGET_CONFLICT",
+      article_approval_target: null,
+      article_approval_scopes: resolved.map((row) => row.article_approval_scope).filter(Boolean),
+    };
+  }
+  const representative = resolved[0];
+  return {
+    ...representative,
+    article_approval_status: "APPROVED_EXACT_SCOPE",
+    article_approval_target: [...targets.values()][0],
+    article_approval_scopes: resolved.map((row) => row.article_approval_scope).filter(Boolean),
+  };
+}
+
+function targetSelectedWithApproval(automaticTarget, approval) {
+  if (approval?.article_approval_status === "FORBIDDEN") {
+    return {
+      status: "APPROVAL_FORBIDDEN",
+      block: "",
+      article: "",
+      path: "",
+      code: "",
+      account: "",
+      selection_basis: "APPROVAL_FORBIDDEN",
+    };
+  }
+  if (approval?.article_approval_status !== "APPROVED_EXACT_SCOPE") return automaticTarget;
+  const target = approval.article_approval_target;
+  return {
+    status: "APPROVED_EXACT_SCOPE_TARGET",
+    block: text(target?.block),
+    article: text(target?.article),
+    path: text(target?.path),
+    code: text(target?.code),
+    account: text(target?.account),
+    selection_basis: approval.article_approval_decision === "ИЗМЕНИТЬ"
+      ? "APPROVED_CORRECTED_TARGET"
+      : "APPROVED_PROPOSED_TARGET",
+  };
+}
+
+function financialReclassificationRequired(sourceArticle, sourceBlock, targetArticle) {
+  if (!targetArticle?.code || !targetArticle?.article || !targetArticle?.block) return false;
+  return normalizeBusinessText(sourceBlock) !== normalizeBusinessText(targetArticle.block)
+    || normalizeBusinessText(sourceArticle) !== normalizeBusinessText(targetArticle.article);
+}
+
+function visibleApprovalAction(approvalResult, articles) {
+  if (approvalResult.approval?.article_approval_status === "FORBIDDEN") {
+    return "СПОРНО: сопоставление запрещено пользователем; автоматическая цель не применяется";
+  }
+  return approvalResult.gate.status !== "ДОКАЗАНО"
+    ? `СПОРНО: ${approvalResult.gate.reason}. ${articles.action}`
+    : articles.action;
+}
+
+function resolveApprovedFinancialTarget({
+  automaticTarget,
+  approval,
+  scopeRows,
+  articleApprovalScope,
+  erpCatalogNodes,
+  physicalRows,
+  physicalProof,
+  amount,
+  sourceId,
+  sourceArticle,
+  sourceArticleCode,
+  sourceBlock,
+  usedSourceIds,
+  allowedPhysicalOrganizations,
+}) {
+  const selectedTarget = targetSelectedWithApproval(automaticTarget, approval);
+  const authoritativeTarget = approval?.article_approval_status === "APPROVED_EXACT_SCOPE"
+    ? resolveArticleApprovalCatalogTarget(selectedTarget, erpCatalogNodes).target
+    : null;
+  const target = authoritativeTarget
+    ? {
+        ...selectedTarget,
+        path: authoritativeTarget.path,
+        account: authoritativeTarget.account,
+      }
+    : selectedTarget;
+  const requiresFinancialPair = financialReclassificationRequired(
+    sourceArticle,
+    sourceBlock,
+    target,
+  );
+  const hasApprovedExactScope = approval?.article_approval_status === "APPROVED_EXACT_SCOPE";
+  const representativeScope = scopeRows?.[0] ?? {};
+  const gate = !hasApprovedExactScope || requiresFinancialPair
+    ? evaluateArticleApprovalFinancialGate({
+        approval,
+        physicalRows,
+        amount,
+        sourceId,
+        usedSourceIds,
+        scope: {
+          ...articleApprovalScope,
+          block: representativeScope.block,
+          article: representativeScope.article,
+          sourceBlock,
+        },
+        erpCatalog: erpCatalogNodes,
+        physicalProof,
+        allowedPhysicalOrganizations,
+        sourceArticleCode,
+      })
+    : {
+        status: "ДОКАЗАНО",
+        reason: "NO_FINANCIAL_RECLASSIFICATION_REQUIRED",
+        correction_rows: [],
+        financial_pair_rows: 0,
+        posting_rows: 0,
+        live_rows: 0,
+        executed_rows: 0,
+        ready_to_upload: false,
+        release_allowed: false,
+        live_1c_allowed: false,
+      };
+  return { approval, target, gate, requiresFinancialPair };
+}
+
 function personKey(row) {
   const values = [
     ...(row.debit_analytics ?? []),
@@ -625,7 +815,20 @@ function physicalErpSource(row) {
   };
 }
 
-function buildPayrollReclassificationRows({ intalev, erp, period, erpIndex, matchedIntalev, matchedErp }) {
+function buildPayrollReclassificationRows({
+  intalev,
+  erp,
+  period,
+  erpIndex,
+  matchedIntalev,
+  matchedErp,
+  rawErpRows,
+  erpCatalogNodes,
+  articleApprovalDocument,
+  articleApprovalScope,
+  usedSourceIds,
+  allowedPhysicalOrganizations,
+}) {
   const payrollIntalev = intalev.filter((row) =>
     !matchedIntalev.has(row.source_row_id) && isPayrollIntalevRow(row) && personKey(row));
   const byPersonDateBlock = new Map();
@@ -653,27 +856,69 @@ function buildPayrollReclassificationRows({ intalev, erp, period, erpIndex, matc
     }
     const targetBlock = businessBlockFromRow(members[0]);
     if (!targetBlock || members.some((member) => businessBlockFromRow(member) !== targetBlock)) return;
-    const targetArticle = selectTargetArticle({
-      intalevRow: members[0],
-      intalevArticle: { ...members[0].article_info, block: targetBlock },
-      erpArticle: erpRow.article_info,
-      erpIndex,
-    });
     const sourceBlock = erpRow.article_info.block;
     if (!sourceBlock || normalizeBusinessText(sourceBlock) === normalizeBusinessText(targetBlock)) return;
+    const scopeRows = members.map((member) => ({
+      block: targetBlock,
+      article: member.article_info?.article,
+    }));
+    const approval = resolveApprovalForScopes({
+      scopeRows,
+      articleApprovalDocument,
+      articleApprovalScope,
+      erpCatalogNodes,
+    });
+    const automaticTarget = ["APPROVED_EXACT_SCOPE", "FORBIDDEN"].includes(
+      approval.article_approval_status,
+    )
+      ? null
+      : selectTargetArticle({
+          intalevRow: members[0],
+          intalevArticle: { ...members[0].article_info, block: targetBlock },
+          erpArticle: erpRow.article_info,
+          erpIndex,
+        });
+    const approvalResult = resolveApprovedFinancialTarget({
+      automaticTarget,
+      approval,
+      scopeRows,
+      articleApprovalScope,
+      erpCatalogNodes,
+      physicalRows: rawErpRows,
+      physicalProof: {
+        status: "PROVEN_CROSS_JOURNAL_MATCH",
+        mutually_unique: true,
+        erp_source_row_id: erpRow.source_row_id,
+        intalev_source_row_ids: memberIds,
+        period,
+        amount: Math.abs(Number(erpRow.amount)),
+      },
+      amount: Math.abs(Number(erpRow.amount)),
+      sourceId: erpRow.source_row_id,
+      sourceArticle: erpRow.article_info.article,
+      sourceArticleCode: erpRow.article_info.codes.join(", "),
+      sourceBlock,
+      usedSourceIds,
+      allowedPhysicalOrganizations,
+    });
+    const targetArticle = approvalResult.target;
     const articles = summarizeArticles(
       { ...members[0].article_info, block: targetBlock },
       erpRow.article_info,
       targetArticle,
     );
+    const financialStatus = approvalResult.gate.status !== "ДОКАЗАНО"
+      ? `СПОРНО / ${articles.classification}`
+      : articles.classification;
     rows.push({
       row_type: rowType,
-      classification: articles.classification,
+      classification: financialStatus,
+      economic_classification: articles.classification,
       confidence: 100,
       period,
       block_intalev: targetBlock,
       source_block_erp: sourceBlock,
-      target_block_intalev: targetBlock,
+      target_block_intalev: targetArticle.block,
       article_intalev: [...new Set(members.flatMap((member) =>
         (member.debit_analytics ?? []).slice(0, 2).map(text).filter(Boolean)))].join(" + "),
       article_erp: erpRow.article_info.article,
@@ -686,6 +931,7 @@ function buildPayrollReclassificationRows({ intalev, erp, period, erpIndex, matc
       target_operating_account: targetArticle.account,
       target_catalog_path: targetArticle.path,
       target_status: targetArticle.status,
+      target_selection_basis: targetArticle.selection_basis,
       amount: Math.abs(Number(erpRow.amount)),
       date: erpRow.date_value || dateOnly(erpRow.date),
       debit: erpRow.debit,
@@ -697,12 +943,22 @@ function buildPayrollReclassificationRows({ intalev, erp, period, erpIndex, matc
       erp_document: erpRow.document,
       erp_rows: String(erpRow.physical_row),
       reason,
-      action: articles.action,
+      action: visibleApprovalAction(approvalResult, articles),
       reused: false,
       intalev_source_row_id: members.map((member) => member.source_row_id).join(" | "),
       erp_source_row_id: erpRow.source_row_id,
       intalev_path: [...new Set(members.flatMap((member) => member.article_info.paths))].join(" | "),
       erp_path: erpRow.article_info.paths.join(" | "),
+      article_approval_status: approvalResult.approval.article_approval_status,
+      article_approval_decision: approvalResult.approval.article_approval_decision ?? "",
+      article_approval_target: approvalResult.approval.article_approval_target,
+      financial_gate_status: approvalResult.gate.status,
+      financial_gate_reason: approvalResult.gate.reason,
+      correction_rows: approvalResult.gate.correction_rows,
+      financial_pair_rows: approvalResult.gate.financial_pair_rows,
+      posting_rows: 0,
+      live_rows: 0,
+      executed_rows: 0,
       ...physicalErpSource(erpRow),
     });
     for (const sourceId of memberIds) usedIntalevSourceIds.add(sourceId);
@@ -908,7 +1164,10 @@ function summarizeArticles(intalevArticle, erpArticle, targetArticle) {
     };
   }
   if (intalevArticle.article && erpArticle.article) {
-    const targetProven = targetArticle.status === "PROVEN_UNIQUE_TARGET_IN_INTALEV_BLOCK";
+    const targetProven = [
+      "PROVEN_UNIQUE_TARGET_IN_INTALEV_BLOCK",
+      "APPROVED_EXACT_SCOPE_TARGET",
+    ].includes(targetArticle.status);
     return {
       classification: sameBlock
         ? "ОДНА ОПЕРАЦИЯ / РАЗНЫЕ СТАТЬИ / ВНУТРИГРУППОВОЙ ПЕРЕСОРТ"
@@ -1011,6 +1270,10 @@ export function matchCrossJournalRows({
   intalevCatalogNodes = [],
   intalevReportNodes = [],
   erpCatalogNodes = [],
+  articleApprovalDocument = null,
+  articleApprovalScope = {},
+  usedSourceIds = null,
+  allowedPhysicalOrganizations = [],
 }) {
   const intalevIndex = catalogArticleIndex(intalevCatalogNodes);
   const intalevReportIndex = intalevReportPlacementIndex(intalevReportNodes);
@@ -1035,6 +1298,7 @@ export function matchCrossJournalRows({
       source_row_id: row.source_row_id,
       article_info: inferArticle(row, erpIndex, "ERP"),
     }));
+  const sharedUsedSourceIds = usedSourceIds instanceof Set ? usedSourceIds : new Set();
 
   const erpByBase = new Map();
   for (const row of erp) {
@@ -1083,16 +1347,58 @@ export function matchCrossJournalRows({
   const matchedIntalev = new Set(accepted.map((edge) => edge.intalevRow.source_row_id));
   const matchedErp = new Set(accepted.map((edge) => edge.erpRow.source_row_id));
   const pairRows = accepted.map((edge) => {
-    const targetArticle = selectTargetArticle({
-      intalevRow: edge.intalevRow,
-      intalevArticle: edge.intalevRow.article_info,
-      erpArticle: edge.erpRow.article_info,
-      erpIndex,
+    const scopeRows = [{
+      block: edge.intalevRow.article_info.block,
+      article: edge.intalevRow.article_info.article,
+    }];
+    const approval = resolveApprovalForScopes({
+      scopeRows,
+      articleApprovalDocument,
+      articleApprovalScope,
+      erpCatalogNodes,
     });
+    const automaticTarget = ["APPROVED_EXACT_SCOPE", "FORBIDDEN"].includes(
+      approval.article_approval_status,
+    )
+      ? null
+      : selectTargetArticle({
+          intalevRow: edge.intalevRow,
+          intalevArticle: edge.intalevRow.article_info,
+          erpArticle: edge.erpRow.article_info,
+          erpIndex,
+        });
+    const approvalResult = resolveApprovedFinancialTarget({
+      automaticTarget,
+      approval,
+      scopeRows,
+      articleApprovalScope,
+      erpCatalogNodes,
+      physicalRows: erpRows,
+      physicalProof: {
+        status: "PROVEN_CROSS_JOURNAL_MATCH",
+        mutually_unique: true,
+        erp_source_row_id: edge.erpRow.source_row_id,
+        intalev_source_row_ids: [edge.intalevRow.source_row_id],
+        period,
+        amount: Math.abs(Number(edge.erpRow.amount)),
+      },
+      amount: Math.abs(Number(edge.erpRow.amount)),
+      sourceId: edge.erpRow.source_row_id,
+      sourceArticle: edge.erpRow.article_info.article,
+      sourceArticleCode: edge.erpRow.article_info.codes.join(", "),
+      sourceBlock: edge.erpRow.article_info.block,
+      usedSourceIds: sharedUsedSourceIds,
+      allowedPhysicalOrganizations,
+    });
+    const targetArticle = approvalResult.target;
     const articles = summarizeArticles(edge.intalevRow.article_info, edge.erpRow.article_info, targetArticle);
+    const financialStatus = approvalResult.gate.status !== "ДОКАЗАНО"
+      ? `СПОРНО / ${articles.classification}`
+      : articles.classification;
     return {
       row_type: "UNIQUE_PAIR",
-      classification: articles.classification,
+      classification: financialStatus,
+      economic_classification: articles.classification,
       confidence: edge.score,
       period,
       block_intalev: edge.intalevRow.article_info.block,
@@ -1109,6 +1415,7 @@ export function matchCrossJournalRows({
       target_operating_account: targetArticle.account,
       target_catalog_path: targetArticle.path,
       target_status: targetArticle.status,
+      target_selection_basis: targetArticle.selection_basis,
       amount: Math.abs(Number(edge.erpRow.amount)),
       date: edge.erpRow.date_value || dateOnly(edge.erpRow.date),
       debit: edge.erpRow.debit,
@@ -1120,7 +1427,7 @@ export function matchCrossJournalRows({
       erp_document: edge.erpRow.document,
       erp_rows: String(edge.erpRow.physical_row),
       reason: edge.reason,
-      action: articles.action,
+      action: visibleApprovalAction(approvalResult, articles),
       reused: false,
       intalev_source_row_id: edge.intalevRow.source_row_id,
       erp_source_row_id: edge.erpRow.source_row_id,
@@ -1138,6 +1445,16 @@ export function matchCrossJournalRows({
       intalev_report_node_id:
         edge.intalevRow.article_info.report_placement?.node_id ?? "",
       erp_path: edge.erpRow.article_info.paths.join(" | "),
+      article_approval_status: approvalResult.approval.article_approval_status,
+      article_approval_decision: approvalResult.approval.article_approval_decision ?? "",
+      article_approval_target: approvalResult.approval.article_approval_target,
+      financial_gate_status: approvalResult.gate.status,
+      financial_gate_reason: approvalResult.gate.reason,
+      correction_rows: approvalResult.gate.correction_rows,
+      financial_pair_rows: approvalResult.gate.financial_pair_rows,
+      posting_rows: 0,
+      live_rows: 0,
+      executed_rows: 0,
       ...physicalErpSource(edge.erpRow),
     };
   });
@@ -1148,6 +1465,12 @@ export function matchCrossJournalRows({
     erpIndex,
     matchedIntalev,
     matchedErp,
+    rawErpRows: erpRows,
+    erpCatalogNodes,
+    articleApprovalDocument,
+    articleApprovalScope,
+    usedSourceIds: sharedUsedSourceIds,
+    allowedPhysicalOrganizations,
   });
   const payrollRows = payrollResult.rows;
   for (const row of payrollRows) {
@@ -1197,6 +1520,10 @@ export function matchCrossJournalRows({
   const provenErpSourceIds = provenRows.map((row) => text(row.erp_source_row_id)).filter(Boolean);
   const reusedIntalev = provenIntalevSourceIds.length - new Set(provenIntalevSourceIds).size;
   const reusedErp = provenErpSourceIds.length - new Set(provenErpSourceIds).size;
+  const approvedBalancedPairs = provenRows.filter((row) =>
+    row.financial_gate_status === "ДОКАЗАНО"
+    && Array.isArray(row.correction_rows)
+    && row.correction_rows.length === 2).length;
   return {
     rows,
     counts: {
@@ -1211,13 +1538,21 @@ export function matchCrossJournalRows({
       same_article_pairs: provenRows.filter((row) => row.classification.includes("ОДНА СТАТЬЯ")).length,
       proven_intergroup_reposts: provenRows.filter((row) =>
         row.classification.includes("МЕЖГРУППОВОЙ")
-        && row.target_status === "PROVEN_UNIQUE_TARGET_IN_INTALEV_BLOCK").length,
+        && ["PROVEN_UNIQUE_TARGET_IN_INTALEV_BLOCK", "APPROVED_EXACT_SCOPE_TARGET"]
+          .includes(row.target_status)).length,
       ambiguous_pairs: ambiguousRows.length,
       duplicate_groups: duplicates.length,
       unmatched_article_groups: unmatched.length,
       payroll_intalev_reuse_conflicts: payrollResult.reuse_conflicts.length,
       reused_intalev_rows: reusedIntalev,
       reused_erp_rows: reusedErp,
+      approved_balanced_pairs: approvedBalancedPairs,
+      approval_sporno_pairs: provenRows.filter((row) =>
+        row.classification.startsWith("СПОРНО / ")).length,
+      financial_pair_rows: approvedBalancedPairs * 2,
+      posting_rows: 0,
+      live_rows: 0,
+      executed_rows: 0,
     },
   };
 }
@@ -1233,6 +1568,9 @@ export async function buildCrossJournalDiscrepancyEvidence({
   erpSourceArchivePath = "",
   erpSourceArchiveSha256 = "",
   erpJournalEntry = "",
+  articleApprovalDocument = null,
+  articleApprovalScope = {},
+  allowedPhysicalOrganizations = [],
 }) {
   const [intalevJournal, erpJournal] = await Promise.all([
     readIntalevJournalRows({ journalPath: intalevJournalPath }),
@@ -1245,6 +1583,9 @@ export async function buildCrossJournalDiscrepancyEvidence({
     intalevCatalogNodes,
     intalevReportNodes,
     erpCatalogNodes,
+    articleApprovalDocument,
+    articleApprovalScope,
+    allowedPhysicalOrganizations,
   });
   const rows = result.rows.map((row) => ({
     ...row,
@@ -1254,10 +1595,14 @@ export async function buildCrossJournalDiscrepancyEvidence({
     journal_sha256: erpJournal.journal_sha256,
     source_sheet: erpJournal.journal_sheet,
   }));
-  const provenIntergroupRows = rows.filter((row) =>
-    row.classification?.includes("МЕЖГРУППОВОЙ")
-      && row.target_status === "PROVEN_UNIQUE_TARGET_IN_INTALEV_BLOCK"
-      && normalizeBusinessText(row.source_block_erp) !== normalizeBusinessText(row.target_block_intalev));
+  const approvedFinancialRows = rows.filter((row) =>
+    row.financial_gate_status === "ДОКАЗАНО"
+      && Array.isArray(row.correction_rows)
+      && row.correction_rows.length === 2
+      && Math.round(row.correction_rows.reduce(
+        (sum, correctionRow) => sum + Number(correctionRow.amount ?? 0),
+        0,
+      ) * 100) === 0);
   return {
     schema: CROSS_JOURNAL_SCHEMA,
     status: "READY_REPORT_ONLY",
@@ -1280,12 +1625,16 @@ export async function buildCrossJournalDiscrepancyEvidence({
     },
     ...result,
     rows,
-    correction_decision_rows: provenIntergroupRows.length * 2,
+    correction_decision_rows: approvedFinancialRows.length * 2,
     gates: {
       report_only: true,
-      correction_authority: provenIntergroupRows.length > 0,
-      posting_rows: provenIntergroupRows.length * 2,
+      correction_authority: approvedFinancialRows.length > 0,
+      financial_pair_rows: approvedFinancialRows.length * 2,
+      posting_rows: 0,
+      live_rows: 0,
+      executed_rows: 0,
       execution_allowed: false,
+      live_1c_allowed: false,
       ready_to_upload: false,
       release_allowed: false,
       physical_row_reuse_blocked:
@@ -1321,12 +1670,22 @@ export function unavailableCrossJournalEvidence({ organization, period, status, 
       payroll_intalev_reuse_conflicts: 0,
       reused_intalev_rows: 0,
       reused_erp_rows: 0,
+      approved_balanced_pairs: 0,
+      approval_sporno_pairs: 0,
+      financial_pair_rows: 0,
+      posting_rows: 0,
+      live_rows: 0,
+      executed_rows: 0,
     },
     gates: {
       report_only: true,
       correction_authority: false,
+      financial_pair_rows: 0,
       posting_rows: 0,
+      live_rows: 0,
+      executed_rows: 0,
       execution_allowed: false,
+      live_1c_allowed: false,
       ready_to_upload: false,
       release_allowed: false,
       physical_row_reuse_blocked: true,

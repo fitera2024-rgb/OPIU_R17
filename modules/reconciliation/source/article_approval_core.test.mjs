@@ -76,6 +76,89 @@ function approvalRow(overrides = {}) {
   };
 }
 
+function approvedRuntime(overrides = {}) {
+  return {
+    article_approval_status: "APPROVED_EXACT_SCOPE",
+    article_approval_decision: "УТВЕРЖДАЮ",
+    article_approval_target: {
+      block: "Коммерческие расходы",
+      article: "Реклама",
+      code: "ERP-10",
+    },
+    article_approval_scope: {
+      scope_key: approvalRow().КлючОбласти,
+      organization_id: "3",
+      organization_name: "Сахалин",
+      organization_hierarchy_path: "Холдинг / Сахалин",
+      period: "2025-01",
+      block_intalev: "Коммерческие расходы",
+      article_intalev: "Реклама",
+    },
+    ...overrides,
+  };
+}
+
+function physicalErpRow(overrides = {}) {
+  return {
+    source_row_id: "ERP-ROW-1",
+    physical_row: 42,
+    source_range: "B42:AG42",
+    period: "2025-01",
+    date: "15.01.2025 0:00:00",
+    date_value: "2025-01-15",
+    organization: "Сахалин",
+    document: "Операция МСФО 0001",
+    posting_no: 7,
+    activity: "Да",
+    scenario: "Факт",
+    debit: "26",
+    credit: "70.1",
+    debit_analytics: ["Реклама", "Отдел продаж"],
+    credit_analytics: ["Сотрудник А"],
+    debit_department: "Административный отдел",
+    credit_department: "Административный отдел",
+    amount: 100.12,
+    amount_accounting: 100.12,
+    article: "Старая статья",
+    content: "Физическая операция",
+    ...overrides,
+  };
+}
+
+function physicalMatchProof(overrides = {}) {
+  return {
+    status: "PROVEN_CROSS_JOURNAL_MATCH",
+    mutually_unique: true,
+    erp_source_row_id: "ERP-ROW-1",
+    intalev_source_row_ids: ["INTALEV-ROW-1"],
+    period: "2025-01",
+    amount: 100.12,
+    ...overrides,
+  };
+}
+
+function financialGateInput(overrides = {}) {
+  return {
+    approval: approvedRuntime(),
+    physicalRows: [physicalErpRow()],
+    amount: 100.12,
+    sourceId: "ERP-ROW-1",
+    usedSourceIds: new Set(),
+    scope: {
+      organizationId: "3",
+      period: "2025-01",
+      block: "Коммерческие расходы",
+      article: "Реклама",
+      sourceBlock: "Административные расходы",
+    },
+    erpCatalog: catalog,
+    physicalProof: physicalMatchProof(),
+    allowedPhysicalOrganizations: ["Сахалин"],
+    sourceArticleCode: "ERP-OLD",
+    ...overrides,
+  };
+}
+
 test("A17: 01_Правила has exact columns and only one valid candidate is proposed", () => {
   const rows = buildArticleApprovalRows({ ...scope, aggregateRows: [sourceRow()] , erpCatalog: catalog });
   assert.equal(rows.length, 1);
@@ -100,6 +183,36 @@ test("A17/A24: production nodes[].catalog_entries resolve only in the authoritat
   ], { ...scope, sourceSha256: sha, erpCatalog: productionCatalog });
   assert.equal(wrongParent.status, "FAIL");
   assert.ok(wrongParent.errors.some((error) => error.code === "ERP_TARGET_BLOCK_OR_ARTICLE_MISMATCH"));
+});
+
+test("A19/A21: an approved ERP target must exist exactly once in the authoritative catalog", () => {
+  const duplicateTargetCatalog = [
+    { code: "ERP-10", block: "Коммерческие расходы", article: "Реклама", path: "ERP / Коммерческие расходы / Реклама / 1" },
+    { code: "ERP-10", block: "Коммерческие расходы", article: "Реклама", path: "ERP / Коммерческие расходы / Реклама / 2" },
+  ];
+  const validation = validateArticleApprovalRows([
+    approvalRow({ РешениеПользователя: "УТВЕРЖДАЮ" }),
+  ], { ...scope, sourceSha256: sha, erpCatalog: duplicateTargetCatalog });
+  assert.equal(validation.status, "FAIL");
+  assert.ok(validation.errors.some((error) => error.code === "ERP_TARGET_NOT_UNIQUE"));
+
+  const duplicateExactNode = {
+    nodes: [{
+      label: "Реклама",
+      parent_path: "Статьи ОПИУ / Коммерческие расходы",
+      full_path: "Статьи ОПИУ / Коммерческие расходы / Реклама",
+      exact_catalog_entry_node: true,
+      catalog_entries: [
+        { code: "ERP-10", account: "44.1" },
+        { code: "ERP-10", account: "44.1" },
+      ],
+    }],
+  };
+  const exactNodeValidation = validateArticleApprovalRows([
+    approvalRow({ РешениеПользователя: "УТВЕРЖДАЮ" }),
+  ], { ...scope, sourceSha256: sha, erpCatalog: duplicateExactNode });
+  assert.equal(exactNodeValidation.status, "FAIL");
+  assert.ok(exactNodeValidation.errors.some((error) => error.code === "ERP_TARGET_NOT_UNIQUE"));
 });
 
 test("A18: exactly five decisions are accepted and ИЗМЕНИТЬ requires four fields", () => {
@@ -163,6 +276,51 @@ test("A21: exact organization/month applies, ЗАПРЕТИТЬ blocks, damaged 
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
 
+test("A21: УТВЕРЖДАЮ uses only proposed target and ИЗМЕНИТЬ uses only corrected target", () => {
+  const targets = [
+    ...catalog,
+    { code: "ERP-11", block: "Коммерческие расходы", article: "Обучение" },
+  ];
+  const approvedDocument = createArticleApprovalDocument({
+    ...scope,
+    sourceSha256: sha,
+    sourceXlsx: "source.xlsx",
+    actor: "DOMAIN\\user",
+    rows: [approvalRow({
+      РешениеПользователя: "УТВЕРЖДАЮ",
+      ПравильныйБлокERP: "Коммерческие расходы",
+      ПравильнаяСтатьяERP: "Обучение",
+      ПравильныйКодСтатьиERP: "ERP-11",
+      КомментарийПользователя: "Не должен применяться",
+    })],
+    erpCatalog: targets,
+  });
+  const runtimeRow = { block: "Коммерческие расходы", article: "Реклама" };
+  assert.deepEqual(
+    applyArticleApprovalRules([runtimeRow], approvedDocument, { ...scope, erpCatalog: targets })[0].article_approval_target,
+    { block: "Коммерческие расходы", article: "Реклама", code: "ERP-10" },
+  );
+
+  const changedDocument = createArticleApprovalDocument({
+    ...scope,
+    sourceSha256: sha,
+    sourceXlsx: "source.xlsx",
+    actor: "DOMAIN\\user",
+    rows: [approvalRow({
+      РешениеПользователя: "ИЗМЕНИТЬ",
+      ПравильныйБлокERP: "Коммерческие расходы",
+      ПравильнаяСтатьяERP: "Обучение",
+      ПравильныйКодСтатьиERP: "ERP-11",
+      КомментарийПользователя: "Исправлено пользователем",
+    })],
+    erpCatalog: targets,
+  });
+  assert.deepEqual(
+    applyArticleApprovalRules([runtimeRow], changedDocument, { ...scope, erpCatalog: targets })[0].article_approval_target,
+    { block: "Коммерческие расходы", article: "Обучение", code: "ERP-11" },
+  );
+});
+
 test("A20/A21: approved document rejects non-exact safety, source.xlsx, validity and source SHA", () => {
   const document = createArticleApprovalDocument({
     ...scope,
@@ -195,31 +353,40 @@ test("A20/A21: approved document rejects non-exact safety, source.xlsx, validity
   assert.ok(validateArticleApprovalDocument(foreignSource, options).errors.some((error) => error.code === "SOURCE_SHA256_MISMATCH"));
 });
 
-test("A22: no unique physical row is СПОРНО; one proven row yields equal candidate pair and zero posting", () => {
-  const approval = { article_approval_status: "APPROVED_EXACT_SCOPE" };
-  const usedSourceIds = new Set();
-  const blocked = evaluateArticleApprovalFinancialGate({ approval, physicalRows: [], amount: 100, sourceId: "ERP-1", usedSourceIds });
+test("A22: approved metadata is not physical proof; one reopened raw ERP row yields one balanced REPORT_ONLY pair", () => {
+  const blocked = evaluateArticleApprovalFinancialGate(financialGateInput({
+    physicalRows: [],
+    approval: approvedRuntime({ physical_row_id: "ERP-ROW-1", physical_proof: true }),
+  }));
   assert.equal(blocked.status, "СПОРНО");
+  assert.equal(blocked.reason, "PHYSICAL_ERP_ROW_NOT_UNIQUE");
   assert.equal(blocked.posting_rows, 0);
-  const physicalRow = { id: "ERP-1", amount: 100.12, unique: true, proven: true, reopened: true, reuse_checked: true };
-  const proven = evaluateArticleApprovalFinancialGate({ approval, physicalRows: [physicalRow], amount: 100.12, sourceId: "ERP-1", usedSourceIds });
+  const usedSourceIds = new Set();
+  const proven = evaluateArticleApprovalFinancialGate(financialGateInput({ usedSourceIds }));
   assert.equal(proven.status, "ДОКАЗАНО");
   assert.deepEqual(proven.correction_rows.map((row) => row.amount), [-100.12, 100.12]);
+  assert.deepEqual(proven.correction_rows.map((row) => row.article), ["Старая статья", "Реклама"]);
+  assert.deepEqual(proven.correction_rows.map((row) => row.article_code), ["ERP-OLD", "ERP-10"]);
+  for (const field of ["date", "organization", "document", "posting_no", "debit", "credit", "debit_analytics", "credit_analytics"]) {
+    assert.deepEqual(proven.correction_rows[0][field], proven.correction_rows[1][field], field);
+  }
+  assert.equal(proven.financial_pair_rows, 2);
   assert.equal(proven.posting_rows, 0);
-  const reused = evaluateArticleApprovalFinancialGate({ approval, physicalRows: [physicalRow], amount: 100.12, sourceId: "ERP-1", usedSourceIds });
+  assert.equal(proven.live_rows, 0);
+  assert.equal(proven.executed_rows, 0);
+  const reused = evaluateArticleApprovalFinancialGate(financialGateInput({ usedSourceIds }));
   assert.equal(reused.reason, "PHYSICAL_ERP_ROW_ALREADY_USED");
 });
 
-test("A22: exact sourceId, all proof flags, amount match and shared reuse set are mandatory", () => {
-  const approval = { article_approval_status: "APPROVED_EXACT_SCOPE" };
-  const usedSourceIds = new Set();
-  const row = { id: "ERP-1", amount: -100, unique: true, proven: true, reopened: true, reuse_checked: true };
-  assert.equal(evaluateArticleApprovalFinancialGate({ approval, physicalRows: [row], amount: 100, sourceId: "ERP-2", usedSourceIds }).reason, "PHYSICAL_ERP_ROW_NOT_UNIQUE");
-  assert.equal(evaluateArticleApprovalFinancialGate({ approval, physicalRows: [row, { ...row }], amount: 100, sourceId: "ERP-1", usedSourceIds }).reason, "PHYSICAL_ERP_ROW_NOT_UNIQUE");
-  assert.equal(evaluateArticleApprovalFinancialGate({ approval, physicalRows: [{ ...row, reopened: false }], amount: 100, sourceId: "ERP-1", usedSourceIds }).reason, "PHYSICAL_ERP_PROOF_INCOMPLETE");
-  assert.equal(evaluateArticleApprovalFinancialGate({ approval, physicalRows: [row], amount: 80, sourceId: "ERP-1", usedSourceIds }).reason, "PHYSICAL_AMOUNT_MISMATCH");
-  assert.equal(evaluateArticleApprovalFinancialGate({ approval, physicalRows: [row], amount: 100, sourceId: "ERP-1" }).reason, "PHYSICAL_REUSE_GUARD_REQUIRED");
-  assert.equal(usedSourceIds.size, 0);
+test("A22: exact physical identity, match proof, period, organization, amount and shared reuse set are mandatory", () => {
+  assert.equal(evaluateArticleApprovalFinancialGate(financialGateInput({ sourceId: "ERP-ROW-2" })).reason, "PHYSICAL_ERP_ROW_NOT_UNIQUE");
+  assert.equal(evaluateArticleApprovalFinancialGate(financialGateInput({ physicalRows: [physicalErpRow(), physicalErpRow()] })).reason, "PHYSICAL_ERP_ROW_NOT_UNIQUE");
+  assert.equal(evaluateArticleApprovalFinancialGate(financialGateInput({ physicalProof: null })).reason, "PHYSICAL_MATCH_PROOF_REQUIRED");
+  assert.equal(evaluateArticleApprovalFinancialGate(financialGateInput({ physicalRows: [physicalErpRow({ period: "2024-12", date: "31.12.2024" })] })).reason, "PHYSICAL_PERIOD_SCOPE_MISMATCH");
+  assert.equal(evaluateArticleApprovalFinancialGate(financialGateInput({ allowedPhysicalOrganizations: ["Чужая"] })).reason, "PHYSICAL_ORGANIZATION_SCOPE_MISMATCH");
+  assert.equal(evaluateArticleApprovalFinancialGate(financialGateInput({ amount: 80 })).reason, "PHYSICAL_AMOUNT_MISMATCH");
+  assert.equal(evaluateArticleApprovalFinancialGate(financialGateInput({ usedSourceIds: null })).reason, "PHYSICAL_REUSE_GUARD_REQUIRED");
+  assert.equal(evaluateArticleApprovalFinancialGate(financialGateInput({ approval: { article_approval_status: "FORBIDDEN" } })).reason, "APPROVAL_FORBIDDEN");
 });
 
 test("matrix reader keeps round-trip header and rows", () => {

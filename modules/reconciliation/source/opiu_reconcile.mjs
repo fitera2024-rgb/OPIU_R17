@@ -5652,6 +5652,32 @@ async function runReconciliation() {
   }
 
   const organization = organizationHint || profile.organization;
+  const structuralInventoryScope = {
+    run_id: normalizeText(args["run-id"]),
+    context_id: normalizeText(args["context-id"]),
+    organization_id: normalizeText(args["organization-id"]),
+    organization_name: normalizeText(args["organization-name"] ?? organization),
+    organization_path: normalizeText(args["organization-path"]),
+  };
+  const articleApprovalScope = {
+    organizationId: structuralInventoryScope.organization_id || profile.organizationCode,
+    organizationName: organization,
+    organizationHierarchyPath: structuralInventoryScope.organization_path,
+    period: periodLabel,
+    erpCatalog,
+  };
+  let articleApprovalDocument = null;
+  const articleApprovalSettingsPath = normalizeText(args["article-approval-settings"]);
+  if (articleApprovalSettingsPath) {
+    try {
+      articleApprovalDocument = await loadArticleApprovalDocument(
+        articleApprovalSettingsPath,
+        articleApprovalScope,
+      );
+    } catch (error) {
+      fail(`ARTICLE_APPROVAL_SETTINGS_REJECTED:${error.message}`);
+    }
+  }
   const postedCorrectionJournalOverlays = [];
   if (
     profile.id === "UK_R005" ||
@@ -6248,6 +6274,12 @@ async function runReconciliation() {
           erpSourceArchiveSha256: erpSourceSet.erpInputAuthoritySha256,
           erpJournalEntry: erpSourceSet.journalOrigin?.archiveEntry
             || path.basename(erpSourceSet.journalPath),
+          articleApprovalDocument,
+          articleApprovalScope,
+          allowedPhysicalOrganizations: unique([
+            organization,
+            ...(profile.journalOrganizationAliases ?? []),
+          ]),
         });
       }
     } catch (error) {
@@ -6304,13 +6336,9 @@ async function runReconciliation() {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   const buildResult = await buildReportWorkbook({
     organization,
-    structuralInventoryScope: {
-      run_id: normalizeText(args["run-id"]),
-      context_id: normalizeText(args["context-id"]),
-      organization_id: normalizeText(args["organization-id"]),
-      organization_name: normalizeText(args["organization-name"] ?? organization),
-      organization_path: normalizeText(args["organization-path"]),
-    },
+    structuralInventoryScope,
+    articleApprovalDocument,
+    articleApprovalScope,
     profile,
     machinePolicy,
     mode,
@@ -7788,6 +7816,8 @@ async function buildReportWorkbook(context) {
   const {
     organization,
     structuralInventoryScope,
+    articleApprovalDocument,
+    articleApprovalScope,
     profile,
     machinePolicy,
     mode,
@@ -7815,32 +7845,11 @@ async function buildReportWorkbook(context) {
     render,
   } = context;
   let aggregateRows = (sourceAggregateRows ?? []).map((row) => ({ ...row }));
-  let articleApprovalDocument = null;
-  const articleApprovalSettingsPath = normalizeText(args["article-approval-settings"]);
-  if (articleApprovalSettingsPath) {
-    try {
-      articleApprovalDocument = await loadArticleApprovalDocument(articleApprovalSettingsPath, {
-        organizationId: structuralInventoryScope?.organization_id || profile.organizationCode,
-        organizationName: organization,
-        organizationHierarchyPath: structuralInventoryScope?.organization_path,
-        period: periodLabel,
-        erpCatalog,
-      });
-    } catch (error) {
-      fail(`ARTICLE_APPROVAL_SETTINGS_REJECTED:${error.message}`);
-    }
-  }
   if (articleApprovalDocument) {
     aggregateRows = applyArticleApprovalRules(
       aggregateRows,
       articleApprovalDocument,
-      {
-        organizationId: structuralInventoryScope?.organization_id || profile.organizationCode,
-        organizationName: organization,
-        organizationHierarchyPath: structuralInventoryScope?.organization_path,
-        period: periodLabel,
-        erpCatalog,
-      },
+      articleApprovalScope,
     );
   }
   const tolerance = Number(config.tolerance ?? 0.01);
@@ -8046,7 +8055,7 @@ async function buildReportWorkbook(context) {
     ? workbook.worksheets.add("04A_Расхождения_проводок")
     : null;
   const crossJournalCorrectionSheet = crossJournalEvidence?.applicable === true
-    && Number(crossJournalEvidence?.counts?.proven_intergroup_reposts ?? 0) > 0
+    && Number(crossJournalEvidence?.correction_decision_rows ?? 0) > 0
     ? workbook.worksheets.add("04B_R001_решения")
     : null;
   const issuesSheet = workbook.worksheets.add("05_Несопоставленные");
@@ -10167,9 +10176,12 @@ async function buildReportWorkbook(context) {
   function buildCrossJournalCorrectionDecisions() {
     if (!crossJournalCorrectionSheet) return 0;
     const proven = (Array.isArray(crossJournalEvidence?.rows) ? crossJournalEvidence.rows : [])
-      .filter((row) => row.classification?.includes("МЕЖГРУППОВОЙ"))
-      .filter((row) => row.target_status === "PROVEN_UNIQUE_TARGET_IN_INTALEV_BLOCK")
-      .filter((row) => normalizeLabel(row.source_block_erp) !== normalizeLabel(row.target_block_intalev));
+      .filter((row) => row.financial_gate_status === "ДОКАЗАНО")
+      .filter((row) => Array.isArray(row.correction_rows) && row.correction_rows.length === 2)
+      .filter((row) => Math.abs(row.correction_rows.reduce(
+        (sum, correctionRow) => sum + Number(correctionRow.amount ?? 0),
+        0,
+      )) < 0.005);
     const headers = [
       "CaseID", "PairID", "Тип решения", "Решение владельца", "Период",
       "Строка сверки", "Группа", "Статья", "Роль доказательства",
@@ -10190,20 +10202,30 @@ async function buildReportWorkbook(context) {
       "Путь целевой статьи ERP", "Счет целевой статьи ERP", "Комментарий",
     ];
     const rows = proven.flatMap((row) => {
+      const sourceCorrection = row.correction_rows.find((item) => item.operation === "STORNO");
+      const targetCorrection = row.correction_rows.find((item) => item.operation === "REPOST");
+      if (!sourceCorrection || !targetCorrection) return [];
       const suffix = normalizeText(row.erp_source_row_id).slice(0, 24) || String(row.erp_rows);
       const caseId = `XJ-${suffix}`;
       const pairId = `PAIR-${suffix}`;
-      const amount = Math.abs(Number(row.source_amount ?? row.amount));
+      const amount = Math.abs(Number(sourceCorrection.amount));
+      const debitAnalytics = Array.isArray(sourceCorrection.debit_analytics)
+        ? sourceCorrection.debit_analytics
+        : [];
+      const creditAnalytics = Array.isArray(sourceCorrection.credit_analytics)
+        ? sourceCorrection.credit_analytics
+        : [];
       const physical = [
         row.source_archive_path ?? "", row.source_archive_sha256 ?? "", row.journal_entry ?? "",
-        row.journal_sha256 ?? "", row.source_sheet ?? "", row.erp_source_row_id ?? "",
-        row.source_range ?? `B${row.erp_rows}:AG${row.erp_rows}`, row.source_date ?? row.date ?? "",
-        row.erp_document ?? "", row.posting_number ?? "", row.source_dt ?? row.debit ?? "",
-        row.source_analytics_dt1 ?? "", row.source_analytics_dt2 ?? "", row.source_analytics_dt3 ?? "",
-        row.source_department_dt ?? "", row.source_kt ?? row.credit ?? "",
-        row.source_analytics_kt1 ?? "", row.source_analytics_kt2 ?? "", row.source_analytics_kt3 ?? "",
-        row.source_department_kt ?? "", organization, organization,
-        row.source_organization ?? "", amount, amount,
+        row.journal_sha256 ?? "", row.source_sheet ?? "", sourceCorrection.source_row_id ?? "",
+        sourceCorrection.source_range ?? `B${row.erp_rows}:AG${row.erp_rows}`,
+        sourceCorrection.date_value || sourceCorrection.date || "",
+        sourceCorrection.document ?? "", sourceCorrection.posting_no ?? "", sourceCorrection.debit ?? "",
+        debitAnalytics[0] ?? "", debitAnalytics[1] ?? "", debitAnalytics[2] ?? "",
+        sourceCorrection.debit_department ?? "", sourceCorrection.credit ?? "",
+        creditAnalytics[0] ?? "", creditAnalytics[1] ?? "", creditAnalytics[2] ?? "",
+        sourceCorrection.credit_department ?? "", organization, organization,
+        sourceCorrection.organization ?? "", amount, amount,
       ];
       const common = [
         "STORNO_REPOST", "ДОКАЗАНО_СВЕРКОЙ", row.period ?? periodLabel,
@@ -10212,24 +10234,24 @@ async function buildReportWorkbook(context) {
         "FINANCIAL_RECLASS", "INTER_GROUP", "ECONOMIC_RECLASS_PROVEN",
       ];
       const tail = [
-        row.reason ?? "", row.action ?? "", row.source_article ?? row.article_erp ?? "",
-        row.source_operating_account ?? "", row.target_article_erp ?? "",
-        row.target_article_code_erp ?? "", 1, row.target_block_intalev ?? "",
+        row.reason ?? "", row.action ?? "", sourceCorrection.article ?? row.source_article ?? row.article_erp ?? "",
+        row.source_operating_account ?? "", targetCorrection.article ?? row.target_article_erp ?? "",
+        targetCorrection.article_code ?? row.target_article_code_erp ?? "", 1, targetCorrection.article_block ?? row.target_block_intalev ?? "",
         row.intalev_path ?? "", row.target_catalog_path ?? "",
         row.target_operating_account ?? "",
         `Инталев: ${row.intalev_document ?? ""}, строки ${row.intalev_rows ?? ""}; ERP: ${row.erp_document ?? ""}, строка ${row.erp_rows ?? ""}.`,
       ];
       const sourceRow = [
         caseId, pairId, ...common,
-        `XJS-${suffix}`, row.article_erp ?? row.source_article ?? "",
-        row.source_article ?? row.article_erp ?? "", "RECLASS_SOURCE",
-        ...proof, -amount, true, true, true, true, true,
+        `XJS-${suffix}`, sourceCorrection.article ?? row.article_erp ?? row.source_article ?? "",
+        sourceCorrection.article ?? row.source_article ?? row.article_erp ?? "", "RECLASS_SOURCE",
+        ...proof, sourceCorrection.amount, true, true, true, true, true,
         ...physical, ...tail,
       ];
       const targetRow = [
         caseId, pairId, ...common,
-        `XJT-${suffix}`, row.target_article_erp ?? "", row.target_article_erp ?? "",
-        "RECLASS_TARGET", ...proof, amount, true, true, true, true, true,
+        `XJT-${suffix}`, targetCorrection.article ?? row.target_article_erp ?? "", targetCorrection.article ?? row.target_article_erp ?? "",
+        "RECLASS_TARGET", ...proof, targetCorrection.amount, true, true, true, true, true,
         ...physical, ...tail,
       ];
       return [sourceRow, targetRow];

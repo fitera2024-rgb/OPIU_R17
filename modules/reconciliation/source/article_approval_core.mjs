@@ -132,8 +132,14 @@ function approvalScopeKey({ organizationId, period, block, article }) {
 }
 
 function catalogEntries(catalog) {
-  if (Array.isArray(catalog)) return catalog.map((entry) => catalogTarget(entry));
-  const nodes = Array.isArray(catalog?.nodes) ? catalog.nodes : [];
+  const arrayCatalog = Array.isArray(catalog) ? catalog : null;
+  const nodeArray = arrayCatalog?.some((entry) =>
+    Array.isArray(entry?.catalog_entries)
+    || entry?.exact_catalog_entry_node === true)
+    ? arrayCatalog
+    : null;
+  if (arrayCatalog && !nodeArray) return arrayCatalog.map((entry) => catalogTarget(entry));
+  const nodes = nodeArray ?? (Array.isArray(catalog?.nodes) ? catalog.nodes : []);
   if (nodes.length > 0) {
     const expanded = nodes.flatMap((node) => {
       const nodePath = pathText(node?.full_path ?? node?.path ?? node?.hierarchy_path);
@@ -146,16 +152,13 @@ function catalogEntries(catalog) {
         block,
         article,
         code: text(entry?.code ?? entry?.target_code ?? entry?.catalog_code ?? entry?.erp_code),
+        account: text(entry?.account ?? entry?.operating_account),
         path: nodePath,
         exact: node?.exact_catalog_entry_node === true,
       }));
-    }).filter((target) => target.code && target.block && target.article);
-    const codesWithExactNodes = new Set(expanded.filter((target) => target.exact).map((target) => target.code));
-    const authoritative = expanded.filter((target) => !codesWithExactNodes.has(target.code) || target.exact);
-    return [...new Map(authoritative.map((target) => [
-      [target.code, key(target.block), key(target.article), key(target.path)].join("|"),
-      target,
-    ])).values()];
+      }).filter((target) => target.code && target.block && target.article);
+      const codesWithExactNodes = new Set(expanded.filter((target) => target.exact).map((target) => target.code));
+      return expanded.filter((target) => !codesWithExactNodes.has(target.code) || target.exact);
   }
   return (catalog?.entries ?? catalog?.articles ?? []).map((entry) => catalogTarget(entry));
 }
@@ -167,7 +170,22 @@ function catalogTarget(entry) {
     block: text(entry?.block ?? entry?.parent_block ?? parts.at(-2)),
     article: text(entry?.article ?? entry?.name ?? entry?.label ?? entry?.article_name ?? parts.at(-1)),
     code: text(entry?.code ?? entry?.target_code ?? entry?.catalog_code ?? entry?.erp_code),
+    account: text(entry?.account ?? entry?.operating_account),
     path: targetPath,
+  };
+}
+
+export function resolveArticleApprovalCatalogTarget(target, erpCatalog) {
+  const requested = catalogTarget(target);
+  const matches = catalogEntries(erpCatalog).filter((candidate) =>
+    candidate.code === requested.code
+    && key(candidate.block) === key(requested.block)
+    && key(candidate.article) === key(requested.article));
+  return {
+    status: matches.length === 1 ? "UNIQUE" : matches.length === 0 ? "NOT_FOUND" : "AMBIGUOUS",
+    count: matches.length,
+    target: matches.length === 1 ? matches[0] : null,
+    matches,
   };
 }
 
@@ -397,6 +415,16 @@ export function validateArticleApprovalRows(rows, options = {}) {
         && key(catalogTargetValue.article) === key(target.article))) {
         errors.push({ row: rowNumber, code: "ERP_TARGET_BLOCK_OR_ARTICLE_MISMATCH", message: "ERP-статья не принадлежит выбранному блоку" });
       }
+      if (["УТВЕРЖДАЮ", "ИЗМЕНИТЬ"].includes(row.РешениеПользователя) && hasCatalog) {
+        const exactTarget = resolveArticleApprovalCatalogTarget(target, options.erpCatalog);
+        if (exactTarget.count !== 1) {
+          errors.push({
+            row: rowNumber,
+            code: "ERP_TARGET_NOT_UNIQUE",
+            message: `Утверждаемая ERP-цель должна существовать ровно один раз; найдено: ${exactTarget.count}`,
+          });
+        }
+      }
     }
     if (["УТВЕРЖДАЮ", "ИЗМЕНИТЬ"].includes(row.РешениеПользователя) && (!target.block || !target.article || !target.code)) {
       errors.push({ row: rowNumber, code: "APPROVED_TARGET_REQUIRED", message: "Утверждаемая цель ERP неполна" });
@@ -603,9 +631,41 @@ export function applyArticleApprovalRules(rows, document, scope = {}) {
     const decision = decisions.get(rowKey);
     if (!decision) return { ...row, article_approval_status: "NO_MATCHING_APPROVAL" };
     const target = effectiveTarget(decision);
-    if (decision.РешениеПользователя === "ЗАПРЕТИТЬ") return { ...row, article_approval_status: "FORBIDDEN", article_approval_target: null, article_approval_version: document.version };
-    if (["УТВЕРЖДАЮ", "ИЗМЕНИТЬ"].includes(decision.РешениеПользователя)) return { ...row, article_approval_status: "APPROVED_EXACT_SCOPE", article_approval_target: target, article_approval_version: document.version };
-    return { ...row, article_approval_status: decision.РешениеПользователя, article_approval_target: null, article_approval_version: document.version };
+    const approvalMetadata = {
+      article_approval_decision: decision.РешениеПользователя,
+      article_approval_version: document.version,
+      article_approval_scope: {
+        scope_key: rowKey,
+        organization_id: expected.organization_id,
+        organization_name: expected.organization_name,
+        organization_hierarchy_path: expected.organization_hierarchy_path,
+        period: expected.period,
+        block_intalev: block,
+        article_intalev: article,
+      },
+    };
+    if (decision.РешениеПользователя === "ЗАПРЕТИТЬ") {
+      return {
+        ...row,
+        ...approvalMetadata,
+        article_approval_status: "FORBIDDEN",
+        article_approval_target: null,
+      };
+    }
+    if (["УТВЕРЖДАЮ", "ИЗМЕНИТЬ"].includes(decision.РешениеПользователя)) {
+      return {
+        ...row,
+        ...approvalMetadata,
+        article_approval_status: "APPROVED_EXACT_SCOPE",
+        article_approval_target: target,
+      };
+    }
+    return {
+      ...row,
+      ...approvalMetadata,
+      article_approval_status: decision.РешениеПользователя,
+      article_approval_target: null,
+    };
   });
 }
 
@@ -615,51 +675,175 @@ function moneyCents(value) {
   return Math.round(Math.abs(numeric) * 100);
 }
 
+function physicalRowId(row) {
+  return text(row?.source_row_id ?? row?.sourceId ?? row?.source_id ?? row?.id);
+}
+
+function physicalPeriod(row) {
+  const explicit = month(row?.period);
+  if (explicit) return explicit;
+  const source = text(row?.date_value ?? row?.date);
+  const iso = /^(20\d{2})-(\d{2})-(\d{2})/u.exec(source);
+  if (iso) return `${iso[1]}-${iso[2]}`;
+  const russian = /^(\d{2})\.(\d{2})\.(20\d{2})/u.exec(source);
+  return russian ? `${russian[3]}-${russian[2]}` : "";
+}
+
+function blockedFinancialGate(reason) {
+  return {
+    status: "СПОРНО",
+    reason,
+    correction_rows: [],
+    financial_pair_rows: 0,
+    posting_rows: 0,
+    live_rows: 0,
+    executed_rows: 0,
+    ready_to_upload: false,
+    release_allowed: false,
+    live_1c_allowed: false,
+  };
+}
+
+function physicalOperationFields(row, exactSourceId) {
+  return {
+    physical_row_id: exactSourceId,
+    source_row_id: exactSourceId,
+    physical_row: row?.physical_row ?? null,
+    source_range: text(row?.source_range),
+    date: text(row?.date),
+    date_value: text(row?.date_value),
+    period: physicalPeriod(row),
+    organization: text(row?.organization),
+    document: text(row?.document),
+    posting_no: row?.posting_no ?? null,
+    debit: text(row?.debit),
+    credit: text(row?.credit),
+    debit_analytics: Array.isArray(row?.debit_analytics) ? row.debit_analytics.map(text) : [],
+    credit_analytics: Array.isArray(row?.credit_analytics) ? row.credit_analytics.map(text) : [],
+    debit_department: text(row?.debit_department),
+    credit_department: text(row?.credit_department),
+    debit_direction: text(row?.debit_direction),
+    credit_direction: text(row?.credit_direction),
+    debit_currency: text(row?.debit_currency),
+    credit_currency: text(row?.credit_currency),
+    debit_currency_amount: row?.debit_currency_amount ?? null,
+    credit_currency_amount: row?.credit_currency_amount ?? null,
+    debit_quantity: row?.debit_quantity ?? null,
+    credit_quantity: row?.credit_quantity ?? null,
+    amount_accounting: row?.amount_accounting ?? null,
+    content: text(row?.content),
+    scenario: text(row?.scenario),
+    activity: text(row?.activity),
+  };
+}
+
 export function evaluateArticleApprovalFinancialGate({
   approval,
   physicalRows = [],
   amount = 0,
   sourceId = "",
   usedSourceIds,
+  scope = {},
+  erpCatalog = null,
+  physicalProof = null,
+  allowedPhysicalOrganizations = [],
+  sourceArticleCode = "",
 } = {}) {
-  if (approval?.article_approval_status === "FORBIDDEN" || approval?.article_approval_status !== "APPROVED_EXACT_SCOPE") {
-    return { status: "СПОРНО", reason: "APPROVAL_NOT_FINAL", correction_rows: [], posting_rows: 0, ready_to_upload: false, release_allowed: false };
+  if (approval?.article_approval_status === "FORBIDDEN") return blockedFinancialGate("APPROVAL_FORBIDDEN");
+  if (approval?.article_approval_status === "APPROVAL_COMPOSITE_TARGET_CONFLICT") {
+    return blockedFinancialGate("APPROVAL_COMPOSITE_TARGET_CONFLICT");
   }
+  if (approval?.article_approval_status !== "APPROVED_EXACT_SCOPE") return blockedFinancialGate("APPROVAL_NOT_FINAL");
+  const target = approval?.article_approval_target;
+  if (!target?.block || !target?.article || !target?.code) return blockedFinancialGate("APPROVAL_TARGET_INCOMPLETE");
+  const catalogTarget = resolveArticleApprovalCatalogTarget(target, erpCatalog);
+  if (catalogTarget.count !== 1) return blockedFinancialGate("ERP_TARGET_NOT_UNIQUE");
   const exactSourceId = String(sourceId ?? "");
   if (!exactSourceId || !(usedSourceIds instanceof Set)) {
-    return { status: "СПОРНО", reason: "PHYSICAL_REUSE_GUARD_REQUIRED", correction_rows: [], posting_rows: 0, ready_to_upload: false, release_allowed: false };
+    return blockedFinancialGate("PHYSICAL_REUSE_GUARD_REQUIRED");
   }
-  const matches = physicalRows.filter((row) => String(row?.id ?? row?.sourceId ?? row?.source_id ?? "") === exactSourceId);
+  const matches = physicalRows.filter((row) => physicalRowId(row) === exactSourceId);
   if (matches.length !== 1) {
-    return { status: "СПОРНО", reason: "PHYSICAL_ERP_ROW_NOT_UNIQUE", correction_rows: [], posting_rows: 0, ready_to_upload: false, release_allowed: false };
+    return blockedFinancialGate("PHYSICAL_ERP_ROW_NOT_UNIQUE");
   }
   const physicalRow = matches[0];
-  if (physicalRow.unique !== true
-    || physicalRow.proven !== true
-    || physicalRow.reopened !== true
-    || physicalRow.reuse_checked !== true) {
-    return { status: "СПОРНО", reason: "PHYSICAL_ERP_PROOF_INCOMPLETE", correction_rows: [], posting_rows: 0, ready_to_upload: false, release_allowed: false };
+  if (physicalProof?.status !== "PROVEN_CROSS_JOURNAL_MATCH"
+    || physicalProof?.mutually_unique !== true
+    || text(physicalProof?.erp_source_row_id) !== exactSourceId
+    || !Array.isArray(physicalProof?.intalev_source_row_ids)
+    || physicalProof.intalev_source_row_ids.length === 0) {
+    return blockedFinancialGate("PHYSICAL_MATCH_PROOF_REQUIRED");
+  }
+  const approvalScope = approval?.article_approval_scope ?? {};
+  const expectedPeriod = month(scope?.period ?? approvalScope.period);
+  const expectedOrganizationId = text(scope?.organizationId ?? scope?.organization_id);
+  if (!expectedPeriod
+    || approvalScope.period !== expectedPeriod
+    || (expectedOrganizationId && approvalScope.organization_id !== expectedOrganizationId)
+    || (scope?.block && key(approvalScope.block_intalev) !== key(scope.block))
+    || (scope?.article && key(approvalScope.article_intalev) !== key(scope.article))) {
+    return blockedFinancialGate("APPROVAL_RUNTIME_SCOPE_MISMATCH");
+  }
+  if (physicalPeriod(physicalRow) !== expectedPeriod || month(physicalProof?.period) !== expectedPeriod) {
+    return blockedFinancialGate("PHYSICAL_PERIOD_SCOPE_MISMATCH");
+  }
+  const physicalOrganization = key(physicalRow?.organization);
+  const allowedOrganizations = (allowedPhysicalOrganizations ?? []).map(key).filter(Boolean);
+  if (!physicalOrganization
+    || allowedOrganizations.length === 0
+    || !allowedOrganizations.includes(physicalOrganization)) {
+    return blockedFinancialGate("PHYSICAL_ORGANIZATION_SCOPE_MISMATCH");
+  }
+  if (!text(physicalRow?.date)
+    || !text(physicalRow?.document)
+    || !text(physicalRow?.debit)
+    || !text(physicalRow?.credit)
+    || !text(physicalRow?.article)
+    || !Array.isArray(physicalRow?.debit_analytics)
+    || !Array.isArray(physicalRow?.credit_analytics)) {
+    return blockedFinancialGate("PHYSICAL_ERP_ROW_INCOMPLETE");
   }
   const valueCents = moneyCents(amount);
   const physicalCents = moneyCents(physicalRow.amount);
-  if (!valueCents || !physicalCents || valueCents !== physicalCents) {
-    return { status: "СПОРНО", reason: "PHYSICAL_AMOUNT_MISMATCH", correction_rows: [], posting_rows: 0, ready_to_upload: false, release_allowed: false };
+  const proofCents = moneyCents(physicalProof?.amount);
+  if (!valueCents || !physicalCents || !proofCents || valueCents !== physicalCents || valueCents !== proofCents) {
+    return blockedFinancialGate("PHYSICAL_AMOUNT_MISMATCH");
   }
   if (usedSourceIds.has(exactSourceId)) {
-    return { status: "СПОРНО", reason: "PHYSICAL_ERP_ROW_ALREADY_USED", correction_rows: [], posting_rows: 0, ready_to_upload: false, release_allowed: false };
+    return blockedFinancialGate("PHYSICAL_ERP_ROW_ALREADY_USED");
   }
   usedSourceIds.add(exactSourceId);
   const value = valueCents / 100;
+  const physical = physicalOperationFields(physicalRow, exactSourceId);
+  const sourceArticle = text(physicalRow?.article);
   return {
     status: "ДОКАЗАНО",
     reason: "UNIQUE_PHYSICAL_ERP_ROW",
     correction_rows: [
-      { operation: "STORNO", amount: -value, physical_row_id: exactSourceId },
-      { operation: "REPOST", amount: value, physical_row_id: exactSourceId },
+      {
+        ...physical,
+        operation: "STORNO",
+        amount: -value,
+        article: sourceArticle,
+        article_code: text(sourceArticleCode),
+        article_block: text(scope?.sourceBlock ?? scope?.source_block),
+      },
+      {
+        ...physical,
+        operation: "REPOST",
+        amount: value,
+        article: target.article,
+        article_code: target.code,
+        article_block: target.block,
+      },
     ],
+    financial_pair_rows: 2,
     posting_rows: 0,
+    live_rows: 0,
+    executed_rows: 0,
     ready_to_upload: false,
     release_allowed: false,
+    live_1c_allowed: false,
   };
 }
 

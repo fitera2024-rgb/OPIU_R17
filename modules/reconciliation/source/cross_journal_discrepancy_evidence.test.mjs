@@ -5,6 +5,7 @@ import {
   matchCrossJournalRows,
   normalizeBusinessText,
 } from "./cross_journal_discrepancy_evidence.mjs";
+import { createArticleApprovalDocument } from "./article_approval_core.mjs";
 
 const intalevCatalogNodes = [{
   name: "Маркетинг, реклама",
@@ -58,7 +59,114 @@ function erpRow(overrides = {}) {
     credit_department: "ПВ Коммерческий отдел",
     amount: 15000,
     content: "Сертификаты (компенс.Инмарко)",
+    organization: "Сахалин",
     ...overrides,
+  };
+}
+
+const approvalScope = {
+  organizationId: "3",
+  organizationName: "Сахалин",
+  organizationHierarchyPath: "Холдинг / Сахалин",
+  period: "2025-01",
+};
+
+function approvalDecision({
+  block = "Коммерческие расходы",
+  article = "ФЗП коммерческого персонала",
+  decision = "УТВЕРЖДАЮ",
+  proposedBlock = "Коммерческие расходы",
+  proposedArticle = "ФЗП",
+  proposedCode = "COMM-FZP",
+  correctedBlock = "",
+  correctedArticle = "",
+  correctedCode = "",
+  comment = "",
+} = {}) {
+  return {
+    КлючОбласти: `3|2025-01|${normalizeBusinessText(block)}|${normalizeBusinessText(article)}`,
+    КодОрганизацииERP: "3",
+    ОрганизацияERP: "Сахалин",
+    ПериодС: "2025-01",
+    БлокИнталев: block,
+    ПутьИнталев: `Статьи ОПИУ 2025 / ${block} / ${article}`,
+    СтатьяИнталев: article,
+    ПредлагаемыйБлокERP: proposedBlock,
+    ПредлагаемаяСтатьяERP: proposedArticle,
+    КодСтатьиERP: proposedCode,
+    Действие: "КЛАССИФИКАЦИЯ",
+    РешениеПользователя: decision,
+    ПравильныйБлокERP: correctedBlock,
+    ПравильнаяСтатьяERP: correctedArticle,
+    ПравильныйКодСтатьиERP: correctedCode,
+    КомментарийПользователя: comment,
+  };
+}
+
+function approvalDocument(rows, catalogs) {
+  return createArticleApprovalDocument({
+    ...approvalScope,
+    sourceSha256: "A".repeat(64),
+    sourceXlsx: "source.xlsx",
+    actor: "DOMAIN\\user",
+    rows,
+    erpCatalog: catalogs,
+  });
+}
+
+function approvedIntergroupFixture() {
+  const catalogs = [
+    {
+      label: "ФЗП",
+      full_path: "Административные расходы / ФЗП",
+      exact_catalog_entry_node: true,
+      catalog_entries: [{ code: "ADMIN-FZP", account: "26" }],
+    },
+    {
+      label: "ФЗП",
+      full_path: "Коммерческие расходы / ФЗП",
+      exact_catalog_entry_node: true,
+      catalog_entries: [{ code: "COMM-FZP", account: "44.1" }],
+    },
+    {
+      label: "Обучение сотрудников",
+      full_path: "Коммерческие расходы / Обучение сотрудников",
+      exact_catalog_entry_node: true,
+      catalog_entries: [{ code: "COMM-TRAINING", account: "44.1" }],
+    },
+  ];
+  return {
+    intalevRows: [intalevRow({
+      source_row_id: "I-APPROVAL",
+      physical_row: 700,
+      debit: "44.1",
+      credit: "70.1",
+      debit_analytics: ["ФЗП коммерческого персонала", "Сотрудник А"],
+      credit_analytics: ["Сотрудник А"],
+      amount: 100,
+      content: "Начисление сотруднику А",
+    })],
+    erpRows: [erpRow({
+      source_row_id: "E-APPROVAL",
+      physical_row: 900,
+      debit: "26",
+      credit: "70.1",
+      debit_analytics: ["ФЗП", "Сотрудник А"],
+      credit_analytics: ["Сотрудник А"],
+      article: "ФЗП",
+      disclosure: "Счет затрат 26",
+      analytics3: "26 счет",
+      amount: 100,
+      content: "Начисление сотруднику А",
+    })],
+    intalevCatalogNodes: [{
+      name: "ФЗП коммерческого персонала",
+      full_path: "Расходы / 3_Коммерческие расходы / ФЗП коммерческого персонала",
+    }],
+    erpCatalogNodes: catalogs,
+    period: "2025-01",
+    articleApprovalScope: approvalScope,
+    allowedPhysicalOrganizations: ["Сахалин"],
   };
 }
 
@@ -149,6 +257,11 @@ test("keeps the current ERP article inside one block and derives the Intalev rep
   assert.equal(pair.intalev_report_group, "Расходы ИТ");
   assert.equal(pair.intalev_report_leaf, "Контур.Диадок");
   assert.equal(pair.intalev_report_placement_status, "PROVEN_LIVE_REPORT_LEAF_EXACT_AMOUNT");
+  assert.equal(pair.article_approval_status, "NO_APPROVED_VERSION");
+  assert.equal(pair.financial_gate_status, "СПОРНО");
+  assert.equal(pair.financial_gate_reason, "APPROVAL_NOT_FINAL");
+  assert.deepEqual(pair.correction_rows, []);
+  assert.equal(pair.financial_pair_rows, 0);
   assert.match(pair.classification, /ПРИВЯЗАНА К ГРУППЕ ИНТАЛЕВ/);
 });
 
@@ -462,4 +575,236 @@ test("proves NDFL group by employee, date and exact amount", () => {
   assert.equal(pair.source_block_erp, "административные расходы");
   assert.equal(pair.target_block_intalev, "коммерческие расходы");
   assert.equal(pair.target_article_code_erp, "COMM-NDFL");
+});
+
+test("APPROVAL-003: УТВЕРЖДАЮ overrides the automatic target before production A22 selection", () => {
+  const fixture = approvedIntergroupFixture();
+  const document = approvalDocument([
+    approvalDecision({
+      proposedArticle: "Обучение сотрудников",
+      proposedCode: "COMM-TRAINING",
+    }),
+  ], fixture.erpCatalogNodes);
+  const result = matchCrossJournalRows({
+    ...fixture,
+    articleApprovalDocument: document,
+  });
+  const pair = result.rows.find((row) => row.row_type === "UNIQUE_PAIR");
+  assert.equal(pair.article_approval_status, "APPROVED_EXACT_SCOPE");
+  assert.equal(pair.target_article_erp, "Обучение сотрудников");
+  assert.equal(pair.target_article_code_erp, "COMM-TRAINING");
+  assert.equal(pair.target_status, "APPROVED_EXACT_SCOPE_TARGET");
+  assert.equal(pair.financial_gate_status, "ДОКАЗАНО");
+  assert.deepEqual(pair.correction_rows.map((row) => row.amount), [-100, 100]);
+  assert.deepEqual(pair.correction_rows.map((row) => row.article_code), ["ADMIN-FZP", "COMM-TRAINING"]);
+  assert.equal(pair.posting_rows, 0);
+  assert.equal(pair.live_rows, 0);
+  assert.equal(pair.executed_rows, 0);
+  assert.equal(result.counts.approved_balanced_pairs, 1);
+});
+
+test("APPROVAL-003: ИЗМЕНИТЬ uses only the exact corrected target", () => {
+  const fixture = approvedIntergroupFixture();
+  const document = approvalDocument([
+    approvalDecision({
+      decision: "ИЗМЕНИТЬ",
+      correctedBlock: "Коммерческие расходы",
+      correctedArticle: "Обучение сотрудников",
+      correctedCode: "COMM-TRAINING",
+      comment: "Исправлено пользователем",
+    }),
+  ], fixture.erpCatalogNodes);
+  const result = matchCrossJournalRows({
+    ...fixture,
+    articleApprovalDocument: document,
+  });
+  const pair = result.rows.find((row) => row.row_type === "UNIQUE_PAIR");
+  assert.equal(pair.article_approval_decision, "ИЗМЕНИТЬ");
+  assert.equal(pair.target_article_code_erp, "COMM-TRAINING");
+  assert.equal(pair.financial_gate_status, "ДОКАЗАНО");
+});
+
+for (const [decision, expectedStatus, expectedReason] of [
+  ["ЗАПРЕТИТЬ", "FORBIDDEN", "APPROVAL_FORBIDDEN"],
+  ["НУЖНА ПРОВЕРКА", "APPROVAL_NOT_FINAL", "APPROVAL_NOT_FINAL"],
+  ["ПРЕДЛОЖЕНО ДВИЖКОМ", "APPROVAL_NOT_FINAL", "APPROVAL_NOT_FINAL"],
+]) {
+  test(`APPROVAL-003: ${decision} creates visible СПОРНО and zero financial pair`, () => {
+    const fixture = approvedIntergroupFixture();
+    const document = approvalDocument([
+      approvalDecision({ decision }),
+    ], fixture.erpCatalogNodes);
+    const result = matchCrossJournalRows({
+      ...fixture,
+      articleApprovalDocument: document,
+    });
+    const pair = result.rows.find((row) => row.row_type === "UNIQUE_PAIR");
+    assert.equal(pair.article_approval_status, expectedStatus);
+    assert.equal(pair.financial_gate_status, "СПОРНО");
+    assert.equal(pair.financial_gate_reason, expectedReason);
+    assert.match(pair.classification, /^СПОРНО \/ /u);
+    assert.deepEqual(pair.correction_rows, []);
+    assert.equal(result.counts.approved_balanced_pairs, 0);
+    assert.equal(result.counts.financial_pair_rows, 0);
+    assert.equal(result.counts.posting_rows, 0);
+  });
+}
+
+test("APPROVAL-003: non-final decisions stay terminal when source and automatic target are identical", () => {
+  const catalogs = [{
+    label: "ФЗП",
+    full_path: "Коммерческие расходы / ФЗП",
+    exact_catalog_entry_node: true,
+    catalog_entries: [{ code: "COMM-FZP", account: "44.1" }],
+  }];
+  const fixture = {
+    intalevRows: [intalevRow({
+      source_row_id: "I-SAME-TARGET",
+      physical_row: 1700,
+      debit: "44.1",
+      credit: "70.1",
+      debit_analytics: ["ФЗП", "Сотрудник А"],
+      credit_analytics: ["Сотрудник А"],
+      amount: 100,
+      content: "Начисление сотруднику А",
+    })],
+    erpRows: [erpRow({
+      source_row_id: "E-SAME-TARGET",
+      physical_row: 1900,
+      debit: "44.1",
+      credit: "70.1",
+      debit_analytics: ["ФЗП", "Сотрудник А"],
+      credit_analytics: ["Сотрудник А"],
+      article: "ФЗП",
+      disclosure: "Счет затрат 44.1",
+      analytics3: "44.1 счет",
+      amount: 100,
+      content: "Начисление сотруднику А",
+    })],
+    period: "2025-01",
+    intalevCatalogNodes: [{
+      name: "ФЗП",
+      full_path: "Расходы / 3_Коммерческие расходы / ФЗП",
+    }],
+    erpCatalogNodes: catalogs,
+    articleApprovalScope: approvalScope,
+    allowedPhysicalOrganizations: ["Сахалин"],
+  };
+  for (const [decision, expectedStatus, expectedReason] of [
+    ["ЗАПРЕТИТЬ", "FORBIDDEN", "APPROVAL_FORBIDDEN"],
+    ["НУЖНА ПРОВЕРКА", "APPROVAL_NOT_FINAL", "APPROVAL_NOT_FINAL"],
+    ["ПРЕДЛОЖЕНО ДВИЖКОМ", "APPROVAL_NOT_FINAL", "APPROVAL_NOT_FINAL"],
+  ]) {
+    const document = approvalDocument([
+      approvalDecision({
+        block: "Коммерческие расходы",
+        article: "ФЗП",
+        decision,
+      }),
+    ], catalogs);
+    const result = matchCrossJournalRows({
+      ...fixture,
+      articleApprovalDocument: document,
+    });
+    const pair = result.rows.find((row) => row.row_type === "UNIQUE_PAIR");
+    assert.equal(pair.article_approval_status, expectedStatus, decision);
+    assert.equal(pair.financial_gate_status, "СПОРНО", decision);
+    assert.equal(pair.financial_gate_reason, expectedReason, decision);
+    assert.match(pair.classification, /^СПОРНО \/ /u, decision);
+    assert.deepEqual(pair.correction_rows, [], decision);
+    assert.equal(pair.financial_pair_rows, 0, decision);
+    assert.equal(result.counts.approved_balanced_pairs, 0, decision);
+    assert.equal(result.counts.financial_pair_rows, 0, decision);
+    if (decision === "ЗАПРЕТИТЬ") {
+      assert.equal(pair.target_status, "APPROVAL_FORBIDDEN");
+      assert.equal(pair.target_selection_basis, "APPROVAL_FORBIDDEN");
+      assert.equal(pair.target_block_intalev, "");
+      assert.equal(pair.target_article_erp, "");
+      assert.equal(pair.target_article_code_erp, "");
+      assert.equal(pair.target_catalog_path, "");
+      assert.equal(pair.target_operating_account, "");
+      assert.equal(
+        pair.action,
+        "СПОРНО: сопоставление запрещено пользователем; автоматическая цель не применяется",
+      );
+      assert.doesNotMatch(pair.classification, /ПРИВЯЗАНА К ГРУППЕ ИНТАЛЕВ/u);
+      assert.doesNotMatch(pair.action, /подтверж|автоматическая цель применяется/iu);
+    }
+  }
+});
+
+test("APPROVAL-003: composite physical proof requires one consistent approved target", () => {
+  const catalogs = [
+    { label: "ФЗП", full_path: "Административные расходы / ФЗП", exact_catalog_entry_node: true, catalog_entries: [{ code: "ADMIN-FZP", account: "26" }] },
+    { label: "ФЗП", full_path: "Коммерческие расходы / ФЗП", exact_catalog_entry_node: true, catalog_entries: [{ code: "COMM-FZP", account: "44.1" }] },
+    { label: "НДФЛ", full_path: "Административные расходы / НДФЛ", exact_catalog_entry_node: true, catalog_entries: [{ code: "ADMIN-NDFL", account: "26" }] },
+  ];
+  const salary = intalevRow({
+    source_row_id: "I-COMP-SALARY",
+    physical_row: 1001,
+    date: "31.01.2025",
+    date_value: "2025-01-31",
+    debit: "26",
+    credit: "70",
+    debit_analytics: ["ФЗП АУП Зарплата", "Заработная плата"],
+    credit_analytics: ["Иванов Иван"],
+    amount: 80,
+    content: "",
+  });
+  const tax = intalevRow({
+    ...salary,
+    source_row_id: "I-COMP-TAX",
+    physical_row: 1002,
+    debit_analytics: ["ФЗП АУП НДФЛ", "НДФЛ"],
+    amount: 20,
+  });
+  const decisions = [
+    approvalDecision({
+      block: "Административные расходы",
+      article: "ФЗП АУП Зарплата",
+      proposedBlock: "Административные расходы",
+      proposedArticle: "ФЗП",
+      proposedCode: "ADMIN-FZP",
+    }),
+    approvalDecision({
+      block: "Административные расходы",
+      article: "ФЗП АУП НДФЛ",
+      proposedBlock: "Административные расходы",
+      proposedArticle: "НДФЛ",
+      proposedCode: "ADMIN-NDFL",
+    }),
+  ];
+  const document = approvalDocument(decisions, catalogs);
+  const result = matchCrossJournalRows({
+    intalevRows: [salary, tax],
+    erpRows: [erpRow({
+      source_row_id: "E-COMP",
+      physical_row: 2001,
+      date: "31.01.2025",
+      date_value: "2025-01-31",
+      debit: "44.1",
+      credit: "70.1",
+      debit_analytics: ["ФЗП"],
+      credit_analytics: ["Иванов Иван"],
+      article: "ФЗП",
+      disclosure: "Счет затрат 44.1",
+      analytics3: "44.1 счет",
+      amount: 100,
+      content: "",
+    })],
+    period: "2025-01",
+    intalevCatalogNodes: [
+      { name: "ФЗП АУП Зарплата", full_path: "Расходы / 2_Административные расходы / ФЗП АУП Зарплата" },
+      { name: "ФЗП АУП НДФЛ", full_path: "Расходы / 2_Административные расходы / ФЗП АУП НДФЛ" },
+    ],
+    erpCatalogNodes: catalogs,
+    articleApprovalDocument: document,
+    articleApprovalScope: approvalScope,
+    allowedPhysicalOrganizations: ["Сахалин"],
+  });
+  const pair = result.rows.find((row) => row.row_type === "PAYROLL_COMPOSITE_PAIR");
+  assert.equal(pair.article_approval_status, "APPROVAL_COMPOSITE_TARGET_CONFLICT");
+  assert.equal(pair.financial_gate_reason, "APPROVAL_COMPOSITE_TARGET_CONFLICT");
+  assert.deepEqual(pair.correction_rows, []);
+  assert.equal(result.counts.approved_balanced_pairs, 0);
 });

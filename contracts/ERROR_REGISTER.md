@@ -277,15 +277,15 @@
 ### APPROVAL-003 — approved-решение не применяется production mapping и A22 gate
 
 - Дата: `27.08.2026`
-- Статус: `NEW`
+- Статус: `IMPLEMENTED`
 - Сообщил: независимый downstream review S04.
 - Наблюдаемое поведение: R005 загружает approved JSON и добавляет metadata, но downstream target selection её не читает; `evaluateArticleApprovalFinancialGate` вызывается только unit-тестами.
 - Ожидаемое поведение: exact-scope `УТВЕРЖДАЮ/ИЗМЕНИТЬ` меняет целевую ERP-статью только после production A22 physical gate; `ЗАПРЕТИТЬ` терминально блокирует, остальные состояния не дают authority.
 - Затронутые пункты контракта: §§9.5–9.6, 12.2–12.4, 13–14; A07, A10, A11, A21, A22.
 - Допустимый scope: article approval resolver, R005 cross-journal target selection, production integration tests; R001 сохраняет независимый current-run proof и one-row-once.
 - Обязательный регрессионный тест: wrong-block override, change, forbid, composite consistency, missing/duplicate/stale/reused ERP row, одна доказанная balanced pair; полный C02 `256/256`.
-- Реализация: ожидается.
-- Протокол проверки: ожидается.
+- Реализация: exact-scope approved загружается до automatic target selection. `УТВЕРЖДАЮ` применяет предложенную, `ИЗМЕНИТЬ` — исправленную exact ERP-цель; `ЗАПРЕТИТЬ` терминально возвращает пустую blocked-цель без автоматического подтверждения; незавершённые решения остаются только диагностикой. Production A22 повторно открывает ровно одну физическую строку ERP, проверяет cross-journal proof, period/org/amount/unique/reuse и общий набор SourceRowID для direct/composite. Успех создаёт только сбалансированную пару STORNO/REPOST, ошибка — видимое `СПОРНО` и 0 финансовых строк; `04B` получает только успешные gate-строки. Все posting/live/executed gates равны 0 в REPORT_ONLY.
+- Протокол проверки: targeted APPROVAL-003/S04 — `38/38 PASS`; полный reconciliation/R005 — `223 PASS`, `0 FAIL`, `1` ожидаемый external-golden skip; C02 baseline без параллельного S09 handoff — `256/256 PASS`; syntax/scoped diff-check PASS. Независимый review повторил `38/38`, `223+1 skip`, C02 `256/256` и отдельно воспроизвёл terminal `ЗАПРЕТИТЬ`: пустые target fields, `APPROVAL_FORBIDDEN`, точное пользовательское объяснение и 0 пары/authority.
 
 ### STR-001 — wrapper оставляет raw structural plan при authoritative inventory
 

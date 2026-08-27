@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -41,6 +42,50 @@ async function writeZip(filePath, entries) {
   const zip = new JSZip();
   for (const [name, value] of entries) zip.file(name, value);
   await fs.writeFile(filePath, await zip.generateAsync({ type: "nodebuffer" }));
+}
+
+async function syntheticOoxmlWorkbook(headers, { malformedWorksheet = false } = {}) {
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?>
+    <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+      <Default Extension="xml" ContentType="application/xml"/>
+      <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+      <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+    </Types>`);
+  zip.file("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?>
+    <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+      xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <sheets><sheet name="Arbitrary" sheetId="1" r:id="rId1"/></sheets>
+    </workbook>`);
+  zip.file("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+    </Relationships>`);
+  const cells = headers.map((header, index) => {
+    const column = String.fromCharCode("A".charCodeAt(0) + index);
+    return `<c r="${column}1" t="inlineStr"><is><t>${header}</t></is></c>`;
+  }).join("");
+  const worksheet = `<?xml version="1.0" encoding="UTF-8"?>
+    <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+      <sheetData><row r="1">${cells}</row></sheetData>
+    </worksheet>`;
+  zip.file(
+    "xl/worksheets/sheet1.xml",
+    malformedWorksheet ? worksheet.replace("</worksheet>", "") : worksheet,
+  );
+  return zip.generateAsync({ type: "nodebuffer" });
+}
+
+async function sha256File(filePath) {
+  const hash = crypto.createHash("sha256");
+  const handle = await fs.open(filePath, "r");
+  try {
+    for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk);
+  } finally {
+    await handle.close();
+  }
+  return hash.digest("hex").toUpperCase();
 }
 
 function duplicateOnlyCentralDirectoryEntry(bytes) {
@@ -187,6 +232,166 @@ test("directory discovery publishes the actual filesystem scan totals", async (t
     entries: 3,
     bytes: Buffer.byteLength(classifier) + Buffer.byteLength(evidence),
   });
+});
+
+test("tri-state OOXML preflight reduces 67 and 7 file inventories to two full probes", async (t) => {
+  for (const inventorySize of [67, 7]) {
+    await t.test(`${inventorySize} XLSX`, async (t) => {
+      const root = await fixture(t);
+      const archive = path.join(root, `inventory-${inventorySize}.zip`);
+      const noSchema = await syntheticOoxmlWorkbook(["Период", "Сумма"]);
+      const possibleSchema = await syntheticOoxmlWorkbook([
+        "UUID",
+        "UUIDРодителя",
+        "Наименование",
+      ]);
+      const skippedCount = inventorySize - 2;
+      const entries = Array.from({ length: skippedCount }, (_, index) => [
+        `a-report-${String(index + 1).padStart(3, "0")}.xlsx`,
+        noSchema,
+      ]);
+      entries.push(["y-arbitrary-name.xlsx", possibleSchema]);
+      entries.push(["z-unsupported.xlsx", "UNSUPPORTED_WORKBOOK_PROBE_REQUIRED"]);
+      await writeZip(archive, entries);
+      const observedOrdinals = [];
+      const discovery = await discoverIntalevArticleCatalog({
+        sourcePath: archive,
+        workDir: path.join(root, "work"),
+        probeWorkbook: async (_filePath, ordinal) => {
+          observedOrdinals.push(ordinal);
+          return ordinal === inventorySize - 1 ? validCatalog() : {
+            structured_parent_export: false,
+            entries: [],
+            hierarchy_tree: { status: "BLOCKED_INTALEV_CATALOG_NOT_EXPORTED" },
+          };
+        },
+      });
+
+      assert.deepEqual(observedOrdinals, [inventorySize - 1, inventorySize]);
+      assert.equal(discovery.candidate_count, 1);
+      assert.equal(discovery.selected.provenance.entry_path, "y-arbitrary-name.xlsx");
+      assert.match(
+        path.basename(discovery.selected.source_path),
+        new RegExp(`candidate_${String(inventorySize - 1).padStart(4, "0")}_`),
+      );
+    });
+  }
+});
+
+test("malformed and unsupported OOXML fall back to full probe while decoded no-schema skips", async (t) => {
+  const root = await fixture(t);
+  const archive = path.join(root, "tri-state.zip");
+  await writeZip(archive, [
+    ["a-decoded-no-schema.xlsx", await syntheticOoxmlWorkbook(["Период", "Сумма"])],
+    ["b-malformed.xlsx", await syntheticOoxmlWorkbook(["UUID"], { malformedWorksheet: true })],
+    ["c-unsupported.xlsx", "NOT_AN_OOXML_PACKAGE"],
+  ]);
+  const observedOrdinals = [];
+  const result = await discoverIntalevArticleCatalog({
+    sourcePath: archive,
+    workDir: path.join(root, "work"),
+    probeWorkbook: async (_filePath, ordinal) => {
+      observedOrdinals.push(ordinal);
+      return {
+        structured_parent_export: false,
+        entries: [],
+        hierarchy_tree: { status: "BLOCKED_INTALEV_CATALOG_NOT_EXPORTED" },
+      };
+    },
+  });
+  assert.deepEqual(observedOrdinals, [2, 3]);
+  assert.equal(result.candidate_count, 0);
+});
+
+test("preflight scans every possible schema and preserves fail-closed ambiguity", async (t) => {
+  const root = await fixture(t);
+  const archive = path.join(root, "ambiguous-preflight.zip");
+  const noSchema = await syntheticOoxmlWorkbook(["Период", "Сумма"]);
+  const possibleSchema = await syntheticOoxmlWorkbook(["Ссылка", "Родитель", "Наименование"]);
+  await writeZip(archive, [
+    ["a-no-schema.xlsx", noSchema],
+    ["b-first-arbitrary.xlsx", possibleSchema],
+    ["c-second-arbitrary.xlsx", possibleSchema],
+  ]);
+  const observedOrdinals = [];
+  await assert.rejects(
+    discoverIntalevArticleCatalog({
+      sourcePath: archive,
+      workDir: path.join(root, "work"),
+      probeWorkbook: async (_filePath, ordinal) => {
+        observedOrdinals.push(ordinal);
+        return validCatalog();
+      },
+    }),
+    (error) => error instanceof IntalevCatalogBindingError &&
+      error.code === "BLOCKED_SOURCE_PROOF_AMBIGUOUS_SOURCE",
+  );
+  assert.deepEqual(observedOrdinals, [2, 3]);
+});
+
+test("real Intalev inputs preserve exact classifier semantics when their SHA-256 is pinned", async (t) => {
+  const inputs = [
+    {
+      label: "9 UK",
+      sourcePath: path.join(
+        os.homedir(),
+        "Desktop",
+        "ЦД_ЦЗ Фонд развития_Архив_Инталев_20250101_20251231.zip",
+      ),
+      sourceSha256: "3FA5D75ECA20920BC70DE59F17EDF19F4A1720D9B675EE8AAAEEDACA0BE5A340",
+      entryPath: "ЦД_ЦЗ Фонд развития_Статьи_Классификатор_Статьи БДР.xlsx",
+      candidateSha256: "D74F4DB8C359D490FC1DE7AA440AE073ECE78C23F430D28691D629193E8F9A75",
+      ordinal: 66,
+      nodeCount: 220,
+    },
+    {
+      label: "3 Sakhalin",
+      sourcePath: path.join(
+        os.homedir(),
+        "Desktop",
+        "САХАЛИН",
+        "ЦМД Сахалин_Архив_Инталев_20250101_20250131.zip",
+      ),
+      sourceSha256: "AE230FB3E960D1E36C0D2288A33831D6D4D74772C769E7603D6E20916DB49DE0",
+      entryPath: "ЦМД Сахалин_Статьи_Классификатор_Статьи БДР.xlsx",
+      candidateSha256: "13F2BFBC47213A31EF22971F78B5791561AA60360DD8EE1A28FE874597B36228",
+      ordinal: 6,
+      nodeCount: 219,
+    },
+  ];
+  for (const input of inputs) {
+    await t.test(input.label, async (t) => {
+      try {
+        await fs.access(input.sourcePath);
+      } catch {
+        t.skip("real control input is unavailable");
+        return;
+      }
+      const actualSha256 = await sha256File(input.sourcePath);
+      if (actualSha256 !== input.sourceSha256) {
+        t.skip(`real control input SHA-256 differs: ${actualSha256}`);
+        return;
+      }
+      const root = await fixture(t);
+      const { parseIntalevArticleCatalog } = await import("./opiu_reconcile.mjs");
+      const probedOrdinals = [];
+      const discovery = await discoverIntalevArticleCatalog({
+        sourcePath: input.sourcePath,
+        workDir: path.join(root, "candidates"),
+        probeWorkbook: async (candidatePath, ordinal) => {
+          probedOrdinals.push(ordinal);
+          return parseIntalevArticleCatalog(root, candidatePath, `real_smoke_${ordinal}`);
+        },
+      });
+      assert.equal(discovery.status, "PASS_EXACTLY_ONE_STRUCTURAL_CLASSIFIER");
+      assert.equal(discovery.candidate_count, 1);
+      assert.equal(discovery.selected.provenance.entry_path, input.entryPath);
+      assert.equal(discovery.selected.provenance.sha256, input.candidateSha256);
+      assert.equal(discovery.selected.provenance.node_count, input.nodeCount);
+      assert.equal(discovery.selected.provenance.sheet, "TDSheet");
+      assert.deepEqual(probedOrdinals, [input.ordinal, input.ordinal + 1]);
+    });
+  }
 });
 
 test("traversal, case-collision, and archive limits are rejected before extraction", async (t) => {

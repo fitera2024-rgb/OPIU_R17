@@ -233,3 +233,17 @@
 - Реализация:
 - Протокол проверки:
 ```
+
+### PERF-001 — discovery полностью открывает каждый XLSX архива Инталев
+
+- Дата: `27.08.2026`
+- Статус: `IMPLEMENTED`
+- Сообщил: пользователь по результатам profiling R005.
+- Наблюдаемое поведение: discovery справочника Инталев последовательно выполняет полный workbook probe для всех XLSX-кандидатов: 67 файлов на входе 9 УК и 7 файлов на входе 3 Сахалин. Измеренный profiling baseline R005: 9 УК 2025-10 — `120.704 с`, 9 УК 2025-11 — `120.983 с`, 3 Сахалин 2025-01 — `188.933 с`.
+- Ожидаемое поведение: дешёвый tri-state OOXML preflight без изменения семантики выбора исключает полный probe только для полностью декодированного XLSX, в котором доказанно отсутствует требуемая schema; malformed или unsupported XLSX обязательно передаётся существующему полному probe.
+- Доказательство / файл / скриншот: profiling контрольных входов с точными SHA-256; `modules/reconciliation/source/intalev_catalog_binding.mjs`, полный probe каждого `.xlsx` при archive/directory discovery.
+- Затронутые пункты контракта: §§3.1, 4, 13–14; A01, A02, A06, A07, A10, A12–A15.
+- Новое или уточнённое требование: имя файла не является authority; сканируются все кандидаты; ordinal, provenance, source drift и fail-closed ambiguity не меняются; preflight не ослабляет physical-proof, `REPORT_ONLY` или safety.
+- Обязательный регрессионный тест: synthetic inventory `67→2` и `7→2` полных probe; malformed/unsupported→full probe; fully decoded no-schema→skip; classifier с произвольным именем выбирается; два валидных классификатора остаются ambiguous; real-input semantic smoke запускается только при наличии входа с точным ожидаемым SHA-256.
+- Реализация: PERF-001 в `intalev_catalog_binding.mjs`: tri-state OOXML preflight использует канонический `detectIntalevCatalogHeaders`, пропускает только полностью декодированный no-schema и сохраняет полный probe для possible, malformed и unsupported.
+- Протокол проверки: scoped `18/18 PASS`; synthetic `67→2` и `7→2`; real exact-SHA smoke сохраняет ordinal `66/6`, SHA classifier, `TDSheet`, `220/219` узлов; R005 after `51.681/43.634/42.897 с`; полный R005 `212 PASS / 7` известных несвязанных падений.

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import JSZip from "jszip";
+import { detectIntalevCatalogHeaders } from "./intalev_catalog_parser.mjs";
 
 const DEFAULT_LIMITS = Object.freeze({
   max_entries: 10_000,
@@ -447,6 +448,254 @@ async function readBoundedEntry(entry, details) {
   return bytes;
 }
 
+const OOXML_PREFLIGHT = Object.freeze({
+  POSSIBLE_SCHEMA: "POSSIBLE_SCHEMA",
+  FULLY_DECODED_NO_SCHEMA: "FULLY_DECODED_NO_SCHEMA",
+  UNKNOWN: "UNKNOWN",
+});
+
+const OOXML_PREFLIGHT_MAX_PART_BYTES = 128 * 1024 * 1024;
+const OOXML_PREFLIGHT_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+
+function decodeXmlEntities(value) {
+  const source = String(value ?? "");
+  if (/&(?!#x[0-9a-f]+;|#[0-9]+;|amp;|apos;|gt;|lt;|quot;)/i.test(source)) {
+    throw new Error("OOXML_ENTITY_UNSUPPORTED");
+  }
+  return source.replace(
+    /&(?:#x[0-9a-f]+|#[0-9]+|amp|apos|gt|lt|quot);/gi,
+    (entity) => {
+      const key = entity.slice(1, -1).toLocaleLowerCase("en-US");
+      if (key === "amp") return "&";
+      if (key === "apos") return "'";
+      if (key === "gt") return ">";
+      if (key === "lt") return "<";
+      if (key === "quot") return '"';
+      const codePoint = key.startsWith("#x")
+        ? Number.parseInt(key.slice(2), 16)
+        : Number.parseInt(key.slice(1), 10);
+      if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) {
+        throw new Error("OOXML_ENTITY_UNSUPPORTED");
+      }
+      return String.fromCodePoint(codePoint);
+    },
+  );
+}
+
+function xmlAttribute(attributes, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = String(attributes ?? "").match(
+    new RegExp(`(?:^|\\s)${escaped}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, "i"),
+  );
+  return match ? decodeXmlEntities(match[2]) : null;
+}
+
+function xmlElements(xml, localName) {
+  const prefix = "(?:[A-Za-z_][\\w.-]*:)?";
+  const expression = new RegExp(
+    `<${prefix}${localName}\\b([^>]*)\\/>|<${prefix}${localName}\\b([^>]*)>([\\s\\S]*?)<\\/${prefix}${localName}\\s*>`,
+    "gi",
+  );
+  const result = [];
+  let match;
+  while ((match = expression.exec(xml)) !== null) {
+    result.push({ attributes: match[1] ?? match[2] ?? "", body: match[3] ?? "" });
+  }
+  const openings = xml.match(new RegExp(`<${prefix}${localName}\\b`, "gi"))?.length ?? 0;
+  return result.length === openings ? result : null;
+}
+
+function wellFormedSupportedXml(source) {
+  const stack = [];
+  const tag = /<([^>]+)>/g;
+  let cursor = 0;
+  let match;
+  while ((match = tag.exec(source)) !== null) {
+    decodeXmlEntities(source.slice(cursor, match.index));
+    cursor = tag.lastIndex;
+    const token = match[1].trim();
+    if (/^\?xml\b[^?]*\?$/i.test(token)) continue;
+    if (token.startsWith("?") || token.startsWith("!")) return false;
+    const closing = token.startsWith("/");
+    const selfClosing = !closing && token.endsWith("/");
+    const body = token.slice(closing ? 1 : 0, selfClosing ? -1 : undefined).trim();
+    const nameMatch = body.match(/^([A-Za-z_][\w.:-]*)([\s\S]*)$/);
+    if (!nameMatch) return false;
+    const name = nameMatch[1];
+    if (closing) {
+      if (nameMatch[2].trim() || stack.pop() !== name) return false;
+      continue;
+    }
+    let attributes = nameMatch[2];
+    const attribute = /^\s+([A-Za-z_][\w.:-]*)\s*=\s*(["'])([\s\S]*?)\2/;
+    while (attributes.length > 0) {
+      if (!attributes.trim()) break;
+      const attributeMatch = attributes.match(attribute);
+      if (!attributeMatch) return false;
+      decodeXmlEntities(attributeMatch[3]);
+      attributes = attributes.slice(attributeMatch[0].length);
+    }
+    if (!selfClosing) stack.push(name);
+  }
+  decodeXmlEntities(source.slice(cursor));
+  return stack.length === 0 && !source.slice(cursor).includes("<");
+}
+
+function supportedXmlDocument(xml, rootName) {
+  const source = String(xml ?? "").replace(/^\uFEFF/, "");
+  if (/<!DOCTYPE|<!ENTITY/i.test(source)) return false;
+  const declaration = source.match(/^\s*<\?xml\b([^?]*)\?>/i);
+  const encoding = declaration ? xmlAttribute(declaration[1], "encoding") : null;
+  if (encoding && !/^utf-?8$/i.test(encoding)) return false;
+  const prefix = "(?:[A-Za-z_][\\w.-]*:)?";
+  return wellFormedSupportedXml(source) &&
+    new RegExp(`<${prefix}${rootName}\\b`, "i").test(source) &&
+    new RegExp(`<\\/${prefix}${rootName}\\s*>`, "i").test(source);
+}
+
+function xmlTextNodes(fragment) {
+  const elements = xmlElements(fragment, "t");
+  if (!elements) return null;
+  if (elements.some((item) => /<[^>]+>/.test(item.body))) return null;
+  return elements.map((item) => decodeXmlEntities(item.body)).join("");
+}
+
+function sharedStringsFromXml(xml) {
+  if (!supportedXmlDocument(xml, "sst")) return null;
+  const items = xmlElements(xml, "si");
+  if (!items) return null;
+  const result = [];
+  for (const item of items) {
+    const value = xmlTextNodes(item.body);
+    if (value === null) return null;
+    result.push(value);
+  }
+  return result;
+}
+
+function rowContainsCatalogHeader(values) {
+  return detectIntalevCatalogHeaders([values], 1).headerRowIndex === 0;
+}
+
+function worksheetCatalogPreflight(xml, sharedStrings) {
+  if (!supportedXmlDocument(xml, "worksheet")) return OOXML_PREFLIGHT.UNKNOWN;
+  const sheetData = xmlElements(xml, "sheetData");
+  if (!sheetData || sheetData.length !== 1) return OOXML_PREFLIGHT.UNKNOWN;
+  const rows = xmlElements(sheetData[0].body, "row");
+  if (!rows) return OOXML_PREFLIGHT.UNKNOWN;
+  let previousRow = 0;
+  for (const row of rows) {
+    const rowAttribute = xmlAttribute(row.attributes, "r");
+    if (!/^\d+$/.test(rowAttribute ?? "")) return OOXML_PREFLIGHT.UNKNOWN;
+    const rowNumber = Number.parseInt(rowAttribute, 10);
+    if (!Number.isSafeInteger(rowNumber) || rowNumber <= previousRow) {
+      return OOXML_PREFLIGHT.UNKNOWN;
+    }
+    previousRow = rowNumber;
+    if (rowNumber > 15) continue;
+    const cells = xmlElements(row.body, "c");
+    if (!cells) return OOXML_PREFLIGHT.UNKNOWN;
+    const values = [];
+    for (const cell of cells) {
+      const type = xmlAttribute(cell.attributes, "t") ?? "n";
+      const valueElements = xmlElements(cell.body, "v");
+      if (!valueElements || valueElements.length > 1) return OOXML_PREFLIGHT.UNKNOWN;
+      if (type === "s") {
+        if (valueElements.length !== 1 || !sharedStrings) return OOXML_PREFLIGHT.UNKNOWN;
+        const indexText = decodeXmlEntities(valueElements[0].body);
+        if (!/^\d+$/.test(indexText)) return OOXML_PREFLIGHT.UNKNOWN;
+        const index = Number.parseInt(indexText, 10);
+        if (!Number.isSafeInteger(index) || index < 0 || index >= sharedStrings.length) {
+          return OOXML_PREFLIGHT.UNKNOWN;
+        }
+        values.push(sharedStrings[index]);
+      } else if (type === "inlineStr") {
+        const inlineStrings = xmlElements(cell.body, "is");
+        if (!inlineStrings || inlineStrings.length !== 1) return OOXML_PREFLIGHT.UNKNOWN;
+        const value = xmlTextNodes(inlineStrings[0].body);
+        if (value === null) return OOXML_PREFLIGHT.UNKNOWN;
+        values.push(value);
+      } else if (["str", "n", "b", "e", "d"].includes(type)) {
+        if (valueElements.some((item) => /<[^>]+>/.test(item.body))) {
+          return OOXML_PREFLIGHT.UNKNOWN;
+        }
+        values.push(valueElements.length === 1
+          ? decodeXmlEntities(valueElements[0].body)
+          : "");
+      } else {
+        return OOXML_PREFLIGHT.UNKNOWN;
+      }
+    }
+    if (rowContainsCatalogHeader(values)) return OOXML_PREFLIGHT.POSSIBLE_SCHEMA;
+  }
+  return OOXML_PREFLIGHT.FULLY_DECODED_NO_SCHEMA;
+}
+
+function uniqueZipEntry(zip, lowerName) {
+  const matches = Object.entries(zip.files).filter(([name, entry]) =>
+    !entry.dir && portable(name).toLocaleLowerCase("en-US") === lowerName);
+  return matches.length === 1 ? matches[0][1] : null;
+}
+
+async function readOoxmlXmlPart(entry, budget) {
+  const declaredSize = Number(entry?._data?.uncompressedSize);
+  if (
+    !Number.isSafeInteger(declaredSize) ||
+    declaredSize < 0 ||
+    declaredSize > OOXML_PREFLIGHT_MAX_PART_BYTES ||
+    budget.bytes + declaredSize > OOXML_PREFLIGHT_MAX_TOTAL_BYTES
+  ) return null;
+  budget.bytes += declaredSize;
+  return entry.async("string");
+}
+
+async function intalevCatalogOoxmlPreflight(bytes) {
+  try {
+    const zip = await JSZip.loadAsync(bytes);
+    const contentTypes = uniqueZipEntry(zip, "[content_types].xml");
+    const workbook = uniqueZipEntry(zip, "xl/workbook.xml");
+    const workbookRelationships = uniqueZipEntry(zip, "xl/_rels/workbook.xml.rels");
+    const worksheetEntries = Object.entries(zip.files)
+      .filter(([name, entry]) =>
+        !entry.dir && /^xl\/worksheets\/[^/]+\.xml$/i.test(portable(name)))
+      .sort(([left], [right]) => left.localeCompare(right, "en"));
+    if (!contentTypes || !workbook || !workbookRelationships || worksheetEntries.length === 0) {
+      return OOXML_PREFLIGHT.UNKNOWN;
+    }
+    const budget = { bytes: 0 };
+    const [contentTypesXml, workbookXml, relationshipsXml] = await Promise.all([
+      readOoxmlXmlPart(contentTypes, budget),
+      readOoxmlXmlPart(workbook, budget),
+      readOoxmlXmlPart(workbookRelationships, budget),
+    ]);
+    if (
+      !supportedXmlDocument(contentTypesXml, "Types") ||
+      !supportedXmlDocument(workbookXml, "workbook") ||
+      !supportedXmlDocument(relationshipsXml, "Relationships")
+    ) return OOXML_PREFLIGHT.UNKNOWN;
+    const workbookSheets = xmlElements(workbookXml, "sheet");
+    if (!workbookSheets || workbookSheets.length !== worksheetEntries.length) {
+      return OOXML_PREFLIGHT.UNKNOWN;
+    }
+    const sharedStringsEntry = Object.entries(zip.files).find(([name, entry]) =>
+      !entry.dir && portable(name).toLocaleLowerCase("en-US") === "xl/sharedstrings.xml")?.[1] ?? null;
+    const sharedStringsXml = sharedStringsEntry
+      ? await readOoxmlXmlPart(sharedStringsEntry, budget)
+      : null;
+    const sharedStrings = sharedStringsEntry ? sharedStringsFromXml(sharedStringsXml) : [];
+    if (sharedStringsEntry && !sharedStrings) return OOXML_PREFLIGHT.UNKNOWN;
+    for (const [, worksheetEntry] of worksheetEntries) {
+      const worksheetXml = await readOoxmlXmlPart(worksheetEntry, budget);
+      if (worksheetXml === null) return OOXML_PREFLIGHT.UNKNOWN;
+      const result = worksheetCatalogPreflight(worksheetXml, sharedStrings);
+      if (result !== OOXML_PREFLIGHT.FULLY_DECODED_NO_SCHEMA) return result;
+    }
+    return OOXML_PREFLIGHT.FULLY_DECODED_NO_SCHEMA;
+  } catch {
+    return OOXML_PREFLIGHT.UNKNOWN;
+  }
+}
+
 async function writeCandidate(bytes, workDir, ordinal) {
   const hash = sha256(bytes);
   const target = path.join(workDir, `intalev_catalog_candidate_${String(ordinal).padStart(4, "0")}_${hash.slice(0, 12)}.xlsx`);
@@ -456,8 +705,11 @@ async function writeCandidate(bytes, workDir, ordinal) {
 }
 
 async function inspectWorkbook({ bytes, sourcePath, provenance, probeWorkbook, workDir, candidates, ordinal }) {
+  const workbookBytes = bytes ?? await fs.readFile(sourcePath);
+  const preflight = await intalevCatalogOoxmlPreflight(workbookBytes);
+  if (preflight === OOXML_PREFLIGHT.FULLY_DECODED_NO_SCHEMA) return;
   const materialized = bytes
-    ? await writeCandidate(bytes, workDir, ordinal)
+    ? await writeCandidate(workbookBytes, workDir, ordinal)
     : { target: sourcePath, hash: await sha256File(sourcePath) };
   const stat = await fs.stat(materialized.target);
   let parsed;

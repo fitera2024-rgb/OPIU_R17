@@ -60,4 +60,3 @@ export function advanceIntalevOutlinePath(stack, { level, label, identity } = {}
       parentLevel !== null && exactLevel - Number(parentLevel) > 1,
   });
 }
-

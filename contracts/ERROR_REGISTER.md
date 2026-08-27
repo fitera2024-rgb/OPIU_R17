@@ -247,3 +247,107 @@
 - Обязательный регрессионный тест: synthetic inventory `67→2` и `7→2` полных probe; malformed/unsupported→full probe; fully decoded no-schema→skip; classifier с произвольным именем выбирается; два валидных классификатора остаются ambiguous; real-input semantic smoke запускается только при наличии входа с точным ожидаемым SHA-256.
 - Реализация: PERF-001 в `intalev_catalog_binding.mjs`: tri-state OOXML preflight использует канонический `detectIntalevCatalogHeaders`, пропускает только полностью декодированный no-schema и сохраняет полный probe для possible, malformed и unsupported.
 - Протокол проверки: scoped `18/18 PASS`; synthetic `67→2` и `7→2`; real exact-SHA smoke сохраняет ordinal `66/6`, SHA classifier, `TDSheet`, `220/219` узлов; R005 after `51.681/43.634/42.897 с`; полный R005 `212 PASS / 7` известных несвязанных падений.
+
+### TEST-001 — fixture empty-article binding отстал от строгой схемы safety
+
+- Дата: `27.08.2026`
+- Статус: `NEW`
+- Сообщил: полный post-commit regression.
+- Наблюдаемое поведение: `empty_article_binding_application.test.mjs` передаёт 11 safety-ключей; строгий production-loader после `R005-007` требует 15 и блокирует шесть тестов кодом `BLOCKED_EMPTY_ARTICLE_BINDING_SETTINGS_SAFETY_KEYS_INVALID`.
+- Ожидаемое поведение: test fixture содержит ровно 15 безопасных ключей, включая `report_only`, `executed_posting_rows`, `live_posting_rows`, `live_delete_allowed`; production-validator не ослабляется.
+- Затронутые пункты контракта: §§3.1, 9.5–9.6, 13–14; A06, A10, A17–A22.
+- Допустимый scope: только `modules/reconciliation/source/empty_article_binding_application.test.mjs`.
+- Обязательный регрессионный тест: targeted `7/7`, полный reconciliation `198/198`, corrections `256/256`.
+- Реализация: ожидается.
+- Протокол проверки: ожидается.
+
+### APPROVAL-002 — API не отдаёт authoritative очередь `01_Правила` текущего запуска
+
+- Дата: `27.08.2026`
+- Статус: `NEW`
+- Сообщил: независимый review S04/S05.
+- Наблюдаемое поведение: GET возвращает только последнюю approved-версию, а POST требует от браузера server path, SHA и полные исходные строки; server-bound `row_id`, `queue_revision` и `bulk_approvable` отсутствуют.
+- Ожидаемое поведение: queue-mode по `run_id` сам привязывает exact R005 XLSX, scope, actor, 21 колонку и ERP-каталог; браузер передаёт только opaque row/revision и редактируемые решения.
+- Затронутые пункты контракта: §§9.5–9.6, 11, 13–14; A17–A24.
+- Допустимый scope: `service/source/article_approvals.go`, `article_approvals_test.go`; UI — отдельная S05-задача.
+- Обязательный регрессионный тест: stale SHA/revision, чужой scope и client authority блокируются; bulk только для server-proven однозначных строк; fix публикует атомарную immutable JSON+SHA пару.
+- Реализация: ожидается.
+- Протокол проверки: ожидается.
+
+### APPROVAL-003 — approved-решение не применяется production mapping и A22 gate
+
+- Дата: `27.08.2026`
+- Статус: `NEW`
+- Сообщил: независимый downstream review S04.
+- Наблюдаемое поведение: R005 загружает approved JSON и добавляет metadata, но downstream target selection её не читает; `evaluateArticleApprovalFinancialGate` вызывается только unit-тестами.
+- Ожидаемое поведение: exact-scope `УТВЕРЖДАЮ/ИЗМЕНИТЬ` меняет целевую ERP-статью только после production A22 physical gate; `ЗАПРЕТИТЬ` терминально блокирует, остальные состояния не дают authority.
+- Затронутые пункты контракта: §§9.5–9.6, 12.2–12.4, 13–14; A07, A10, A11, A21, A22.
+- Допустимый scope: article approval resolver, R005 cross-journal target selection, production integration tests; R001 сохраняет независимый current-run proof и one-row-once.
+- Обязательный регрессионный тест: wrong-block override, change, forbid, composite consistency, missing/duplicate/stale/reused ERP row, одна доказанная balanced pair; полный C02 `256/256`.
+- Реализация: ожидается.
+- Протокол проверки: ожидается.
+
+### STR-001 — wrapper оставляет raw structural plan при authoritative inventory
+
+- Дата: `27.08.2026`
+- Статус: `NEW`
+- Сообщил: авторитетный acceptance и независимый structural review.
+- Наблюдаемое поведение: core plan строится по raw hierarchy, wrapper материализует inventory по другой authoritative projection, но raw plan остаётся в Codex input и manifest; возникают оба `*_STRUCTURAL_PLAN_SCOPE_MISMATCH` и `CURRENT_RUN_SCOPE_NOT_VERIFIED`.
+- Ожидаемое поведение: wrapper один раз строит authoritative hierarchy/plan и записывает один exact inventory ID и hashes в Codex input, manifest и materialized inventory; validators не ослабляются.
+- Затронутые пункты контракта: §§4–6, 10, 13–14; A01, A02, A04, A07, A09.
+- Допустимый scope: `service_r005_owner_wrapper.mjs` и `service_r005_owner_wrapper_inventory.test.mjs`.
+- Обязательный регрессионный тест: production-shape raw plan переписывается authoritative plan; stale/foreign/scope drift остаются BLOCKED; Сахалин NOT_PASS не обходится.
+- Реализация: ожидается.
+- Протокол проверки: ожидается.
+
+### ARCH-001 — production pipeline всё ещё требует Rules stage
+
+- Дата: `27.08.2026`
+- Статус: `NEW`
+- Сообщил: авторитетный acceptance и S09 architecture audit.
+- Наблюдаемое поведение: Service выполняет обязательную цепочку `R005 → RULES → R001`, читает mutable registry/legacy defaults и содержит WAIT_USER_RULES/review contour, хотя контракт требует `rules_service=false` и прямой доказательный R005→R001.
+- Ожидаемое поведение: Service-owned immutable handoff с SHA/scope/period/proof передаёт R005 напрямую R001; старые 177 rules, registry, `OPIU_RULES_CMD_JSON`, Rules UI/state и defaults не являются runtime dependency.
+- Затронутые пункты контракта: §§1, 1.2, 3–7, 9–10, 12–14, 16; A01–A12, A17–A22.
+- Допустимый scope: S09 migration по отдельной принятой карте; S04/S06 safety сохраняется, Rules не заменяется скрытым эквивалентом.
+- Обязательный регрессионный тест: ровно два stages R005/R001; corrupt SHA/scope/proof блокирует; без physical proof только СПОРНО; package не содержит legacy Rules runtime/defaults.
+- Реализация: ожидается.
+- Протокол проверки: ожидается.
+
+### R005-008 — у UK отсутствует обязательный лист `08_Операции_журнала`
+
+- Дата: `27.08.2026`
+- Статус: `NEW`
+- Сообщил: авторитетный acceptance exact HEAD `4e34cc9`.
+- Наблюдаемое поведение: UK Oct/Nov создаёт `09_Доказанные_операции`, но не точный обязательный `08_Операции_журнала`; Сахалин формирует required set.
+- Ожидаемое поведение: точный обязательный лист существует всегда, включая ноль доказанных операций; старое имя не подменяет контрактное.
+- Затронутые пункты контракта: §§10, 13–14; A05, A10, A12–A15.
+- Допустимый scope: workbook writer и mandatory-sheet contract tests; consumers мигрируются явно.
+- Обязательный регрессионный тест: exact sheet name/order на UK/Sakhalin и пустой run, без формульных ошибок.
+- Реализация: ожидается.
+- Протокол проверки: ожидается.
+
+### CORR-002 — owner wrapper передаёт запрещённый core-параметр `--decisions`
+
+- Дата: `27.08.2026`
+- Статус: `NEW`
+- Сообщил: независимый S04 downstream review.
+- Наблюдаемое поведение: `service_r001_owner_wrapper.mjs` добавляет `--decisions`, а `correction_engine_r001.mjs` безусловно отклоняет этот параметр; штатный production E2E не может быть доказан.
+- Ожидаемое поведение: wrapper и core используют одну contract-bound схему immutable handoff; произвольные решения не получают authority.
+- Затронутые пункты контракта: §§7, 9, 12–14; A07–A12, A22.
+- Допустимый scope: определяется отдельным audit; safety/proof gates не ослабляются.
+- Обязательный регрессионный тест: production wrapper запускает core, exact handoff принят, legacy/arbitrary decisions блокируются, C02 `256/256`.
+- Реализация: ожидается.
+- Протокол проверки: ожидается.
+
+### R005-009 — октябрьский `R036` расходится с подтверждённым r13
+
+- Дата: `27.08.2026`
+- Статус: `NEW`
+- Сообщил: авторитетный acceptance exact HEAD `4e34cc9`.
+- Наблюдаемое поведение: golden r13 `R036 Инталев = 10 756 935,99`, delta `+831 254,00`; current `9 560 865,99`, delta `−364 816,00`; exact operations `21 → 16`, остальные 64 top-кода совпали.
+- Ожидаемое поведение: при тех же утверждённых входах и scope R036 и физические операции совпадают с golden либо расхождение полностью объяснено доказанной сменой входа/контракта.
+- Затронутые пункты контракта: §§4–7, 10, 12–14; A01–A12, A15.
+- Допустимый scope: только после независимой трассировки пяти потерянных операций; никаких ручных сумм, Rules или бизнес-fixtures.
+- Обязательный регрессионный тест: точные physical row identities и суммы пяти операций, source SHA/scope/profile; current R005 восстанавливает golden при неизменных входах либо fail-closed фиксирует доказанный input drift.
+- Реализация: ожидается диагностика task `OPIU R17 — регресс R036`.
+- Протокол проверки: ожидается.

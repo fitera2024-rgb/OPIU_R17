@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -176,6 +177,9 @@ class CleanSourceServiceCandidateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             source = self.make_source(root)
+            node = root / "pinned-node" / "node.exe"
+            node.parent.mkdir()
+            node.write_bytes(b"pinned test node")
             commands: list[list[str]] = []
             environments: list[dict[str, str]] = []
 
@@ -201,13 +205,21 @@ class CleanSourceServiceCandidateTests(unittest.TestCase):
                     "toolchain_inventory_sha256": BUILDER.EXPECTED_GO_TOOLCHAIN_INVENTORY_SHA256,
                 }),
             ):
-                result = BUILDER.test_and_build_service(Path("go.exe"), source, root / "build")
+                result = BUILDER.test_and_build_service(
+                    Path("go.exe"), source, root / "build", test_node_exe=node,
+                )
 
             self.assertIn("test", commands[0])
             self.assertIn("build", commands[1])
             self.assertIn("build", commands[2])
             self.assertTrue(result["deterministic_double_build"])
             self.assertEqual(result["first_sha256"], result["second_sha256"])
+            self.assertEqual(
+                environments[0]["PATH"].split(os.pathsep, 1)[0], str(node.parent.resolve()),
+            )
+            self.assertEqual(environments[0]["NODE_OPTIONS"], "")
+            self.assertEqual(environments[0]["NODE_PATH"], "")
+            self.assertEqual(environments[0]["NODE_ENV"], "production")
             for env in environments:
                 self.assertEqual(env["GOTOOLCHAIN"], "local")
                 self.assertEqual(env["GOOS"], "windows")

@@ -402,12 +402,22 @@ def verify_toolchain(go_exe: Path) -> dict[str, Any]:
     }
 
 
-def test_and_build_service(go_exe: Path, source_root: Path, build_root: Path) -> dict[str, Any]:
+def test_and_build_service(
+    go_exe: Path, source_root: Path, build_root: Path, *, test_node_exe: Path | None = None,
+) -> dict[str, Any]:
     source_root = source_root.resolve()
     build_root = build_root.resolve()
     build_root.mkdir(parents=True, exist_ok=True)
     toolchain = verify_toolchain(go_exe)
     test_environment = closed_go_environment(build_root / "test-environment")
+    if test_node_exe is not None:
+        pinned_node = test_node_exe.resolve()
+        if not pinned_node.is_file() or pinned_node.is_symlink() or has_reparse_ancestor(pinned_node):
+            raise BuildError("TEST_NODE_EXECUTABLE_NOT_PINNED_REGULAR_FILE")
+        test_environment.update({
+            "PATH": str(pinned_node.parent) + os.pathsep + test_environment.get("PATH", ""),
+            "NODE_OPTIONS": "", "NODE_PATH": "", "NODE_ENV": "production",
+        })
     test_command = [str(go_exe), "test", "-count=1", "./..."]
     test_result, _ = run_pinned_go(
         go_exe,

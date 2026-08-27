@@ -340,6 +340,22 @@ def extract_git_tree(
     return inventory_record_from_rows(written)
 
 
+def extract_service_test_tree(
+    repository: Path, source_record: dict[str, Any], target: Path, policy: dict[str, Any],
+) -> tuple[Path, dict[str, Any], dict[str, dict[str, Any]]]:
+    """Recreate the Git-bound repository topology required by cross-runtime Go tests."""
+    service_source = target / "service" / "source"
+    service_record = extract_git_tree(
+        repository, source_record, "service/source", service_source,
+    )
+    support_records: dict[str, dict[str, Any]] = {}
+    for root_relative in policy["runtime_source_roots"]:
+        support_records[root_relative] = extract_git_tree(
+            repository, source_record, root_relative, target / Path(root_relative),
+        )
+    return service_source, service_record, support_records
+
+
 def extract_git_file(
     repository: Path, source_record: dict[str, Any], relative: str, target: Path,
 ) -> None:
@@ -831,11 +847,12 @@ def _build_one(
         before = exact_git_source_inventory(repository, source_head, policy)
         if before != expected_source_record:
             raise BuildError("SOURCE_CHANGED_BEFORE_INDEPENDENT_BUILD")
-        service_source = work / "service-source"
-        service_source_record = extract_git_tree(
-            repository, expected_source_record, "service/source", service_source,
+        service_source, service_source_record, _test_support_records = extract_service_test_tree(
+            repository, expected_source_record, work / "source", policy,
         )
-        go_build = BASE.test_and_build_service(go_exe, service_source, work / "go")
+        go_build = BASE.test_and_build_service(
+            go_exe, service_source, work / "go", test_node_exe=node_exe,
+        )
         if exact_git_source_inventory(repository, source_head, policy) != expected_source_record:
             raise BuildError("SOURCE_CHANGED_AFTER_GO_BUILD")
         stage = work / policy["archive_root"]

@@ -127,6 +127,25 @@ def test_exact_git_blob_inventory_and_blob_extraction() -> None:
             assert (destination / "main.go").read_bytes() == b"package main\nfunc main() {}\n"
 
 
+def test_service_test_tree_preserves_git_bound_cross_runtime_topology() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        repository = Path(raw)
+        policy, head = make_git_source_fixture(repository)
+        record = BUILDER.exact_git_source_inventory(repository, head, policy)
+        with tempfile.TemporaryDirectory() as destination_raw:
+            target = Path(destination_raw) / "source"
+            service_source, service_record, support_records = BUILDER.extract_service_test_tree(
+                repository, record, target, policy,
+            )
+            assert service_source == target / "service" / "source"
+            assert service_record["file_count"] == 2
+            assert set(support_records) == set(policy["runtime_source_roots"])
+            assert (service_source / "main.go").is_file()
+            assert (target / "modules" / "reconciliation" / "source" / "safe.mjs").is_file()
+            assert (target / "modules" / "corrections" / "source" / "safe.mjs").is_file()
+            assert (target / "resources" / "reference" / "ref.json").is_file()
+
+
 @pytest.mark.parametrize("injection", ["tracked_drift", "untracked", "ignored"])
 def test_exact_git_source_inventory_rejects_all_worktree_injection(injection: str) -> None:
     with tempfile.TemporaryDirectory() as raw:

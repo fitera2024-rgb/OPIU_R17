@@ -20,7 +20,6 @@ const SPLIT_CSV_HEADERS = Object.freeze([
   "Блоки ERP",
   "Активна",
 ]);
-const UI_FIXED_TYPED_SOURCE_FORMAT = "UI_FIXED_TYPED_SELECTOR_CSV_SEMICOLON_UTF8_V1";
 
 function text(value) {
   return String(value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
@@ -28,14 +27,6 @@ function text(value) {
 
 function blocked(code, detail = "") {
   throw new Error(`BLOCKED_STRUCTURAL_CONTROL_SETTINGS_${code}${detail ? `:${detail}` : ""}`);
-}
-
-export function assertUniqueStructuralControlScopeArguments(tokens = []) {
-  for (const key of ["structural-control-settings", "organization-id", "organization-name", "organization-path", "run-id", "context-id"]) {
-    if ((Array.isArray(tokens) ? tokens : []).filter((token) => token === `--${key}`).length > 1) {
-      blocked("DUPLICATE_ARGUMENT", key);
-    }
-  }
 }
 
 function sha256Bytes(bytes) {
@@ -252,11 +243,6 @@ export async function materializeStructuralControlSettingsForRun({
 export async function loadStructuralControlSettingsDocument(requestedPath, {
   organization,
   period,
-  organizationId = "",
-  organizationName = "",
-  organizationPath = "",
-  runId = "",
-  contextId = "",
 } = {}) {
   const requested = text(requestedPath);
   if (!requested) {
@@ -295,9 +281,7 @@ export async function loadStructuralControlSettingsDocument(requestedPath, {
   }
   if (!MONTH_PATTERN.test(document.period)) blocked("PERIOD_INVALID", text(document.period));
   if (!text(document.settings_id)) blocked("SETTINGS_ID_MISSING");
-  const uiFixedSource = document?.ui_fixed_registry !== undefined;
-  if (!document.source || !["BUSINESS_CSV_SEMICOLON_UTF8", UI_FIXED_TYPED_SOURCE_FORMAT].includes(document.source.format) ||
-      (uiFixedSource !== (document.source.format === UI_FIXED_TYPED_SOURCE_FORMAT))) blocked("SOURCE_INVALID");
+  if (!document.source || document.source.format !== "BUSINESS_CSV_SEMICOLON_UTF8") blocked("SOURCE_INVALID");
   const sourcePath = path.resolve(text(document.source.path));
   let sourceBytes;
   try {
@@ -318,17 +302,18 @@ export async function loadStructuralControlSettingsDocument(requestedPath, {
   if (!Array.isArray(document.structural_group_control_sets) || document.structural_group_control_sets.length === 0) {
     blocked("SETS_MISSING");
   }
-  let parsedSource = null;
-  if (!uiFixedSource) {
-    parsedSource = await readStructuralControlSettingsCsv(sourcePath);
-    const sourceRows = parsedSource.rows.filter((row) => row.organization === runOrganization && row.enabled);
-    if (sourceRows.length === 0) blocked("SOURCE_EXACT_ORGANIZATION_MISSING");
-    const regenerated = runDocument({ organization: runOrganization, period: runPeriod,
-      source: parsedSource.source, selectedRows: sourceRows });
-    if (regenerated.settings_id !== document.settings_id ||
-        JSON.stringify(regenerated.structural_group_control_sets) !== JSON.stringify(document.structural_group_control_sets)) {
-      blocked("DOCUMENT_SOURCE_BINDING_MISMATCH");
-    }
+  const parsedSource = await readStructuralControlSettingsCsv(sourcePath);
+  const sourceRows = parsedSource.rows.filter((row) => row.organization === runOrganization && row.enabled);
+  if (sourceRows.length === 0) blocked("SOURCE_EXACT_ORGANIZATION_MISSING");
+  const regenerated = runDocument({
+    organization: runOrganization,
+    period: runPeriod,
+    source: parsedSource.source,
+    selectedRows: sourceRows,
+  });
+  if (regenerated.settings_id !== document.settings_id ||
+      JSON.stringify(regenerated.structural_group_control_sets) !== JSON.stringify(document.structural_group_control_sets)) {
+    blocked("DOCUMENT_SOURCE_BINDING_MISMATCH");
   }
   for (const set of document.structural_group_control_sets) {
     if (text(set.reconciliation_organization_id ?? set.reconciliation_organization) !== runOrganization) {
@@ -337,30 +322,12 @@ export async function loadStructuralControlSettingsDocument(requestedPath, {
     if (set.expected_control_delta !== 0) blocked("EXPECTED_DELTA_NOT_ZERO", text(set.id));
   }
   let groups;
-  if (uiFixedSource) {
-    groups = Object.freeze(document.structural_group_control_sets.map((set) => Object.freeze({
-      ...set,
-      member_codes: Object.freeze([...(set.member_codes ?? [])]),
-      intalev_member_codes: Object.freeze([...(set.intalev_member_codes ?? [])]),
-      erp_member_codes: Object.freeze([...(set.erp_member_codes ?? [])]),
-      intalev_member_bindings: Object.freeze((set.intalev_member_bindings ?? []).map((item) => Object.freeze({ ...item }))),
-      erp_member_bindings: Object.freeze((set.erp_member_bindings ?? []).map((item) => Object.freeze({ ...item }))),
-    })));
-  } else {
-    try {
-      groups = structuralControlGroupsFromConfig(document, { organization: runOrganization });
-    } catch (error) {
-      blocked("GROUP_CONFIG_INVALID", error.message);
-    }
+  try {
+    groups = structuralControlGroupsFromConfig(document, { organization: runOrganization });
+  } catch (error) {
+    blocked("GROUP_CONFIG_INVALID", error.message);
   }
   if (groups.length !== document.structural_group_control_sets.length) blocked("SET_SELECTION_INCOMPLETE");
-  const uiFixedRegistry = await validateUIFixedRegistry(document, {
-    organizationId,
-    organizationName,
-    organizationPath,
-    runId,
-    contextId,
-  });
   return Object.freeze({
     groups,
     document: Object.freeze(document),
@@ -386,164 +353,12 @@ export async function loadStructuralControlSettingsDocument(requestedPath, {
         erp_member_codes: group.erp_member_codes,
         expected_control_delta: 0,
       }))),
-      ...(uiFixedRegistry ? { ui_fixed_registry: uiFixedRegistry } : {}),
       correction_authority: false,
       financial_rows: 0,
       posting_rows: 0,
       execution_allowed: false,
     }),
   });
-}
-
-async function validateUIFixedRegistry(document, scope) {
-  const origin = document?.ui_fixed_registry;
-  if (origin === undefined) return null;
-  if (!origin || typeof origin !== "object" || Array.isArray(origin)) blocked("UI_FIXED_ORIGIN_INVALID");
-  const expected = {
-    organization_id: text(scope.organizationId),
-    organization_name: text(scope.organizationName),
-    organization_path: text(scope.organizationPath),
-    run_id: text(scope.runId),
-    context_id: text(scope.contextId),
-  };
-  for (const [field, value] of Object.entries(expected)) {
-    if (!value || text(document[field]) !== value) blocked("UI_FIXED_RUN_SCOPE_MISMATCH", field);
-  }
-  if (text(origin.organization_id) !== expected.organization_id ||
-      text(origin.organization_name) !== expected.organization_name ||
-      text(origin.organization_path) !== expected.organization_path ||
-      text(origin.run_id) !== expected.run_id || text(origin.context_id) !== expected.context_id) {
-    blocked("UI_FIXED_ORIGIN_SCOPE_MISMATCH");
-  }
-  const registryPath = path.resolve(text(origin.registry_path));
-  let registryBytes;
-  try {
-    registryBytes = await fs.readFile(registryPath);
-  } catch (error) {
-    blocked("UI_FIXED_REGISTRY_UNREADABLE", error.message);
-  }
-  if (registryBytes.length !== Number(origin.registry_size) ||
-      sha256Bytes(registryBytes) !== text(origin.registry_sha256).toUpperCase()) {
-    blocked("UI_FIXED_REGISTRY_DRIFT");
-  }
-  let registry;
-  try {
-    registry = JSON.parse(registryBytes.toString("utf8").replace(/^\uFEFF/, ""));
-  } catch (error) {
-    blocked("UI_FIXED_REGISTRY_JSON_INVALID", error.message);
-  }
-  if (registry?.schema_version !== "opiu-structural-control-registry.v1" ||
-      Number(registry?.revision) !== Number(origin.registry_revision) ||
-      !Array.isArray(registry?.versions) || !Array.isArray(registry?.lifecycle_events)) {
-    blocked("UI_FIXED_REGISTRY_INVALID");
-  }
-  const terminal = new Set(registry.lifecycle_events
-    .filter((event) => ["DISABLED", "SUPERSEDED"].includes(text(event?.action)))
-    .map((event) => text(event?.control_set_id)));
-  const fixedCounts = new Map();
-  for (const event of registry.lifecycle_events) {
-    if (text(event?.action) !== "FIXED") continue;
-    const id = text(event?.control_set_id);
-    fixedCounts.set(id, (fixedCounts.get(id) ?? 0) + 1);
-  }
-  const latestByLineage = new Map();
-  for (const version of registry.versions) {
-    if (text(version?.organization_id) !== expected.organization_id || terminal.has(text(version?.control_set_id))) continue;
-    const lineage = text(version?.lineage_id);
-    const prior = latestByLineage.get(lineage);
-    if (!prior || Number(version?.version) > Number(prior?.version) ||
-        (Number(version?.version) === Number(prior?.version) && text(version?.fixed_at) > text(prior?.fixed_at))) {
-      latestByLineage.set(lineage, version);
-    }
-  }
-  const activeVersions = [...latestByLineage.values()]
-    .sort((left, right) => text(left?.control_set_id).localeCompare(text(right?.control_set_id), "en"));
-  const refs = Array.isArray(origin.active_versions) ? origin.active_versions : [];
-  if (refs.length === 0 || refs.length !== activeVersions.length ||
-      refs.length !== document.structural_group_control_sets.length) {
-    blocked("UI_FIXED_SET_COUNT_MISMATCH");
-  }
-  const versionsById = new Map(activeVersions.map((version) => [text(version?.control_set_id), version]));
-  const setsById = new Map(document.structural_group_control_sets.map((set) => [text(set?.id), set]));
-  if (document.structural_group_control_sets.some((set) => text(set?.exact_organization_id) !== expected.organization_id)) {
-    blocked("UI_FIXED_SET_EXACT_ORGANIZATION_MISMATCH");
-  }
-  if (document.structural_group_control_sets.some((set) =>
-    set?.enabled !== true || text(set?.mode).toUpperCase() !== "SUM_DELTA_ONLY" ||
-    set?.expected_control_delta !== 0 || typeof set?.tolerance !== "number" ||
-    !Number.isFinite(set.tolerance) || set.tolerance < 0 ||
-    !Array.isArray(set?.intalev_member_bindings) || set.intalev_member_bindings.length === 0 ||
-    !Array.isArray(set?.erp_member_bindings) || set.erp_member_bindings.length === 0)) {
-    blocked("UI_FIXED_SET_CONTROL_INVARIANT_INVALID");
-  }
-  const refControlIDs = refs.map((ref) => text(ref?.control_set_id));
-  const refSetIDs = refs.map((ref) => text(ref?.materialized_set_id));
-  if (new Set(refControlIDs).size !== refs.length || new Set(refSetIDs).size !== refs.length ||
-      versionsById.size !== activeVersions.length || setsById.size !== document.structural_group_control_sets.length) {
-    blocked("UI_FIXED_REFERENCE_NOT_BIJECTIVE");
-  }
-  for (const ref of refs) {
-    const controlSetId = text(ref?.control_set_id);
-    const version = versionsById.get(controlSetId);
-    const set = setsById.get(text(ref?.materialized_set_id));
-    if (!version || !set || fixedCounts.get(controlSetId) !== 1 ||
-        text(version?.organization_id) !== expected.organization_id ||
-        text(version?.mode).toUpperCase() !== "SUM_DELTA_ONLY" ||
-        Number(version?.expected_control_delta) !== 0 || version?.correction_authority === true ||
-        text(version?.lineage_id) !== text(ref?.lineage_id) ||
-        Number(version?.version) !== Number(ref?.version) ||
-        text(version?.payload_sha256).toUpperCase() !== text(ref?.payload_sha256).toUpperCase() ||
-        text(version?.run_id) !== text(ref?.origin_run_id) ||
-        text(version?.context_id) !== text(ref?.origin_context_id) ||
-        text(version?.inventory_id) !== text(ref?.origin_inventory_id) ||
-        text(version?.inventory_binding_sha256).toUpperCase() !== text(ref?.origin_inventory_binding_sha256).toUpperCase()) {
-      blocked("UI_FIXED_VERSION_BINDING_MISMATCH", controlSetId);
-    }
-    const intalevCodes = [...new Set((version.intalev_members ?? []).map((member) => text(member?.code).toLocaleUpperCase("ru-RU")).filter(Boolean))];
-    const erpCodes = [...new Set((version.erp_members ?? []).map((member) => text(member?.code).toLocaleUpperCase("ru-RU")).filter(Boolean))];
-    const intalevBindings = Array.isArray(set.intalev_member_bindings) ? set.intalev_member_bindings : [];
-    const erpBindings = Array.isArray(set.erp_member_bindings) ? set.erp_member_bindings : [];
-    if (text(set.name) !== text(version.name) ||
-        JSON.stringify(set.intalev_member_codes) !== JSON.stringify(intalevCodes) ||
-        JSON.stringify(set.erp_member_codes) !== JSON.stringify(erpCodes) ||
-        !uiBindingsMatchVersion(intalevBindings, version.intalev_members, version.inventory_id) ||
-        !uiBindingsMatchVersion(erpBindings, version.erp_members, version.inventory_id)) {
-      blocked("UI_FIXED_MEMBER_BINDING_MISMATCH", controlSetId);
-    }
-  }
-  return Object.freeze({
-    status: "ACTIVE_UI_FIXED_REGISTRY_VERIFIED",
-    registry_revision: Number(origin.registry_revision),
-    registry_sha256: text(origin.registry_sha256).toUpperCase(),
-    organization_id: expected.organization_id,
-    run_id: expected.run_id,
-    context_id: expected.context_id,
-    set_count: refs.length,
-    control_set_ids: Object.freeze(refs.map((ref) => text(ref.control_set_id))),
-    applied_versions: Object.freeze(refs.map((ref) => Object.freeze({
-      control_set_id: text(ref.control_set_id),
-      materialized_set_id: text(ref.materialized_set_id),
-      lineage_id: text(ref.lineage_id),
-      version: Number(ref.version),
-      payload_sha256: text(ref.payload_sha256).toUpperCase(),
-      origin_run_id: text(ref.origin_run_id),
-      origin_context_id: text(ref.origin_context_id),
-      origin_inventory_id: text(ref.origin_inventory_id),
-      origin_inventory_binding_sha256: text(ref.origin_inventory_binding_sha256).toUpperCase(),
-    }))),
-    correction_authority: false,
-    financial_rows: 0,
-    posting_rows: 0,
-  });
-}
-
-function uiBindingsMatchVersion(bindings, members, inventoryId) {
-  if (!Array.isArray(bindings) || !Array.isArray(members) || bindings.length !== members.length || bindings.length === 0) return false;
-  return bindings.every((binding, index) =>
-    text(binding?.code).toLocaleUpperCase("ru-RU") === text(members[index]?.code).toLocaleUpperCase("ru-RU") &&
-    text(binding?.hierarchy_path) === text(members[index]?.hierarchy_path) &&
-    text(binding?.origin_identity) !== "" && text(binding?.origin_identity) === text(members[index]?.identity) &&
-    text(binding?.origin_inventory_id) === text(inventoryId));
 }
 
 export const STRUCTURAL_CONTROL_SETTINGS_SCHEMA = SCHEMA;

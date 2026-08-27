@@ -9,159 +9,12 @@ import {
   createCanonicalPostingRow,
   createMaterializationCase,
 } from "./r001_materialization_contract.mjs";
-import { buildR001BusinessContent } from "./r001_business_content.mjs";
 import { canonicalSpornoRowFromMaterializationCase } from "./r001_canonical_output_contract.mjs";
 
 const MONEY_EPSILON = 0.0000001;
 
 function clean(value) {
   return String(value ?? "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
-}
-
-export function materializeSparseEconomicDrafts({
-  decisions = [],
-  reconciliationOrganization = "",
-  excludeCaseIds = [],
-} = {}) {
-  const excluded = new Set([...excludeCaseIds].map(clean).filter(Boolean));
-  const byCase = new Map();
-  for (const decision of decisions) {
-    const caseId = clean(decision?.case_id);
-    if (!caseId || !clean(decision?.embedded_decision_identity)) continue;
-    if (!byCase.has(caseId)) byCase.set(caseId, []);
-    byCase.get(caseId).push(decision);
-  }
-  const canonicalPostingRows = [];
-  const cases = [];
-  const blockers = [];
-  for (const [caseId, members] of byCase) {
-    if (excluded.has(caseId)) continue;
-    const sources = members.filter((item) => clean(item?.role).toUpperCase() === "RECLASS_SOURCE");
-    const targets = members.filter((item) => clean(item?.role).toUpperCase() === "RECLASS_TARGET");
-    const financialMembers = [...sources, ...targets];
-    const eligible = financialMembers.filter((item) =>
-      item?.accepted_economic_reclass === true
-      && item?.ECONOMIC_ROUTE_PROVEN === true
-      && clean(item?.output_route).toUpperCase() === "SPORNO"
-      && clean(item?.proof_status).toUpperCase() === "ECONOMIC_RECLASS_PROVEN");
-    const sourceCents = sources.reduce((sum, item) => sum + (cents(item?.analytical_effect ?? item?.effective_delta) ?? 0), 0);
-    const targetCents = targets.reduce((sum, item) => sum + (cents(item?.analytical_effect ?? item?.effective_delta) ?? 0), 0);
-    const balanced = sources.length > 0 && targets.length > 0
-      && eligible.length === financialMembers.length
-      && sources.every((item) => (cents(item?.analytical_effect ?? item?.effective_delta) ?? 0) < 0)
-      && targets.every((item) => (cents(item?.analytical_effect ?? item?.effective_delta) ?? 0) > 0)
-      && sourceCents + targetCents === 0;
-    if (!balanced) continue;
-    const pairId = clean(members[0]?.pair_id || caseId);
-    const period = clean(members[0]?.period);
-    const sourceCodes = [...new Set(sources.map((item) => clean(item?.reconciliation_row)).filter(Boolean))];
-    const targetCodes = [...new Set(targets.map((item) => clean(item?.reconciliation_row)).filter(Boolean))];
-    const sourceArticles = [...new Set(sources.map((item) => clean(item?.source_article || item?.group)).filter(Boolean))];
-    const targetArticles = [...new Set(targets.map((item) => clean(item?.target_article || item?.group)).filter(Boolean))];
-    const caseRows = [];
-    try {
-      for (const member of [...sources, ...targets]) {
-        const role = clean(member.role).toUpperCase();
-        const action = role === "RECLASS_SOURCE" ? "STORNO" : "REPOST";
-        const effect = (cents(member?.analytical_effect ?? member?.effective_delta) ?? 0) / 100;
-        const amountValue = Math.abs(effect);
-        const materializationCase = createMaterializationCase({
-          case_id: caseId,
-          pair_id: pairId,
-          period,
-          reconciliation_organization: clean(member?.reconciliation_organization || reconciliationOrganization || member?.organization),
-          action,
-          role,
-          signed_economic_effect: effect,
-          correction_amount: amountValue,
-          economic: {
-            source_code: sourceCodes.join("; "),
-            target_code: targetCodes.join("; "),
-            source_article: sourceArticles.join("; "),
-            target_article: targetArticles.join("; "),
-          },
-          proof_status: "ECONOMIC_RECLASS_PROVEN",
-          correction_allowed: false,
-          correction_authority: "OWNER_APPROVED_ECONOMIC_ROUTE_PHYSICAL_PENDING",
-          output_route: "SPORNO",
-          physical_source: {
-            source_organization: "",
-            source_archive_path: "",
-            source_archive_sha256: "",
-            journal_entry: "",
-            journal_sha256: "",
-            source_sheet: "",
-            source_range: "",
-            source_row_id: "",
-            date: "",
-            document: "",
-            posting_number: "",
-            debit: "",
-            credit: "",
-            debit_analytics: ["", "", ""],
-            credit_analytics: ["", "", ""],
-            debit_department: "",
-            credit_department: "",
-            amount: null,
-          },
-          target_accounting: {
-            debit: "",
-            credit: "",
-            debit_analytics: ["", "", ""],
-            credit_analytics: ["", "", ""],
-            debit_department: "",
-            credit_department: "",
-            article: action === "STORNO" ? sourceArticles.join("; ") : targetArticles.join("; "),
-          },
-          analytical_basis: {
-            reconciliation_row: clean(member?.reconciliation_row),
-            analytical_basis_id: clean(member?.analytical_basis_id || member?.reconciliation_row),
-            transformation_id: caseId,
-            effective_delta: effect,
-          },
-          economic_route: {
-            route_id: clean(member?.economic_route_id || caseId),
-            proof_status: "ECONOMIC_RECLASS_PROVEN",
-            accepted: true,
-            accepted_amount: amountValue,
-            accepted_effect: effect,
-            processing_stage: clean(member?.processing_stage || "INTERGROUP_ROOTS_FIRST"),
-            stage_order: Number(member?.stage_order ?? 1),
-          },
-          source_scope: {},
-          reason: clean(member?.reason) || `Доказанный экономический маршрут ${sourceCodes.join(", ")} → ${targetCodes.join(", ")}; физический источник не закреплён`,
-          blockers: ["PHYSICAL_SOURCE_INCOMPLETE_FOR_READY", "UNKNOWN_PHYSICAL_FIELDS_LEFT_BLANK"],
-          provenance: { source: "EMBEDDED_RECONCILIATION_ECONOMIC_ROUTE" },
-          safety: REPORT_ONLY_SAFETY,
-        });
-        caseRows.push(canonicalSpornoRowFromMaterializationCase(materializationCase));
-      }
-      canonicalPostingRows.push(...caseRows);
-      cases.push(Object.freeze({
-        case_id: caseId,
-        pair_id: pairId,
-        materialization_state: "_СПОРНО",
-        posting_rows: caseRows.length,
-        storno_rows: caseRows.filter((row) => row.operation === "STORNO").length,
-        repost_rows: caseRows.filter((row) => row.operation === "REPOST").length,
-        source_organizations: Object.freeze([]),
-        blockers: Object.freeze(["PHYSICAL_SOURCE_INCOMPLETE_FOR_READY", "UNKNOWN_PHYSICAL_FIELDS_LEFT_BLANK"]),
-      }));
-    } catch (error) {
-      blockers.push(`${caseId}: ${clean(error?.code || error?.message || "SPARSE_ECONOMIC_ROUTE_FAILED")}`);
-    }
-  }
-  return Object.freeze({
-    canonical_posting_rows: Object.freeze(canonicalPostingRows),
-    cases: Object.freeze(cases),
-    blockers: Object.freeze(blockers),
-    audit: Object.freeze({
-      materialized_case_count: cases.length,
-      canonical_posting_row_count: canonicalPostingRows.length,
-      storno_row_count: canonicalPostingRows.filter((row) => row.operation === "STORNO").length,
-      repost_row_count: canonicalPostingRows.filter((row) => row.operation === "REPOST").length,
-    }),
-  });
 }
 
 function numberValue(value) {
@@ -173,6 +26,13 @@ function numberValue(value) {
 function cents(value) {
   const amount = numberValue(value);
   return amount === null ? null : Math.round(amount * 100);
+}
+
+function moneyText(value) {
+  return Number(value ?? 0).toLocaleString("ru-RU", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function sha256Buffer(buffer) {
@@ -403,9 +263,12 @@ function canonicalReadyPhysicalComplete(raw, source) {
 export function materializeExactSourceRow({ raw, operation, partCents, sourceCode, sourceLabel, targetCode, targetLabel: newTargetLabel, decision, reconciliationOrganization, source, subset, outputRoute = "SPORNO" }) {
   const sourceCents = cents(raw.amount);
   const isStorno = operation === "STORNO";
-  const absolutePartCents = Math.abs(isStorno ? sourceCents : partCents);
-  const signedPartCents = isStorno ? -absolutePartCents : absolutePartCents;
-  const ratio = sourceCents === 0 ? (isStorno ? -1 : 1) : signedPartCents / sourceCents;
+  // The owner loader represents STORNO by operation kind, not by a negative amount.
+  // Keep the source sign for audit, but emit positive loader measures for STORNO.
+  const signedPartCents = Math.abs(isStorno ? sourceCents : partCents);
+  const ratio = isStorno
+    ? (sourceCents === 0 ? 1 : Math.abs(sourceCents) / sourceCents)
+    : (sourceCents === 0 ? 1 : signedPartCents / sourceCents);
   const debitAnalytics = [raw.debit_analytics_1, raw.debit_analytics_2, raw.debit_analytics_3];
   const creditAnalytics = [raw.credit_analytics_1, raw.credit_analytics_2, raw.credit_analytics_3];
   const slot = isStorno ? null : (clean(sourceLabel) ? classificationSlot(raw, sourceLabel) : null);
@@ -415,30 +278,17 @@ export function materializeExactSourceRow({ raw, operation, partCents, sourceCod
   const materializationId = stableId("MAT-R001", [decision.case_id, decision.pair_id, operation, raw.source_row_id, targetCode, signedPartCents]);
   const normalizedOutputRoute = clean(outputRoute).toUpperCase();
   const status = normalizedOutputRoute === "READY" ? "ГОТОВО" : "_СПОРНО";
-  const businessEvidence = decision?.materialization_case?.business_evidence;
-  const content = buildR001BusinessContent({
-    operation,
-    erp: {
-      document: raw.document,
-      date: raw.date,
-      postingNumber: raw.posting_no,
-      debit: raw.debit,
-      credit: raw.credit,
-      amount: absolutePartCents / 100,
-      organization: raw.organization,
-      debitDepartment: raw.debit_department,
-      creditDepartment: raw.credit_department,
-    },
-    economic: {
-      sourceArticle: sourceLabel,
-      targetArticle: isStorno ? sourceLabel : newTargetLabel,
-    },
-    decision: businessEvidence ?? decision,
-    caseId: decision.case_id,
-    pairId: decision.pair_id,
-    sourceRowId: raw.source_row_id,
-    intalevDocumentNotPresented: businessEvidence?.intalev_document_absent === true,
-  });
+  const userAction = isStorno
+    ? `СТОРНО: снимаем ${moneyText(signedPartCents / 100)} со статьи «${clean(sourceLabel) || clean(raw.article) || "исходная статья ERP"}»`
+    : `РЕПОСТ: относим ${moneyText(signedPartCents / 100)} на статью «${clean(newTargetLabel) || "целевая статья ERP"}»`;
+  const content = [
+    userAction,
+    `Причина: ${clean(decision.reason) || `переклассификация расходов «${clean(sourceLabel)}» → «${clean(newTargetLabel)}» по сверке ОПИУ`}`,
+    `Источник Инталев: строка сверки ${clean(decision.reconciliation_row) || clean(sourceCode) || "указана в сверке"}; путь «${clean(decision.intalev_path) || "см. доказательную сверку ОПИУ"}»${clean(decision.intalev_reference) ? `; ячейка/агрегат: ${clean(decision.intalev_reference)}` : ""}`,
+    clean(raw.content) ? `Исходное содержание: ${clean(raw.content)}` : "",
+    `Источник ERP: ${clean(raw.document) || "документ не указан"}; проводка ${clean(raw.posting_no) || "не указана"}; строка ${clean(raw.source_range) || "не указана"}`,
+    `Статус: ${status}; техническая ссылка: PairID=${clean(decision.pair_id)}; SourceRowID=${raw.source_row_id}`,
+  ].filter(Boolean).join(" | ");
   const row = [
     raw.debit, raw.credit, raw.debit_currency, raw.credit_currency, operation,
     raw.debit_department, raw.credit_department, raw.debit_direction, raw.credit_direction,
@@ -529,7 +379,7 @@ export function materializeExactSourceRow({ raw, operation, partCents, sourceCod
       activity: clean(raw.activity),
       scenario: clean(raw.scenario),
     };
-    const amount = absolutePartCents / 100;
+    const amount = signedPartCents / 100;
     const materializationCase = createMaterializationCase({
       ...decision.materialization_case,
       action: operation,
@@ -735,4 +585,156 @@ export async function materializeOwnerEconomicDrafts({ decisions = [], treeRows 
     live_1c_allowed: false,
     live_delete_allowed: false,
   };
+}
+
+/**
+ * Materializes an owner-approved balanced economic route when the exact
+ * physical ERP source is still unknown.  These are deliberately sparse
+ * _СПОРНО rows: direction, amount, economic articles and evidence are kept;
+ * accounts, organization, registrar and SourceRowID remain blank.
+ */
+export function materializeSparseEconomicDrafts({
+  decisions = [],
+  reconciliationOrganization = "",
+  excludeCaseIds = [],
+} = {}) {
+  const excluded = new Set([...excludeCaseIds].map(clean).filter(Boolean));
+  const byCase = new Map();
+  for (const decision of decisions) {
+    const caseId = clean(decision?.case_id);
+    if (!caseId || !clean(decision?.embedded_decision_identity)) continue;
+    if (!byCase.has(caseId)) byCase.set(caseId, []);
+    byCase.get(caseId).push(decision);
+  }
+  const canonicalPostingRows = [];
+  const cases = [];
+  const blockers = [];
+  for (const [caseId, members] of byCase) {
+    if (excluded.has(caseId)) continue;
+    const sources = members.filter((item) => clean(item?.role).toUpperCase() === "RECLASS_SOURCE");
+    const targets = members.filter((item) => clean(item?.role).toUpperCase() === "RECLASS_TARGET");
+    const financialMembers = [...sources, ...targets];
+    const eligible = financialMembers.filter((item) =>
+      item?.accepted_economic_reclass === true
+      && item?.ECONOMIC_ROUTE_PROVEN === true
+      && clean(item?.output_route).toUpperCase() === "SPORNO"
+      && clean(item?.proof_status).toUpperCase() === "ECONOMIC_RECLASS_PROVEN");
+    const sourceCents = sources.reduce((sum, item) => sum + (cents(item?.analytical_effect ?? item?.effective_delta) ?? 0), 0);
+    const targetCents = targets.reduce((sum, item) => sum + (cents(item?.analytical_effect ?? item?.effective_delta) ?? 0), 0);
+    const balanced = sources.length > 0 && targets.length > 0
+      && eligible.length === financialMembers.length
+      && sources.every((item) => (cents(item?.analytical_effect ?? item?.effective_delta) ?? 0) < 0)
+      && targets.every((item) => (cents(item?.analytical_effect ?? item?.effective_delta) ?? 0) > 0)
+      && sourceCents + targetCents === 0;
+    if (!balanced) continue;
+    const pairId = clean(members[0]?.pair_id || caseId);
+    const period = clean(members[0]?.period);
+    const sourceCodes = [...new Set(sources.map((item) => clean(item?.reconciliation_row)).filter(Boolean))];
+    const targetCodes = [...new Set(targets.map((item) => clean(item?.reconciliation_row)).filter(Boolean))];
+    const sourceArticles = [...new Set(sources.map((item) => clean(item?.source_article || item?.group)).filter(Boolean))];
+    const targetArticles = [...new Set(targets.map((item) => clean(item?.target_article || item?.group)).filter(Boolean))];
+    const caseRows = [];
+    try {
+      for (const member of [...sources, ...targets]) {
+        const role = clean(member.role).toUpperCase();
+        const action = role === "RECLASS_SOURCE" ? "STORNO" : "REPOST";
+        const effect = (cents(member?.analytical_effect ?? member?.effective_delta) ?? 0) / 100;
+        const amountValue = Math.abs(effect);
+        const materializationCase = createMaterializationCase({
+          case_id: caseId,
+          pair_id: pairId,
+          period,
+          reconciliation_organization: clean(member?.reconciliation_organization || reconciliationOrganization || member?.organization),
+          action,
+          role,
+          signed_economic_effect: effect,
+          correction_amount: amountValue,
+          economic: {
+            source_code: sourceCodes.join("; "),
+            target_code: targetCodes.join("; "),
+            source_article: sourceArticles.join("; "),
+            target_article: targetArticles.join("; "),
+          },
+          proof_status: "ECONOMIC_RECLASS_PROVEN",
+          correction_allowed: false,
+          correction_authority: "OWNER_APPROVED_ECONOMIC_ROUTE_PHYSICAL_PENDING",
+          output_route: "SPORNO",
+          physical_source: {
+            source_organization: "",
+            source_archive_path: "",
+            source_archive_sha256: "",
+            journal_entry: "",
+            journal_sha256: "",
+            source_sheet: "",
+            source_range: "",
+            source_row_id: "",
+            date: "",
+            document: "",
+            posting_number: "",
+            debit: "",
+            credit: "",
+            debit_analytics: ["", "", ""],
+            credit_analytics: ["", "", ""],
+            debit_department: "",
+            credit_department: "",
+            amount: null,
+          },
+          target_accounting: {
+            debit: "",
+            credit: "",
+            debit_analytics: ["", "", ""],
+            credit_analytics: ["", "", ""],
+            debit_department: "",
+            credit_department: "",
+            article: action === "STORNO" ? sourceArticles.join("; ") : targetArticles.join("; "),
+          },
+          analytical_basis: {
+            reconciliation_row: clean(member?.reconciliation_row),
+            analytical_basis_id: clean(member?.analytical_basis_id || member?.reconciliation_row),
+            transformation_id: caseId,
+            effective_delta: effect,
+          },
+          economic_route: {
+            route_id: clean(member?.economic_route_id || caseId),
+            proof_status: "ECONOMIC_RECLASS_PROVEN",
+            accepted: true,
+            accepted_amount: amountValue,
+            accepted_effect: effect,
+            processing_stage: clean(member?.processing_stage || "INTERGROUP_ROOTS_FIRST"),
+            stage_order: Number(member?.stage_order ?? 1),
+          },
+          source_scope: {},
+          reason: clean(member?.reason) || `Доказанный экономический маршрут ${sourceCodes.join(", ")} → ${targetCodes.join(", ")}; физический источник не закреплён`,
+          blockers: ["PHYSICAL_SOURCE_INCOMPLETE_FOR_READY", "UNKNOWN_PHYSICAL_FIELDS_LEFT_BLANK"],
+          provenance: { source: "EMBEDDED_RECONCILIATION_ECONOMIC_ROUTE" },
+          safety: REPORT_ONLY_SAFETY,
+        });
+        caseRows.push(canonicalSpornoRowFromMaterializationCase(materializationCase));
+      }
+      canonicalPostingRows.push(...caseRows);
+      cases.push(Object.freeze({
+        case_id: caseId,
+        pair_id: pairId,
+        materialization_state: "_СПОРНО",
+        posting_rows: caseRows.length,
+        storno_rows: caseRows.filter((row) => row.operation === "STORNO").length,
+        repost_rows: caseRows.filter((row) => row.operation === "REPOST").length,
+        source_organizations: Object.freeze([]),
+        blockers: Object.freeze(["PHYSICAL_SOURCE_INCOMPLETE_FOR_READY", "UNKNOWN_PHYSICAL_FIELDS_LEFT_BLANK"]),
+      }));
+    } catch (error) {
+      blockers.push(`${caseId}: ${clean(error?.code || error?.message || "SPARSE_ECONOMIC_ROUTE_FAILED")}`);
+    }
+  }
+  return Object.freeze({
+    canonical_posting_rows: Object.freeze(canonicalPostingRows),
+    cases: Object.freeze(cases),
+    blockers: Object.freeze(blockers),
+    audit: Object.freeze({
+      materialized_case_count: cases.length,
+      canonical_posting_row_count: canonicalPostingRows.length,
+      storno_row_count: canonicalPostingRows.filter((row) => row.operation === "STORNO").length,
+      repost_row_count: canonicalPostingRows.filter((row) => row.operation === "REPOST").length,
+    }),
+  });
 }

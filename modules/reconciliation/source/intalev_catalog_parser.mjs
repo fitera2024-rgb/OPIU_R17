@@ -9,6 +9,20 @@ function headerKey(value) {
   return text(value).replace(/\s+/g, "").toLocaleLowerCase("ru-RU");
 }
 
+export function isIntalevCatalogPlaceholderRow({
+  identity,
+  parentIdentity,
+  label,
+  fullPath,
+} = {}) {
+  return Boolean(
+    text(identity) &&
+    !text(parentIdentity) &&
+    !text(label) &&
+    /^<\s*>$/.test(text(fullPath)),
+  );
+}
+
 const HEADER_ALIASES = {
   uuid: ["UUID", "Ссылка", "Объект"],
   parent_uuid: ["UUIDРодителя", "UUID Родителя", "Родитель"],

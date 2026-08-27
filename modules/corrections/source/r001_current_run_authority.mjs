@@ -1,4 +1,4 @@
-import { applyStandaloneStornoMaterialization } from "./owner_decision_r001.mjs";
+import { applyStandaloneStornoMaterialization } from "./r001_apply_standalone_materialization.mjs";
 import { bridgeR001DecisionsToMaterializationCases } from "./r001_materialization_bridge.mjs";
 import { materializeStandaloneStornoCases } from "./r001_standalone_storno_materialization.mjs";
 

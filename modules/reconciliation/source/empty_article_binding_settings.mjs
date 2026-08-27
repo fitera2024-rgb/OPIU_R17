@@ -176,10 +176,6 @@ function normalizeSafety(value) {
     "release_allowed",
     "execution_allowed",
     "live_1c_allowed",
-    "report_only",
-    "executed_posting_rows",
-    "live_posting_rows",
-    "live_delete_allowed",
   ], "SAFETY_KEYS_INVALID");
   if (safety.mode !== "REPORT_ONLY" ||
       safety.classification_only !== true ||
@@ -191,11 +187,7 @@ function normalizeSafety(value) {
       safety.ready_to_upload !== false ||
       safety.release_allowed !== false ||
       safety.execution_allowed !== false ||
-      safety.live_1c_allowed !== false ||
-      safety.report_only !== true ||
-      safety.executed_posting_rows !== 0 ||
-      safety.live_posting_rows !== 0 ||
-      safety.live_delete_allowed !== false) {
+      safety.live_1c_allowed !== false) {
     blocked("SAFETY_OPEN_OR_INVALID");
   }
   return Object.freeze({ ...safety });
@@ -334,10 +326,6 @@ function inactive(scope, status) {
       release_allowed: false,
       execution_allowed: false,
       live_1c_allowed: false,
-      report_only: true,
-      executed_posting_rows: 0,
-      live_posting_rows: 0,
-      live_delete_allowed: false,
     }),
   });
 }
@@ -406,10 +394,6 @@ export function validateEmptyArticleBindingSettingsDocument(document, options = 
       release_allowed: false,
       execution_allowed: false,
       live_1c_allowed: false,
-      report_only: true,
-      executed_posting_rows: 0,
-      live_posting_rows: 0,
-      live_delete_allowed: false,
     }),
   });
 }

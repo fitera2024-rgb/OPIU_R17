@@ -336,10 +336,7 @@ export function assessOwnerPresentationControlGroup(rows, {
     : Number(tolerance);
   const toleranceCents = amountCents(numericTolerance);
   const blockers = [];
-  const explicitSidesValid = Array.isArray(group?.intalev_member_codes) && group.intalev_member_codes.length > 0 &&
-    Array.isArray(group?.erp_member_codes) && group.erp_member_codes.length > 0;
-  if (!group || !Array.isArray(group?.member_codes) ||
-      (!explicitSidesValid && group.member_codes.length < 2) || group.member_codes.length === 0) {
+  if (!group || !Array.isArray(group?.member_codes) || group.member_codes.length < 2) {
     blockers.push("STRUCTURAL_GROUP_CONFIG_MISSING_OR_INVALID");
   }
   if (!selectedOrganization) blockers.push("STRUCTURAL_GROUP_ORGANIZATION_MISSING");

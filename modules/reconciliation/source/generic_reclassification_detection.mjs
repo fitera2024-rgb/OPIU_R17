@@ -4,7 +4,7 @@ import {
   STRUCTURAL_CONTROL_GROUPS,
   structuralControlGroupForCode,
 } from "./structural_control_groups.mjs";
-import { assessConfiguredStructuralControlGroups } from "./owner_presentation_block_exemption.mjs";
+import { isOwnerPresentationBlockExempt } from "./owner_presentation_block_exemption.mjs";
 import {
   isDescendantAllocationCompatible,
   provenDescendantAllocation,
@@ -263,73 +263,15 @@ function economicContourFor(node, graph) {
   return current.code || current.row_id;
 }
 
-function structuralControlClosedScopeKey(organization, period, controlSetId) {
-  return `${text(organization)}\u0000${text(period)}\u0000${text(controlSetId)}`;
-}
-
-function configuredGroupOrganization(group) {
-  return text(
-    group?.reconciliation_organization_id
-      ?? group?.organization_id
-      ?? group?.reconciliation_organization
-      ?? group?.organization,
-  );
-}
-
-function closedStructuralControlScopeKeys(rows, structuralControlGroups) {
-  const groups = Array.isArray(structuralControlGroups) ? structuralControlGroups : [];
-  const partitions = new Map();
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const organization = organizationOf(row);
-    const period = periodOf(row);
-    if (!organization || !MONTH_PATTERN.test(period)) continue;
-    const key = scopeKey(organization, period);
-    if (!partitions.has(key)) partitions.set(key, { organization, period, rows: [] });
-    partitions.get(key).rows.push(row);
-  }
-  const closed = new Set();
-  for (const partition of partitions.values()) {
-    const scopedGroups = groups.filter((group) =>
-      configuredGroupOrganization(group) === partition.organization);
-    if (scopedGroups.length === 0) continue;
-    const controls = assessConfiguredStructuralControlGroups(partition.rows, {
-      organization: partition.organization,
-      period: partition.period,
-      groups: scopedGroups,
-    });
-    for (const control of controls) {
-      if (control?.classification !== "STRUCTURAL_GROUP_SUM_OK") continue;
-      closed.add(structuralControlClosedScopeKey(
-        partition.organization,
-        partition.period,
-        control.control_set_id,
-      ));
-    }
-  }
-  return closed;
-}
-
-function structuralExceptionRootFor(
-  node,
-  graph,
-  structuralControlGroups,
-  structuralControlClosedScopeKeys,
-) {
+function structuralExceptionRootFor(node, graph, structuralControlGroups) {
   const seen = new Set();
   let current = node;
   while (current && !seen.has(current.row_id)) {
     seen.add(current.row_id);
     const group = structuralControlGroupForCode(current.code, structuralControlGroups);
     if (group) {
-      const controlSetId = text(group.group_id ?? group.id);
-      if (structuralControlClosedScopeKeys !== null && !structuralControlClosedScopeKeys.has(
-        structuralControlClosedScopeKey(node.organization, node.period, controlSetId),
-      )) {
-        current = graph.byCode.get(current.parent_id) ?? graph.byId.get(current.parent_id);
-        continue;
-      }
       return {
-        control_set_id: controlSetId,
+        control_set_id: text(group.group_id ?? group.id),
         root_code: current.code,
       };
     }
@@ -348,7 +290,6 @@ function structuralExceptionRootFor(
 export function normalizeHierarchyResiduals(rows, {
   tolerance = 0.01,
   structural_control_groups: structuralControlGroups = STRUCTURAL_CONTROL_GROUPS,
-  structural_control_closed_scope_keys: structuralControlClosedScopeKeys = null,
 } = {}) {
   const toleranceCents = Math.max(0, Math.round(Math.abs(Number(tolerance) || 0) * 100));
   const input = Array.isArray(rows) ? rows : [];
@@ -425,7 +366,6 @@ export function normalizeHierarchyResiduals(rows, {
         node,
         graph,
         structuralControlGroups,
-        structuralControlClosedScopeKeys,
       );
       node.structural_exception_control_set_id =
         structuralExceptionRoot?.control_set_id ?? "";
@@ -538,14 +478,14 @@ export function normalizeHierarchyResiduals(rows, {
       node.normalized_delta_basis = "CANONICAL_HIERARCHY_RESIDUAL";
       node.residual_grain = children.length === 0 ? "LEAF" : "NORMALIZED_RESIDUAL";
       node.canonical_normalization_applied = true;
-      node.owner_presentation_block_exempt = Boolean(
-        structuralExceptionRoot
-          && text(structuralExceptionRoot.root_code).toLocaleUpperCase("ru-RU")
-            === text(node.code).toLocaleUpperCase("ru-RU"),
+      node.owner_presentation_block_exempt = isOwnerPresentationBlockExempt(
+        node.code,
+        structuralControlGroups,
       );
-      node.structural_control_group_id = node.owner_presentation_block_exempt
-        ? structuralExceptionRoot.control_set_id
-        : null;
+      node.structural_control_group_id = structuralControlGroups
+        .find((group) => (group?.member_codes ?? []).some((code) =>
+          String(code).trim().toLocaleUpperCase("ru-RU") === node.code.toLocaleUpperCase("ru-RU")))
+        ?.group_id ?? null;
       state.set(node.row_id, "DONE");
       return node.normalized_delta_cents;
     };
@@ -1249,14 +1189,9 @@ export function detectGenericReclassifications(rows, {
   const safeMaxComparisons = Number.isInteger(Number(maxComparisons)) && Number(maxComparisons) > 0
     ? Number(maxComparisons)
     : DEFAULT_MAX_COMPARISONS;
-  const structuralControlClosedScopeKeys = closedStructuralControlScopeKeys(
-    rows,
-    structuralControlGroups,
-  );
   const normalized = normalizeHierarchyResiduals(rows, {
     tolerance,
     structural_control_groups: structuralControlGroups,
-    structural_control_closed_scope_keys: structuralControlClosedScopeKeys,
   });
   const normalizationBlockers = new Map();
   for (const diagnostic of normalized.diagnostics) {
@@ -1270,7 +1205,7 @@ export function detectGenericReclassifications(rows, {
   const eligible = [];
   const normalizedByPartition = new Map();
   for (const row of normalized.rows) {
-    if (row.owner_presentation_block_exempt === true) {
+    if (isOwnerPresentationBlockExempt(row.code, structuralControlGroups)) {
       exemptRows.push(Object.freeze({
         code: row.code,
         row_id: row.row_id,

@@ -878,6 +878,77 @@ export function selectHierarchyTracePath(trace, fields = ["full_path"]) {
   return commonPath(unique).join(" / ");
 }
 
+function businessPathLabel(value) {
+  return normalized(value)
+    .replace(/^\d+[_\s.-]*/u, "")
+    .replace(/^_+/u, "")
+    .replace(/^(?:адм|ком|скл|лог)[_\s.-]+/u, "")
+    .trim();
+}
+
+/**
+ * Presentation-only path selector.  A financial row may contain the whole
+ * source subtree in trace.  The ordinary selector deliberately returns the
+ * common ancestor in that case, which is safe for calculations but misleading
+ * in the user tree.  For display we select the unique shallowest source node
+ * whose final path segment is the requested business label.  Ambiguity remains
+ * fail-closed and falls back to the common path.
+ */
+export function selectHierarchyTracePathForLabel(
+  trace,
+  label,
+  fields = ["full_path"],
+) {
+  const requested = businessPathLabel(label);
+  if (!requested) return selectHierarchyTracePath(trace, fields);
+  const candidates = [];
+  const seen = new Set();
+  for (const item of trace ?? []) {
+    for (const field of fields) {
+      const parts = pathParts(item?.[field]);
+      if (parts.length === 0) continue;
+      if (businessPathLabel(parts.at(-1)) !== requested) continue;
+      const key = pathKey(parts);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      candidates.push(parts);
+    }
+  }
+  if (candidates.length === 0) return selectHierarchyTracePath(trace, fields);
+  const minimumDepth = Math.min(...candidates.map((parts) => parts.length));
+  const shallowest = candidates.filter((parts) => parts.length === minimumDepth);
+  return shallowest.length === 1
+    ? shallowest[0].join(" / ")
+    : selectHierarchyTracePath(trace, fields);
+}
+
+export function resolveHierarchyNodeFromPath(fullPath, tree) {
+  const pathIdentity = pathKey(fullPath);
+  if (!pathIdentity) {
+    return {
+      status: "MISSING_PRESENTATION_PATH",
+      node_id: "",
+      full_path: "",
+      candidate_node_ids: [],
+      correction_authority: false,
+    };
+  }
+  const candidates = (tree?.nodes ?? []).filter(
+    (node) => node.path_key === pathIdentity,
+  );
+  return {
+    status: candidates.length === 1
+      ? "PROVEN_EXACT_PRESENTATION_PATH"
+      : candidates.length === 0
+        ? "BLOCKED_PRESENTATION_NODE_NOT_FOUND"
+        : "BLOCKED_PRESENTATION_NODE_AMBIGUOUS",
+    node_id: candidates.length === 1 ? candidates[0].node_id : "",
+    full_path: String(fullPath ?? ""),
+    candidate_node_ids: candidates.map((node) => node.node_id),
+    correction_authority: false,
+  };
+}
+
 function exactSourceTraceKey(value) {
   const source = value?.source ?? {};
   const file = firstText(value?.source_file, source.source_file, source.file);
@@ -981,14 +1052,35 @@ function addNearestMappedParent(bindings, rows, tree) {
     mappedByNode.get(binding.node_id).push(index);
   });
   const nodeById = new Map(tree.nodes.map((node) => [node.node_id, node]));
+  const structuralRolePriority = (row) => {
+    const role = normalized(row?.type ?? row?.group ?? row?.hierarchy_group);
+    if (role.includes("итог")) return 50;
+    if (role === "блок" || role.endsWith(" блок")) return 40;
+    if (role.includes("подблок")) return 30;
+    if (role.includes("статья")) return 20;
+    if (role.includes("деталь")) return 10;
+    return 0;
+  };
+  const uniqueStructuralAnchor = (indexes) => {
+    if (indexes.length === 1) return indexes[0];
+    const ranked = indexes
+      .map((index) => ({ index, priority: structuralRolePriority(rows[index]) }))
+      .sort((left, right) => right.priority - left.priority);
+    return ranked.length > 0 &&
+      ranked[0].priority > ranked[1].priority &&
+      ranked[0].priority > 0
+      ? ranked[0].index
+      : null;
+  };
   bindings.forEach((binding) => {
     if (!binding.mapped) return;
     let parentId = binding.parent_node_id;
     binding.parent_code = "";
     while (parentId) {
       const mappedIndexes = mappedByNode.get(parentId) ?? [];
-      if (mappedIndexes.length === 1) {
-        binding.parent_code = text(rows[mappedIndexes[0]]?.code);
+      const anchorIndex = uniqueStructuralAnchor(mappedIndexes);
+      if (anchorIndex !== null) {
+        binding.parent_code = text(rows[anchorIndex]?.code);
         break;
       }
       parentId = nodeById.get(parentId)?.parent_id ?? null;

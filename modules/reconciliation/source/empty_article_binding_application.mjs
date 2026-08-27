@@ -307,10 +307,6 @@ function inactiveAudit(runOrganization, period) {
     release_allowed: false,
     execution_allowed: false,
     live_1c_allowed: false,
-    report_only: true,
-    executed_posting_rows: 0,
-    live_posting_rows: 0,
-    live_delete_allowed: false,
   });
 }
 
@@ -428,10 +424,6 @@ export function applyEmptyArticleBindingsToBlankArticleReporting({
       release_allowed: false,
       execution_allowed: false,
       live_1c_allowed: false,
-      report_only: true,
-      executed_posting_rows: 0,
-      live_posting_rows: 0,
-      live_delete_allowed: false,
     }),
   });
 }

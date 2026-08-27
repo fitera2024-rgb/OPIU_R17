@@ -35,8 +35,10 @@ import {
   buildErpOutlineTree,
   buildIntalevParentTree,
   parseOutlineLevelsXml,
+  resolveHierarchyNodeFromPath,
   resolveHierarchyNodeFromTrace,
   selectHierarchyTracePath,
+  selectHierarchyTracePathForLabel,
 } from "./hierarchy_tree.mjs";
 import { validateEconomicHierarchyMapping } from "./economic_hierarchy_mapping.mjs";
 import {
@@ -45,12 +47,20 @@ import {
   buildHierarchyPresentationRows,
 } from "./r005_intalev_tree_presentation.mjs";
 import {
+  buildSourceDrivenExpensePresentationRows,
+  insertSourceDrivenExpenseRows,
+} from "./source_driven_expense_presentation.mjs";
+import { applyJournalFirstPresentationAttribution } from "./journal_first_presentation_attribution.mjs";
+import {
   approvedIntalevTemplateGraphAppliesToProfile,
   attachApprovedIntalevTemplateGraph,
   loadApprovedIntalevTemplateGraph,
   serializeApprovedIntalevTemplateGraph,
 } from "./r005_intalev_template_graph.mjs";
-import { detectIntalevCatalogHeaders } from "./intalev_catalog_parser.mjs";
+import {
+  detectIntalevCatalogHeaders,
+  isIntalevCatalogPlaceholderRow,
+} from "./intalev_catalog_parser.mjs";
 import {
   assertIntalevCatalogBindingUnchanged,
   discoverIntalevArticleCatalog,
@@ -111,13 +121,7 @@ import {
   serializeStructuralControlGroups,
   structuralControlGroupsFromConfig,
 } from "./structural_control_groups.mjs";
-import { assertUniqueStructuralControlScopeArguments, loadStructuralControlSettingsDocument } from "./structural_control_settings_binding.mjs";
-import { bindStructuralControlGroupsToCurrentHierarchies } from "./structural_control_current_hierarchy_binding.mjs";
-import { buildAuthoritativeStructuralControlInventoryHierarchyPeriod } from "./structural_control_authoritative_candidates.mjs";
-import {
-  buildStructuralControlReportDetail,
-  STRUCTURAL_CONTROL_REPORT_DETAIL_HEADERS,
-} from "./structural_control_report_detail.mjs";
+import { loadStructuralControlSettingsDocument } from "./structural_control_settings_binding.mjs";
 import { loadEmptyArticleBindingSettingsDocument } from "./empty_article_binding_settings.mjs";
 import { applyEmptyArticleBindingsToBlankArticleReporting } from "./empty_article_binding_application.mjs";
 import {
@@ -136,6 +140,14 @@ import {
   loadFullOperationEvidence,
   readOperationJournalRows,
 } from "./full_operation_evidence.mjs";
+import {
+  applyPostedCorrectionOverlayToErpParsed,
+  loadPostedCorrectionJournalOverlay,
+} from "./posted_correction_journal_overlay.mjs";
+import {
+  buildCrossJournalDiscrepancyEvidence,
+  unavailableCrossJournalEvidence,
+} from "./cross_journal_discrepancy_evidence.mjs";
 import { createUniqueRunWorkDir } from "./run_workdir.mjs";
 import { detectConfiguredRootProfile } from "./organization_profile_registry.mjs";
 import { buildOperationTreePresentation } from "./operation_tree_presentation.mjs";
@@ -193,25 +205,15 @@ function khabarovskRulesPath() {
 
 const argv = process.argv.slice(2);
 const command = argv[0] ?? "help";
-assertUniqueStructuralControlScopeArguments(argv.slice(1));
 const args = parseArgs(argv.slice(1));
 const config = JSON.parse(await fs.readFile(configPath, "utf8"));
 const structuralControlSettingsBinding = await loadStructuralControlSettingsDocument(
   args["structural-control-settings"],
-  {
-    organization: args.organization,
-    period: args.period,
-    organizationId: args["organization-id"],
-    organizationName: args["organization-name"],
-    organizationPath: args["organization-path"],
-    runId: args["run-id"],
-    contextId: args["context-id"],
-  },
+  { organization: args.organization, period: args.period },
 );
-let activeStructuralControlGroups = structuralControlSettingsBinding.document
+const activeStructuralControlGroups = structuralControlSettingsBinding.document
   ? structuralControlSettingsBinding.groups
   : structuralControlGroupsFromConfig(config, { organization: args.organization });
-let structuralControlSettingsAudit = structuralControlSettingsBinding.audit;
 const organizationProfileRegistry = JSON.parse(
   await fs.readFile(organizationProfilesPath, "utf8"),
 );
@@ -387,8 +389,9 @@ function makeConfiguredRootProfile(profile) {
   if (profile.profile_kind === "UK_R005") {
     return {
       id: "UK_R005",
-      organization: config.default_organization,
-      organizationCode: config.default_organization_code,
+      organization: normalizeText(config.default_organization) || profile.organization,
+      organizationCode:
+        normalizeText(config.default_organization_code) || profile.organization_code,
       projectRules: config.project_rules,
       rulesPath: path.resolve(config.rules_path),
       status: "BLOCKED_R005_REPASS_REQUIRED",
@@ -402,8 +405,8 @@ function makeConfiguredRootProfile(profile) {
   if (profile.profile_kind === "HABAROVSK_AT") {
     return {
       id: "HABAROVSK_AT_2025",
-      organization: "Хабаровск",
-      organizationCode: "ORG-AT-HAB",
+      organization: profile.organization,
+      organizationCode: profile.organization_code,
       projectRules: "HABAROVSK_AT_FORM_ADAPTER_V1",
       rulesPath: khabarovskRulesPath(),
       status: "BLOCKED_PROFILE_REVIEW_REQUIRED",
@@ -426,6 +429,16 @@ function makeConfiguredRootProfile(profile) {
 
 function getIntalevOrganizationSignatures() {
   return [
+    {
+      organization: "3 Сахалин",
+      hintTokens: ["3 сахалин"],
+      sourceTokens: ["цмд сахалин", "3 сахалин", "сахалин_без юл"],
+    },
+    {
+      organization: "8 Сахалин МА",
+      hintTokens: ["8 сахалин ма", "сахалин ма"],
+      sourceTokens: ["8 сахалин ма", "сахалин ма"],
+    },
     {
     organization: "9 Управляющая компания",
     hintTokens: ["9 управляющая компания"],
@@ -882,7 +895,14 @@ function attachTemplateHierarchy(
 ) {
   const exactBindingRows = templateRows.map((row) => {
     const erpExact = resolveHierarchyNodeFromTrace(row.erp, erpTree);
-    const intalevExact = resolveHierarchyNodeFromTrace(row.intalev, intalevTree);
+    const intalevPresentationExact = resolveHierarchyNodeFromPath(
+      row.intalev_node_path,
+      intalevTree,
+    );
+    const intalevTraceExact = resolveHierarchyNodeFromTrace(row.intalev, intalevTree);
+    const intalevExact = intalevPresentationExact.node_id
+      ? intalevPresentationExact
+      : intalevTraceExact;
     return {
       ...row,
       erp_node_id: erpExact.node_id,
@@ -939,10 +959,23 @@ function attachTemplateHierarchy(
   return result;
 }
 
-function resolvedHierarchyPath(result, preferredFields, fallbackFields = []) {
+function resolvedHierarchyPath(
+  result,
+  preferredFields,
+  fallbackFields = [],
+  businessLabel = "",
+) {
   return (
-    selectHierarchyTracePath(result?.trace, preferredFields) ||
-    selectHierarchyTracePath(result?.trace, fallbackFields)
+    selectHierarchyTracePathForLabel(
+      result?.trace,
+      businessLabel,
+      preferredFields,
+    ) ||
+    selectHierarchyTracePathForLabel(
+      result?.trace,
+      businessLabel,
+      fallbackFields,
+    )
   );
 }
 
@@ -1132,6 +1165,49 @@ async function resolveOperationEvidenceSources(erpParsed, period) {
     erpOpiuPath,
     journalOrigin: erpSourceMetadata(scopedJournals[0]),
     erpOpiuOrigin: erpSourceMetadata(erpOpiuPath),
+  };
+}
+
+async function resolveIntalevOperationJournalSource(workDir, period) {
+  const archiveRoot = path.join(workDir, "intalev_archives");
+  let files = [];
+  try {
+    files = await listFilesRecursive(archiveRoot);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return {
+        path: null,
+        status: "NOT_FOUND_INTALEV_ARCHIVE_ROOT",
+        reason: `После распаковки Инталев не создан каталог ${archiveRoot}.`,
+      };
+    }
+    throw error;
+  }
+  const candidates = files.filter((filePath) => {
+    const name = path.basename(filePath).toLocaleLowerCase("ru-RU").replace(/ё/g, "е");
+    return (
+      /\.xlsx$/i.test(name) &&
+      name.includes("проводк") &&
+      name.includes("управленческ") &&
+      name.includes("план")
+    );
+  });
+  const scoped = candidates.filter((filePath) => periodsFromPath(filePath).includes(period));
+  const eligible = scoped.length > 0 ? scoped : candidates.length === 1 ? candidates : [];
+  if (eligible.length !== 1) {
+    return {
+      path: null,
+      status: eligible.length === 0
+        ? "NOT_FOUND_INTALEV_POSTING_JOURNAL"
+        : "AMBIGUOUS_INTALEV_POSTING_JOURNAL",
+      reason: `Ожидался один журнал проводок Инталев за ${period}; найдено ${eligible.length} подходящих из ${candidates.length}.`,
+      candidates: candidates.map((filePath) => path.resolve(filePath)),
+    };
+  }
+  return {
+    path: path.resolve(eligible[0]),
+    status: "SELECTED_INTALEV_POSTING_JOURNAL",
+    reason: "Выбран журнал проводок управленческого плана счетов из текущего архива Инталев.",
   };
 }
 
@@ -2417,6 +2493,14 @@ async function parseErpArticleCatalog(workDir) {
   const outline = await readOutlineLevels(workingPath, 0, { required: true });
   const nodes = [];
   const stack = [];
+  const exactArticleNodes = new Map();
+  const expenseBlocks = new Map([
+    [normalizeLabel("Административные расходы"), "Административные расходы"],
+    [normalizeLabel("Коммерческие расходы"), "Коммерческие расходы"],
+    [normalizeLabel("Расходы на складскую логистику"), "Расходы на складскую логистику"],
+    [normalizeLabel("Расходы на транспортную логистику"), "Расходы на транспортную логистику"],
+  ]);
+  let activeExpenseBlock = "";
 
   for (let rowIndex = 0; rowIndex < values.length; rowIndex += 1) {
     const excelRow = bounds.startRow + rowIndex + 1;
@@ -2426,18 +2510,48 @@ async function parseErpArticleCatalog(workDir) {
     const label = normalizeText(row[0]);
     const code = normalizeText(row[14]);
 
+    if (!code && expenseBlocks.has(normalizeLabel(label))) {
+      activeExpenseBlock = expenseBlocks.get(normalizeLabel(label));
+    }
+
     if (code) {
       const parent = stack[level - 1];
+      const entry = {
+        code,
+        account: label,
+        functional_direction: normalizeText(row[4]),
+        income_expense: normalizeText(row[6]),
+        analytics: row.slice(7, 13).map(normalizeText).filter(Boolean),
+        cash_flow_article: normalizeText(row[13]),
+        source_row: excelRow,
+      };
       if (parent) {
-        parent.catalog_entries.push({
-          code,
-          account: label,
-          functional_direction: normalizeText(row[4]),
-          income_expense: normalizeText(row[6]),
-          analytics: row.slice(7, 13).map(normalizeText).filter(Boolean),
-          cash_flow_article: normalizeText(row[13]),
-          source_row: excelRow,
-        });
+        parent.catalog_entries.push(entry);
+      }
+
+      // В справочнике ERP строки кода хранят точное имя статьи в колонке N,
+      // тогда как outline служит визуальной свёрткой и не является обычным
+      // деревом parent -> child. Строим дополнительный канонический узел по
+      // фактической записи кода. Это различает одноимённые ФЗП/НДФЛ/ИТ/расходы
+      // на персонал внутри административного, коммерческого и логистических
+      // блоков и не позволяет склеить их только по отображаемому названию.
+      const exactArticle = entry.cash_flow_article;
+      if (activeExpenseBlock && exactArticle) {
+        const exactPath = `${activeExpenseBlock} / ${exactArticle}`;
+        const exactKey = normalizeLabel(exactPath);
+        if (!exactArticleNodes.has(exactKey)) {
+          exactArticleNodes.set(exactKey, {
+            level: 1,
+            label: exactArticle,
+            normalized_label: normalizeLabel(exactArticle),
+            parent_path: activeExpenseBlock,
+            full_path: exactPath,
+            catalog_entries: [],
+            source_row: excelRow,
+            exact_catalog_entry_node: true,
+          });
+        }
+        exactArticleNodes.get(exactKey).catalog_entries.push(entry);
       }
       continue;
     }
@@ -2482,11 +2596,13 @@ async function parseErpArticleCatalog(workDir) {
     },
   );
   attachTreeMetadata(nodes, hierarchyTree);
+  const exactNodes = [...exactArticleNodes.values()];
   return {
     source_file: sourcePath,
     sheet: sheet.name,
     sha256: sourceSha256,
-    nodes,
+    nodes: [...nodes, ...exactNodes],
+    exact_article_nodes: exactNodes,
     hierarchy_tree: hierarchyTree,
   };
 }
@@ -2593,6 +2709,7 @@ function intalevSheetInspection(result) {
     parent_child_edge_count: result?.parent_child_edge_count ?? 0,
     active_node_count: result?.entries?.length ?? 0,
     excluded_deleted_rows: result?.excluded_deleted_rows ?? 0,
+    excluded_placeholder_rows: result?.excluded_placeholder_rows ?? 0,
   };
 }
 
@@ -2736,6 +2853,7 @@ async function parseIntalevArticleCatalogSheet({
       deletion_status_exported: false,
       parent_child_edge_count: 0,
       excluded_deleted_rows: 0,
+      excluded_placeholder_rows: 0,
       semantic_schema_score: 0,
       header_format: "OUTLINE",
     };
@@ -2763,6 +2881,7 @@ async function parseIntalevArticleCatalogSheet({
   const schemaBlockers = [];
   let currentGroup = "";
   let excludedDeletedRows = 0;
+  let excludedPlaceholderRows = 0;
   for (let rowIndex = 0; rowIndex < values.length; rowIndex += 1) {
     const excelRow = bounds.startRow + rowIndex + 1;
     if (
@@ -2810,6 +2929,13 @@ async function parseIntalevArticleCatalogSheet({
       : level > 0 && currentGroup
           ? [currentGroup, label].join(" / ")
           : label;
+    if (
+      uidSchemaExported &&
+      isIntalevCatalogPlaceholderRow({ identity, parentIdentity, label, fullPath })
+    ) {
+      excludedPlaceholderRows += 1;
+      continue;
+    }
     entries.push({
       identity,
       uuid: identity,
@@ -2931,6 +3057,7 @@ async function parseIntalevArticleCatalogSheet({
     deletion_status_exported: deletionStatusExported,
     parent_child_edge_count: hasParentChildEdge ? 1 : 0,
     excluded_deleted_rows: excludedDeletedRows,
+    excluded_placeholder_rows: excludedPlaceholderRows,
     semantic_schema_score:
       (uidSchemaExported ? 3 : 0) +
       (deletionStatusExported ? 1 : 0) +
@@ -2962,6 +3089,41 @@ export async function parseIntalevArticleCatalog(
     }));
   }
   return selectIntalevWorkbookCatalogSheet(sheetResults, sourcePath);
+}
+
+export async function parseConfiguredIntalevArticleCatalogIfPresent(
+  workDir,
+  selectedSourcePath,
+  probeSuffix = "configured_legacy",
+) {
+  const configuredValue = normalizeText(selectedSourcePath);
+  const sourcePath = configuredValue ? path.resolve(configuredValue) : "";
+  let sourceIsFile = false;
+  if (sourcePath) {
+    try {
+      sourceIsFile = (await fs.stat(sourcePath)).isFile();
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+  if (sourceIsFile) {
+    return {
+      status: "FOUND_CONFIGURED_FALLBACK",
+      catalog: await parseIntalevArticleCatalog(workDir, sourcePath, probeSuffix),
+    };
+  }
+  const catalog = selectIntalevWorkbookCatalogSheet([], sourcePath);
+  catalog.hierarchy_tree.blockers.unshift({
+    code: "BLOCKED_INTALEV_CATALOG_OPTIONAL_FALLBACK_MISSING",
+    message:
+      "The selected Intalev container did not provide a proven UID classifier; " +
+      "the optional legacy fallback is not packaged. The report remains diagnostic.",
+    source_file: sourcePath,
+  });
+  return {
+    status: "MISSING_OPTIONAL_FALLBACK_REPORT_ONLY",
+    catalog,
+  };
 }
 
 async function selectIntalevArticleCatalog(workDir) {
@@ -3044,11 +3206,12 @@ async function selectIntalevArticleCatalog(workDir) {
       }
     }
   }
-  const configuredCatalog = await parseIntalevArticleCatalog(
+  const configuredSelection = await parseConfiguredIntalevArticleCatalogIfPresent(
     workDir,
     config.intalev_article_catalog_path,
     "configured_legacy",
   );
+  const configuredCatalog = configuredSelection.catalog;
   if (configuredCatalog.workbook_selection?.status === INTALEV_CATALOG_SHEET_AMBIGUOUS) {
     fail(`${INTALEV_CATALOG_SHEET_AMBIGUOUS}: ${JSON.stringify(
       configuredCatalog.workbook_selection,
@@ -3057,6 +3220,9 @@ async function selectIntalevArticleCatalog(workDir) {
   return {
     catalog: configuredCatalog,
     discovery: attemptedDiscovery,
+    selection_mode: attemptedDiscovery
+      ? "AUTO_DETECTED_CONTAINER"
+      : configuredSelection.status,
   };
 }
 
@@ -3072,8 +3238,11 @@ function matchErpRowToCatalog(row, catalog) {
   }
   const normalizedArticle = normalizeLabel(row.article);
   const normalizedReportSection = normalizeLabel(row.report_section);
-  const candidates = catalog.nodes
-    .filter((node) => node.normalized_label === normalizedArticle)
+  const matchingNodes = catalog.nodes
+    .filter((node) => node.normalized_label === normalizedArticle);
+  const entryBoundNodes = matchingNodes.filter((node) =>
+    Array.isArray(node.catalog_entries) && node.catalog_entries.length > 0);
+  const candidates = (entryBoundNodes.length > 0 ? entryBoundNodes : matchingNodes)
     .map((node) => ({
       node,
       // The source report has two structural columns: the section in column A
@@ -3393,6 +3562,72 @@ async function parseErpWorkbook(
   };
 }
 
+function rebuildErpParsedHierarchyAfterPostedOverlay(parsed) {
+  parsed.rows.forEach((row, index) => {
+    row.child_indexes = directChildren(parsed.rows, index);
+    const children = row.child_indexes.map((childIndex) => parsed.rows[childIndex]);
+    row.child_sum =
+      row.article &&
+      children.length > 0 &&
+      children.every((child) => typeof child.amount === "number")
+        ? roundMoney(children.reduce((sum, child) => sum + child.amount, 0))
+        : null;
+    row.hierarchy_delta =
+      typeof row.amount === "number" && typeof row.child_sum === "number"
+        ? roundMoney(row.amount - row.child_sum)
+        : null;
+    row.hierarchy_status =
+      !row.article
+        ? "NOT_ARTICLE"
+        : children.length === 0
+          ? "LEAF"
+          : typeof row.hierarchy_delta !== "number"
+            ? "BLOCKED"
+            : Math.abs(row.hierarchy_delta) <= Number(config.tolerance ?? 0.01)
+              ? "PASS"
+              : "BLOCKED";
+  });
+  annotateSourceTree(parsed.rows, {
+    amountKey: "amount",
+    tolerance: Number(config.tolerance ?? 0.01),
+    sourceSystem: "ERP",
+  });
+  parsed.hierarchy_tree = buildErpOutlineTree(
+    parsed.rows.map((row) => ({
+      label: row.article || row.summary_label,
+      code: row.catalog_codes,
+      outlineLevel: row.level,
+      parent_index: row.parent_index,
+      full_path: row.full_path,
+      source_level: row.source_level,
+      amount: row.amount,
+      source_file: row.source_file,
+      sheet: row.sheet,
+      row: row.row,
+      source_cell: row.source_cell,
+      sha256: row.sha256,
+      identity: row.source_identity,
+      source_identity_scope: row.source_identity_scope,
+      dimension_key: row.dimension_key,
+      dimension_identity_status: row.dimension_identity_status,
+      dimension_roles: row.dimension_roles,
+      organization: row.organization,
+      cfo: row.cfo,
+      department: row.department,
+      source_row_role: row.article ? "ARTICLE" : "SUMMARY",
+      aggregation_contract: "UNPROVEN",
+      period: row.period,
+    })),
+    {
+      tolerance: Number(config.tolerance ?? 0.01),
+      expectedSha256: parsed.sha256,
+      requireSourceTrace: true,
+      requireNonFlat: true,
+    },
+  );
+  attachTreeMetadata(parsed.rows, parsed.hierarchy_tree);
+}
+
 function resolvedResult(amount, status, trace = [], note = "") {
   return { amount: roundMoney(amount), status, trace, note };
 }
@@ -3506,6 +3741,7 @@ function resolveIntalevRow(templateRow, parsed, profile, intalevCatalog) {
   } else if (code === "R036") {
     expectedLabel = "<пустое значение>";
     pathIncludes = ["ФЗП и компенсационные выплаты"];
+    parentPathEndsWith = "ФЗП и компенсационные выплаты";
   } else if (code === "R037" && profile.id === "UK_R005") {
     pathIncludes = ["Расходы по основной деятельности ИТОГО", "1_Административные расходы"];
   } else if (code === "R050" && profile.id === "UK_R005") {
@@ -3746,6 +3982,42 @@ function resolveIntalevRow(templateRow, parsed, profile, intalevCatalog) {
         topmostCandidates.length === 1 ? "MATCHED" : "AGGREGATED_RULE",
         topmostCandidates,
         "Прямой НДФЛ в ветке ФЗП отсутствует; использованы верхние видимые узлы НДФЛ внутри этой ветки.",
+      );
+    }
+  }
+  if (
+    code === "R036" &&
+    candidates.length === 1 &&
+    typeof candidates[0].value === "number"
+  ) {
+    const fzpContainer = candidates[0];
+    const normalizedNdfLabel = normalizeLabel("НДФЛ");
+    const ndfDescendants = parsed.nodes.filter(
+      (node) =>
+        node.normalized_label === normalizedNdfLabel &&
+        node.normalized_path.startsWith(`${fzpContainer.normalized_path} / `),
+    );
+    const topmostNdfDescendants = ndfDescendants.filter(
+      (candidate) =>
+        !ndfDescendants.some(
+          (other) =>
+            other !== candidate &&
+            candidate.normalized_path.startsWith(`${other.normalized_path} / `),
+        ),
+    );
+    if (
+      topmostNdfDescendants.length > 0 &&
+      topmostNdfDescendants.every((candidate) => typeof candidate.value === "number")
+    ) {
+      const ndfAmount = topmostNdfDescendants.reduce(
+        (sum, candidate) => sum + candidate.value,
+        0,
+      );
+      return resolvedResult(
+        roundMoney(fzpContainer.value - ndfAmount),
+        "DERIVED_RESIDUAL",
+        [fzpContainer, ...topmostNdfDescendants],
+        "ФЗП сравнивается без НДФЛ: в дереве Инталев НДФЛ является дочерней строкой контейнера ФЗП, а в ERP выведен отдельной статьёй.",
       );
     }
   }
@@ -4238,20 +4510,25 @@ function resolveErpDirect(templateRow, parsed) {
     const administrativePath = normalizeLabel("Административные расходы");
     const primaryInAdministrativePath = primaryArticleCandidates.filter(
       (row) =>
-        row.catalog_status === "MATCHED" &&
-        normalizeLabel(row.catalog_path).includes(administrativePath),
+        (
+          normalizeText(row.catalog_status).startsWith("MATCHED") &&
+          normalizeLabel(row.catalog_path).includes(administrativePath)
+        ) ||
+        normalizeLabel(row.full_path).includes(administrativePath),
     );
     const aliasesInAdministrativePath = aliasArticleCandidates.filter(
       (row) =>
-        row.catalog_status === "MATCHED" &&
-        normalizeLabel(row.catalog_path).includes(administrativePath),
+        (
+          normalizeText(row.catalog_status).startsWith("MATCHED") &&
+          normalizeLabel(row.catalog_path).includes(administrativePath)
+        ) ||
+        normalizeLabel(row.full_path).includes(administrativePath),
     );
-    if (primaryInAdministrativePath.length > 0) {
-      primaryArticleCandidates = primaryInAdministrativePath;
-    }
-    if (aliasesInAdministrativePath.length > 0) {
-      aliasArticleCandidates = aliasesInAdministrativePath;
-    }
+    // R001–R040 are the administrative template branch.  A same-name article
+    // in commercial, transport or warehouse expenses is a different economic
+    // article and must never be used as a fallback for this branch.
+    primaryArticleCandidates = primaryInAdministrativePath;
+    aliasArticleCandidates = aliasesInAdministrativePath;
   }
   let rawArticleCandidates =
     primaryArticleCandidates.length > 0
@@ -4475,8 +4752,15 @@ function resolveErpRows(templateRows, parsed, profile = null, catalogCoverage = 
       continue;
     }
     const normalizedLabels = labels.map(normalizeLabel);
+    const administrativePath = normalizeLabel("Административные расходы");
     const candidates = parsed.rows.filter(
-      (row) => row.article && normalizedLabels.includes(normalizeLabel(row.article)),
+      (row) =>
+        row.article &&
+        normalizedLabels.includes(normalizeLabel(row.article)) &&
+        (
+          normalizeLabel(row.catalog_path).includes(administrativePath) ||
+          normalizeLabel(row.full_path).includes(administrativePath)
+        ),
     );
     const canonical = canonicalizeErpArticleCandidates(candidates, parsed);
     if (canonical.blocked) {
@@ -4635,7 +4919,258 @@ function acceptedStatus(status) {
     "ZERO_NO_ACTIVITY",
     "ZERO_NO_ACTIVITY_DUPLICATE_PROVEN",
     "INFORMATIONAL_COVERED",
+    "PRESENTATION_GROUP_ROLLUP",
   ].includes(status);
+}
+
+/**
+ * Fill a missing amount on a visible grouping row without inventing a posting
+ * amount.  The canonical presentation graph is Intalev-based, therefore the
+ * same visible member set is used on both sides of the comparison.  Prefer an
+ * exact source-node total; otherwise sum the direct visible children after a
+ * bottom-up pass.  The result is explicitly review-only and never grants
+ * correction authority.
+ */
+export function applyVisibleHierarchyGroupRollups(rows = []) {
+  const resultRows = rows.map((row) => ({
+    ...row,
+    intalev: { ...(row?.intalev ?? {}) },
+    erp: { ...(row?.erp ?? {}) },
+  }));
+  const byCode = new Map(
+    resultRows.map((row) => [normalizeText(row?.code), row]),
+  );
+  const childrenByCode = new Map(
+    resultRows.map((row) => [normalizeText(row?.code), []]),
+  );
+  for (const row of resultRows) {
+    const parentCode = normalizeText(row?.presentation_parent_code);
+    if (parentCode && childrenByCode.has(parentCode)) {
+      childrenByCode.get(parentCode).push(row);
+    }
+  }
+  const audits = [];
+  const ordered = [...resultRows].sort(
+    (left, right) =>
+      Number(right?.presentation_depth ?? 0) -
+      Number(left?.presentation_depth ?? 0),
+  );
+  for (const row of ordered) {
+    const code = normalizeText(row?.code);
+    const children = childrenByCode.get(code) ?? [];
+    if (children.length === 0) continue;
+    for (const system of ["intalev", "erp"]) {
+      const side = row[system];
+      if (typeof side?.amount === "number") continue;
+      const hierarchyBinding = row?.[`${system}_hierarchy`] ?? null;
+      const sourceTotal = hierarchyBinding?.mapped === true &&
+        typeof hierarchyBinding?.direct_total === "number"
+        ? roundMoney(hierarchyBinding.direct_total)
+        : null;
+      const childAmounts = children.map((child) => child?.[system]?.amount);
+      const childrenComplete = childAmounts.every(
+        (amount) => typeof amount === "number" && Number.isFinite(amount),
+      );
+      const visibleChildTotal = childrenComplete
+        ? roundMoney(childAmounts.reduce((sum, amount) => sum + amount, 0))
+        : null;
+      const amount = sourceTotal ?? visibleChildTotal;
+      if (typeof amount !== "number") continue;
+      const basis = sourceTotal !== null
+        ? "EXACT_SOURCE_NODE_TOTAL"
+        : "DIRECT_VISIBLE_CHILDREN_SUM";
+      const originalStatus = normalizeText(side?.status) || "MISSING";
+      const childCodes = children.map((child) => normalizeText(child?.code));
+      row[system] = {
+        ...side,
+        amount,
+        status: "PRESENTATION_GROUP_ROLLUP",
+        note: [
+          normalizeText(side?.note),
+          `Сумма группировки ${code} собрана для отображения: ${basis}; ` +
+            `дети ${childCodes.join(", ")}; исходный статус ${originalStatus}.`,
+          "Корректировочная и загрузочная полномочность не создаётся.",
+        ].filter(Boolean).join(" "),
+        trace: children.flatMap((child) => child?.[system]?.trace ?? []),
+        presentation_group_rollup: {
+          schema: "opiu-presentation-group-rollup.v1",
+          code,
+          system: system.toUpperCase(),
+          amount,
+          basis,
+          source_node_total: sourceTotal,
+          visible_child_total: visibleChildTotal,
+          child_codes: childCodes,
+          original_amount: side?.amount ?? null,
+          original_status: originalStatus,
+          correction_authority: false,
+          posting_rows: 0,
+          ready_to_upload: false,
+          release_allowed: false,
+        },
+      };
+      audits.push(row[system].presentation_group_rollup);
+    }
+  }
+  return { rows: resultRows, audits };
+}
+
+/**
+ * ERP exposes the UK financial-expense total (R053), but its API hierarchy can
+ * omit the two Intalev-only presentation levels R050/R051.  In that case both
+ * omitted levels are accidentally resolved from the same visible ERP leaf
+ * R052 and therefore show the same artificial delta twice.  When the leaf and
+ * the complete financial-expense total already reconcile, cover only those
+ * two presentation levels.  No posting is created and the literal ERP amount
+ * remains available as raw_amount for audit.
+ */
+export function applyUkFinancialPresentationCoverage(rows = [], {
+  profileId = "",
+  tolerance = 0.01,
+} = {}) {
+  const resultRows = (Array.isArray(rows) ? rows : []).map((row) => ({
+    ...row,
+    intalev: { ...(row?.intalev ?? {}) },
+    erp: { ...(row?.erp ?? {}) },
+  }));
+  if (normalizeText(profileId) !== "UK_R005") {
+    return { rows: resultRows, audit: [] };
+  }
+
+  const byCode = new Map(resultRows.map((row) => [normalizeText(row?.code), row]));
+  const r050 = byCode.get("R050");
+  const r051 = byCode.get("R051");
+  const r052 = byCode.get("R052");
+  const r053 = byCode.get("R053");
+  const amount = (row, side) => row?.[side]?.amount;
+  const finite = (value) => typeof value === "number" && Number.isFinite(value);
+  const close = (left, right) =>
+    finite(left) && finite(right) && Math.abs(roundMoney(left - right)) <= tolerance;
+  const deltaClosed = (row) => close(amount(row, "intalev"), amount(row, "erp"));
+
+  const duplicatedPresentationChain =
+    [r050, r051, r052, r053].every(Boolean) &&
+    [r050, r051, r052, r053].every((row) =>
+      finite(amount(row, "intalev")) && finite(amount(row, "erp"))) &&
+    close(amount(r050, "intalev"), amount(r051, "intalev")) &&
+    close(amount(r050, "erp"), amount(r051, "erp")) &&
+    close(amount(r051, "erp"), amount(r052, "erp")) &&
+    deltaClosed(r052) &&
+    deltaClosed(r053) &&
+    !deltaClosed(r050) &&
+    !deltaClosed(r051);
+
+  if (!duplicatedPresentationChain) {
+    return { rows: resultRows, audit: [] };
+  }
+
+  const rawDelta = roundMoney(amount(r050, "intalev") - amount(r050, "erp"));
+  const note =
+    "Структурное раскрытие УК: ERP API не содержит уровни R050/R051 и повторяет на них лист R052. " +
+    "R052 и полный итог R053 уже сходятся с Инталевом, поэтому двойная дельта уровней R050/R051 " +
+    "закрыта как представление отчёта; финансовая проводка не создаётся.";
+  for (const code of ["R050", "R051"]) {
+    const row = byCode.get(code);
+    const literalErpAmount = amount(row, "erp");
+    row.erp.raw_amount = finite(row.erp.raw_amount)
+      ? row.erp.raw_amount
+      : literalErpAmount;
+    row.erp.normalized_amount = amount(row, "intalev");
+    row.erp.amount = amount(row, "intalev");
+    row.erp.normalization_status = "STRUCTURAL_PRESENTATION_COVERED_BY_R053";
+    row.erp.normalization_note = note;
+    row.erp.normalization_trace = [
+      ...(row.erp.trace ?? []),
+      ...(r052.erp.trace ?? []),
+      ...(r053.erp.trace ?? []),
+    ];
+    row.comparison_mode = "STRUCTURAL_PRESENTATION_COVERED";
+    row.structural_presentation_coverage = {
+      schema: "opiu-uk-financial-presentation-coverage.v1",
+      status: "COVERED_NO_POSTING",
+      code,
+      raw_erp_amount: literalErpAmount,
+      normalized_erp_amount: amount(row, "intalev"),
+      raw_delta: rawDelta,
+      proving_codes: ["R052", "R053"],
+      financial_posting_rows: 0,
+      correction_authority: false,
+      note,
+    };
+  }
+
+  return {
+    rows: resultRows,
+    audit: [{
+      status: "COVERED_NO_POSTING",
+      codes: ["R050", "R051"],
+      proving_codes: ["R052", "R053"],
+      raw_delta: rawDelta,
+      financial_posting_rows: 0,
+      correction_authority: false,
+      note,
+    }],
+  };
+}
+
+export function calculateVisibleGroupDeltaResiduals(rows = [], tolerance = 0.01) {
+  const childrenByParent = new Map();
+  for (const row of rows) {
+    const parentCode = normalizeText(row?.presentation_parent_code);
+    if (!parentCode) continue;
+    if (!childrenByParent.has(parentCode)) childrenByParent.set(parentCode, []);
+    childrenByParent.get(parentCode).push(row);
+  }
+  const amountOf = (row, system) => {
+    const nested = row?.[system]?.amount;
+    if (typeof nested === "number" && Number.isFinite(nested)) return nested;
+    const flat = row?.[`${system}_amount`];
+    return typeof flat === "number" && Number.isFinite(flat) ? flat : null;
+  };
+  return rows.flatMap((row) => {
+    const code = normalizeText(row?.code);
+    const children = childrenByParent.get(code) ?? [];
+    const intalevAmount = amountOf(row, "intalev");
+    const erpAmount = amountOf(row, "erp");
+    if (children.length === 0 || intalevAmount === null || erpAmount === null) {
+      return [];
+    }
+    const groupDelta = roundMoney(intalevAmount - erpAmount);
+    const completeChildren = [];
+    const incompleteChildren = [];
+    let knownChildDeltaSum = 0;
+    for (const child of children) {
+      const childIntalev = amountOf(child, "intalev");
+      const childErp = amountOf(child, "erp");
+      if (childIntalev === null || childErp === null) {
+        incompleteChildren.push(normalizeText(child?.code));
+        continue;
+      }
+      const childDelta = roundMoney(childIntalev - childErp);
+      completeChildren.push({
+        code: normalizeText(child?.code),
+        delta: childDelta,
+      });
+      knownChildDeltaSum = roundMoney(knownChildDeltaSum + childDelta);
+    }
+    const residual = roundMoney(groupDelta - knownChildDeltaSum);
+    return [{
+      schema: "opiu-visible-group-delta-control.v1",
+      code,
+      group_delta: groupDelta,
+      known_child_delta_sum: knownChildDeltaSum,
+      residual,
+      complete_children: completeChildren,
+      incomplete_child_codes: incompleteChildren,
+      child_count: children.length,
+      delta_conservation_proven: Math.abs(residual) <= tolerance,
+      display_residual: Math.abs(residual) > tolerance,
+      correction_authority: false,
+      posting_rows: 0,
+      ready_to_upload: false,
+      release_allowed: false,
+    }];
+  });
 }
 
 export function unanimousExactHierarchyBindingProof(sides, field) {
@@ -4657,6 +5192,9 @@ export function uniqueExactHierarchyBindingProof(erp = {}) {
 
 export function aggregateSide(records, system) {
   const sides = records.map((record) => record[system]);
+  const presentationGroupRollups = sides
+    .map((side) => side?.presentation_group_rollup)
+    .filter(Boolean);
   const intalevIdentityEvidence = sides
     .map((side) => side.intalev_identity_evidence)
     .filter(Boolean);
@@ -4718,6 +5256,7 @@ export function aggregateSide(records, system) {
       r021_source_control: r021SourceControl,
       intalev_identity_evidence: intalevIdentityEvidence,
       binding_candidates: bindingCandidates,
+      presentation_group_rollups: presentationGroupRollups,
       ...hierarchyBindingProofs,
       ...normalizationFields,
     };
@@ -4735,6 +5274,7 @@ export function aggregateSide(records, system) {
       r021_source_control: r021SourceControl,
       intalev_identity_evidence: intalevIdentityEvidence,
       binding_candidates: bindingCandidates,
+      presentation_group_rollups: presentationGroupRollups,
       ...hierarchyBindingProofs,
       ...normalizationFields,
     };
@@ -4747,9 +5287,11 @@ export function aggregateSide(records, system) {
   return {
     amount: roundMoney(sides.reduce((sum, side) => sum + side.amount, 0)),
     status: sides.every((side) => acceptedStatus(side.status))
-      ? reviewStatuses.length > 0
-        ? reviewStatuses.join("+")
-        : "MATCHED"
+      ? presentationGroupRollups.length > 0
+        ? "PRESENTATION_GROUP_ROLLUP"
+        : reviewStatuses.length > 0
+          ? reviewStatuses.join("+")
+          : "MATCHED"
       : unique(sides.map((side) => side.status)).join("+"),
     trace: sides.flatMap((side) => side.trace),
     r064_zero_proof: r064ZeroProof,
@@ -4757,6 +5299,7 @@ export function aggregateSide(records, system) {
     r021_source_control: r021SourceControl,
     intalev_identity_evidence: intalevIdentityEvidence,
     binding_candidates: bindingCandidates,
+    presentation_group_rollups: presentationGroupRollups,
     ...hierarchyBindingProofs,
     ...normalizationFields,
   };
@@ -4865,7 +5408,8 @@ async function runReconciliation() {
   referenceCatalogs = bindRunIntalevUidCatalog(
     referenceCatalogs,
     intalevCatalogSelection.discovery,
-    args["intalev-articles"] ? "EXPLICIT_ARGUMENT" : "AUTO_DETECTED_CONTAINER",
+    intalevCatalogSelection.selection_mode ??
+      (args["intalev-articles"] ? "EXPLICIT_ARGUMENT" : "AUTO_DETECTED_CONTAINER"),
   );
   const intalevParsed = [];
   const erpParsed = [];
@@ -4925,6 +5469,55 @@ async function runReconciliation() {
   }
 
   const organization = organizationHint || profile.organization;
+  const postedCorrectionJournalOverlays = [];
+  if (
+    profile.id === "UK_R005" ||
+    (Array.isArray(profile.journalOrganizationAliases) && profile.journalOrganizationAliases.length > 0)
+  ) {
+    for (let index = 0; index < periods.length; index += 1) {
+      const selectedPeriod = periods[index];
+      const sourceSet = await resolveOperationEvidenceSources(erpParsed, selectedPeriod);
+      const overlay = await loadPostedCorrectionJournalOverlay({
+        journalPath: sourceSet.journalPath,
+        period: selectedPeriod,
+      });
+      const application = applyPostedCorrectionOverlayToErpParsed({
+        parsed: erpParsed[index],
+        overlay,
+      });
+      if (overlay.applicable) rebuildErpParsedHierarchyAfterPostedOverlay(erpParsed[index]);
+      postedCorrectionJournalOverlays.push({
+        ...overlay,
+        rows: overlay.rows.map((row) => ({
+          pair_id: row.pair_id,
+          operation: row.operation,
+          amount: row.amount,
+          effective_block: row.effective_block,
+          effective_article: row.effective_article,
+          effective_path: row.effective_path,
+          effective_code: row.effective_code,
+          cfo: row.cfo,
+          physical_row: row.physical_row,
+          source_row_id: row.source_row_id,
+        })),
+        application,
+      });
+    }
+  }
+  console.log(
+    `POSTED_CORRECTION_JOURNAL_OVERLAY_JSON=${JSON.stringify({
+      schema: "opiu-posted-correction-journal-overlay-run.v1",
+      periods: postedCorrectionJournalOverlays.map((item) => ({
+        period: item.period,
+        status: item.status,
+        applicable: item.applicable,
+        counts: item.counts,
+        application: item.application,
+      })),
+      report_only: true,
+      live_1c_allowed: false,
+    })}`,
+  );
   const r002BaseOperationEvidence = await loadR002OperationEvidence({
     erpPath: args.erp,
     organization,
@@ -5075,11 +5668,17 @@ async function runReconciliation() {
         intalev: intalevResult,
         erp: erpResult,
         r021_source_control: r021SourceControl,
-        intalev_node_path: resolvedHierarchyPath(intalevResult, ["full_path"]),
+        intalev_node_path: resolvedHierarchyPath(
+          intalevResult,
+          ["full_path"],
+          [],
+          templateRow.intalev_label,
+        ),
         erp_node_path: resolvedHierarchyPath(
           erpResult,
           ["full_path"],
           ["catalog_path"],
+          templateRow.erp_label,
         ),
       };
     });
@@ -5128,7 +5727,23 @@ async function runReconciliation() {
         reporting: sourceBlankArticleReporting,
         bindingRules: emptyArticleBindingSettings.rules,
       });
-    const blankArticleReporting = emptyArticleBindingApplication.reporting;
+    const presentationGroupRollups = applyVisibleHierarchyGroupRollups(
+      emptyArticleBindingApplication.reporting.rows,
+    );
+    const financialPresentationCoverage = applyUkFinancialPresentationCoverage(
+      presentationGroupRollups.rows,
+      {
+        profileId: profile.id,
+        tolerance: Number(config.tolerance ?? 0.01),
+      },
+    );
+    const blankArticleReporting = {
+      ...emptyArticleBindingApplication.reporting,
+      rows: financialPresentationCoverage.rows,
+      presentation_group_rollup_audit: presentationGroupRollups.audits,
+      structural_presentation_coverage_audit:
+        financialPresentationCoverage.audit,
+    };
     monthly.push({
       period,
       rows: blankArticleReporting.rows,
@@ -5143,16 +5758,6 @@ async function runReconciliation() {
       catalog_coverage: catalogCoverage,
     });
   }
-
-  const currentStructuralHierarchyBinding = bindStructuralControlGroupsToCurrentHierarchies(
-    activeStructuralControlGroups,
-    monthly,
-  );
-  activeStructuralControlGroups = currentStructuralHierarchyBinding.groups;
-  structuralControlSettingsAudit = Object.freeze({
-    ...structuralControlSettingsBinding.audit,
-    current_hierarchy_binding: currentStructuralHierarchyBinding.audit,
-  });
 
   const aggregateRows = templateRows.map((templateRow) => {
     const records = monthly.map((month) =>
@@ -5254,6 +5859,13 @@ async function runReconciliation() {
   });
 
   let operationEvidence = r002BaseOperationEvidence;
+  let selectedOperationSourceSets = [];
+  let crossJournalEvidence = unavailableCrossJournalEvidence({
+    organization,
+    period: periodLabel,
+    status: "NOT_EVALUATED",
+    reason: "Сопоставление журналов ещё не выполнялось.",
+  });
   if (
     profile.id === "UK_R005" ||
     (Array.isArray(profile.journalOrganizationAliases) && profile.journalOrganizationAliases.length > 0)
@@ -5281,9 +5893,11 @@ async function runReconciliation() {
           erpInputAuthoritySha256: erpInputAuthority.actual_sha256,
         });
       }
+      selectedOperationSourceSets = sourceSets;
       operationEvidence = await loadArbitraryPeriodOperationEvidence({
         sourceSets,
         organization,
+        allowedJournalOrganizations: profile.journalOrganizationAliases,
         mode,
         period: periodLabel,
         periods,
@@ -5418,6 +6032,68 @@ async function runReconciliation() {
     }
   }
 
+  if (periods.length === 1) {
+    const crossJournalPeriod = periods[0];
+    try {
+      const intalevJournal = await resolveIntalevOperationJournalSource(
+        workDir,
+        crossJournalPeriod,
+      );
+      const erpSourceSet = selectedOperationSourceSets.find(
+        (item) => item?.period === crossJournalPeriod,
+      ) ?? await resolveOperationEvidenceSources(erpParsed, crossJournalPeriod);
+      if (!intalevJournal.path) {
+        crossJournalEvidence = unavailableCrossJournalEvidence({
+          organization,
+          period: crossJournalPeriod,
+          status: intalevJournal.status,
+          reason: intalevJournal.reason,
+        });
+      } else {
+        crossJournalEvidence = await buildCrossJournalDiscrepancyEvidence({
+          intalevJournalPath: intalevJournal.path,
+          erpJournalPath: erpSourceSet.journalPath,
+          period: crossJournalPeriod,
+          organization,
+          intalevCatalogNodes: intalevCatalog.entries ?? intalevCatalog.nodes ?? [],
+          intalevReportNodes: intalevParsed
+            .filter((item) => normalizeText(item?.period) === normalizeText(crossJournalPeriod))
+            .flatMap((item) => item?.hierarchy_tree?.nodes ?? []),
+          erpCatalogNodes: erpCatalog.nodes ?? [],
+          erpSourceArchivePath: erpSourceSet.journalOrigin?.inputPath
+            || erpSourceSet.erpInputAuthorityPath,
+          erpSourceArchiveSha256: erpSourceSet.erpInputAuthoritySha256,
+          erpJournalEntry: erpSourceSet.journalOrigin?.archiveEntry
+            || path.basename(erpSourceSet.journalPath),
+        });
+      }
+    } catch (error) {
+      crossJournalEvidence = unavailableCrossJournalEvidence({
+        organization,
+        period: crossJournalPeriod,
+        status: "BLOCKED_CROSS_JOURNAL_READER",
+        reason: error?.message ?? String(error),
+      });
+    }
+  } else {
+    crossJournalEvidence = unavailableCrossJournalEvidence({
+      organization,
+      period: periodLabel,
+      status: "NOT_APPLICABLE_MULTI_PERIOD",
+      reason: "Взаимно-уникальное сопоставление физических строк выполняется отдельно для одного месяца.",
+    });
+  }
+  console.log(
+    `CROSS_JOURNAL_EVIDENCE_JSON=${JSON.stringify({
+      schema: crossJournalEvidence.schema,
+      status: crossJournalEvidence.status,
+      applicable: crossJournalEvidence.applicable,
+      period: crossJournalEvidence.period,
+      counts: crossJournalEvidence.counts,
+      gates: crossJournalEvidence.gates,
+    })}`,
+  );
+
   if (intalevCatalogSelection.discovery?.selected) {
     intalevCatalogSelection.discovery = await assertIntalevCatalogBindingUnchanged(
       intalevCatalogSelection.discovery,
@@ -5471,6 +6147,8 @@ async function runReconciliation() {
     intalevTemplateGraph: serializeApprovedIntalevTemplateGraph(intalevTemplateGraph),
     erpInputAuthority,
     operationEvidence,
+    crossJournalEvidence,
+    postedCorrectionJournalOverlays,
     economicHierarchyMapping,
     economicRouteProofDocument,
     outputPath,
@@ -5489,12 +6167,14 @@ async function runReconciliation() {
   console.log(`Данные для предпросмотра: ${buildResult.codex_input_path}`);
   console.log(`Статус: ${buildResult.status}`);
   console.log(`ready_to_upload: FALSE`);
+  // Some workbook backends can leave a non-zero process exitCode after a
+  // successfully handled diagnostic operation.  The UI treats that stale
+  // value as a failed run even though the XLSX and manifests are complete.
+  process.exitCode = 0;
 }
 
 function resolveOutputPath(organization, mode, periodLabel) {
-  const fileName = `Сверка_ОПИУ_${safeFileName(organization)}_${safeFileName(
-    periodLabel,
-  )}_${mode}_REPORT_ONLY.xlsx`;
+  const fileName = `Сверка_${safeFileName(periodLabel)}_${mode}.xlsx`;
   if (!args.output) return path.join(defaultOutputsDir, fileName);
   const requested = path.resolve(args.output);
   return /\.xlsx$/i.test(requested) ? requested : path.join(requested, fileName);
@@ -5826,6 +6506,9 @@ export function buildCodexInputPayload({
   intalevTemplateGraph,
   erpInputAuthority,
   operationEvidence,
+  crossJournalEvidence = null,
+  postedCorrectionJournalOverlays = [],
+  sourceDrivenExpenseCoverage = null,
   economicHierarchyMapping = null,
   economicRouteProofDocument = null,
   includePeriodRows = true,
@@ -5834,7 +6517,7 @@ export function buildCodexInputPayload({
   const presentationByCode = new Map(
     (presentationRows ?? []).map((row) => [normalizeText(row.code), row]),
   );
-  const structuralAssessmentRows = (aggregateRows ?? []).map((row) => {
+  const structuralAssessmentRows = (presentationRows ?? aggregateRows ?? []).map((row) => {
     const intalevAmount = row?.intalev?.amount ?? row?.intalev_amount;
     const erpAmount = row?.erp?.amount ?? row?.erp_amount;
     return {
@@ -6000,6 +6683,10 @@ export function buildCodexInputPayload({
           erp_binding_status: normalizeText(monthRow.erp_binding_status),
           intalev: monthRow.intalev.amount,
           erp: monthRow.erp.amount,
+          intalev_group_rollup:
+            monthRow.intalev.presentation_group_rollup ?? null,
+          erp_group_rollup:
+            monthRow.erp.presentation_group_rollup ?? null,
           erp_raw: monthRow.erp.raw_amount,
           erp_normalized: monthRow.erp.normalized_amount,
           erp_normalization_status: normalizeText(
@@ -6154,6 +6841,8 @@ export function buildCodexInputPayload({
       erp_label: row.erp_label,
       intalev_amount: intalevAmount,
       erp_amount: erpAmount,
+      intalev_group_rollups: row.intalev.presentation_group_rollups ?? [],
+      erp_group_rollups: row.erp.presentation_group_rollups ?? [],
       erp_raw_amount: row.erp.raw_amount,
       erp_normalized_amount: row.erp.normalized_amount,
       erp_normalization_status: normalizeText(row.erp.normalization_status),
@@ -6404,6 +7093,7 @@ export function buildCodexInputPayload({
           intalevTemplateGraph,
           erpInputAuthority,
           operationEvidence,
+          crossJournalEvidence: null,
           economicHierarchyMapping,
           economicRouteProofDocument,
           includePeriodRows: false,
@@ -6437,6 +7127,10 @@ export function buildCodexInputPayload({
       hierarchy_graph_validated: hierarchyGraphValidated,
       structural_control_groups: structuralControlGroups,
     },
+  );
+  const visibleGroupDeltaControls = calculateVisibleGroupDeltaResiduals(
+    rows,
+    tolerance,
   );
   return {
     schema: "opiu-codex-review-input-v1",
@@ -6489,10 +7183,37 @@ export function buildCodexInputPayload({
     intalev_reference_graph: intalevTemplateGraph,
     erp_input_authority: erpInputAuthority,
     operation_evidence: operationEvidence,
+    cross_journal_discrepancy_evidence: crossJournalEvidence,
+    posted_correction_journal_overlays: postedCorrectionJournalOverlays,
+    source_driven_expense_coverage: sourceDrivenExpenseCoverage
+      ? {
+          audit: sourceDrivenExpenseCoverage.audit,
+          discovery: sourceDrivenExpenseCoverage.discovery,
+          journal_first_attribution:
+            sourceDrivenExpenseCoverage.journal_first_attribution ?? null,
+          rows: sourceDrivenExpenseCoverage.rows.map((row) => ({
+            code: row.code,
+            type: row.type,
+            parent_code: row.presentation_parent_code,
+            depth: row.presentation_depth,
+            intalev_label: row.intalev_label,
+            erp_label: row.erp_label,
+            intalev_amount: row.intalev?.amount ?? null,
+            erp_amount: row.erp?.amount ?? null,
+            delta: typeof row.intalev?.amount === "number" && typeof row.erp?.amount === "number"
+              ? roundMoney(row.intalev.amount - row.erp.amount)
+              : null,
+            intalev_paths: uniqueTraceValues(row.intalev?.trace ?? [], "full_path"),
+            erp_paths: uniqueTraceValues(row.erp?.trace ?? [], "full_path"),
+            erp_only_article_row: row.erp_only_article_row === true,
+            correction_authority: false,
+          })),
+        }
+      : null,
     default_behavior: "PROCESS_ALL_DISCREPANCIES",
     structural_group_control_sets:
       serializeStructuralControlGroups(structuralControlGroups),
-    structural_control_settings_binding: structuralControlSettingsAudit,
+    structural_control_settings_binding: structuralControlSettingsBinding.audit,
     empty_article_binding_settings: (monthly ?? []).map((month) => ({
       period: month.period,
       ...(month?.empty_article_binding_settings ?? {}),
@@ -6513,6 +7234,7 @@ export function buildCodexInputPayload({
       : [],
     generic_reclassification: genericReclassification,
     generic_reclassification_candidates: genericReclassification.candidates,
+    visible_group_delta_controls: visibleGroupDeltaControls,
     owner_presentation_control_groups: ownerPresentationControlGroups,
     hierarchy_validation: {
       graph_id: "R001-R065-source-binding-20260801",
@@ -6640,6 +7362,37 @@ function expandHierarchyWithBlankArticleRows(treePresentation, monthlyRows) {
         outlineLevels.push(Math.min(7, branchLevel + relative));
       }
     }
+  });
+  return { displayRows, outlineLevels };
+}
+
+function expandHierarchyWithGroupDeltaResiduals(
+  treePresentation,
+  presentationRows,
+  tolerance,
+) {
+  const controlsByCode = new Map(
+    calculateVisibleGroupDeltaResiduals(presentationRows, tolerance)
+      .filter((control) => control.display_residual)
+      .map((control) => [control.code, control]),
+  );
+  const displayRows = [];
+  const outlineLevels = [];
+  const sourceRows = treePresentation?.displayRows ?? [];
+  const sourceLevels = treePresentation?.outlineLevels ?? [];
+  sourceRows.forEach((displayRow, index) => {
+    const level = Number(sourceLevels[index] ?? 0);
+    displayRows.push(displayRow);
+    outlineLevels.push(level);
+    if (displayRow?.kind !== "FINANCIAL") return;
+    const control = controlsByCode.get(normalizeText(displayRow?.financial?.code));
+    if (!control) return;
+    displayRows.push({
+      kind: "GROUP_DELTA_RESIDUAL",
+      financial: displayRow.financial,
+      control,
+    });
+    outlineLevels.push(Math.min(7, level + 1));
   });
   return { displayRows, outlineLevels };
 }
@@ -6870,6 +7623,8 @@ async function buildReportWorkbook(context) {
   intalevTemplateGraph,
   erpInputAuthority,
   operationEvidence,
+  crossJournalEvidence,
+  postedCorrectionJournalOverlays,
   economicHierarchyMapping,
   economicRouteProofDocument,
   outputPath,
@@ -6880,21 +7635,72 @@ async function buildReportWorkbook(context) {
   const intalevSourceScopes = intalevParsed
     .map((parsed) => parsed?.source_scope_diagnostics)
     .filter(Boolean);
-  const reportStructuralControlResults = monthly.flatMap((month) =>
-    assessConfiguredStructuralControlGroups(
-      (month?.rows ?? []).map((row) => ({
+  const corePresentationRows = attachCanonicalBindingStatuses(
+    buildHierarchyPresentationRows(aggregateRows),
+  );
+  const sourceDrivenExpenseCoverage = buildSourceDrivenExpensePresentationRows({
+    coreRows: corePresentationRows,
+    intalevParsed,
+    erpParsed,
+  });
+  console.log(
+    `SOURCE_DRIVEN_EXPENSE_COVERAGE_JSON=${JSON.stringify({
+      blocks: sourceDrivenExpenseCoverage.audit,
+      discovery: sourceDrivenExpenseCoverage.discovery,
+      rows: sourceDrivenExpenseCoverage.rows.length,
+      correction_authority: false,
+      posting_rows: 0,
+    })}`,
+  );
+  const basePresentationRows = insertSourceDrivenExpenseRows(
+    corePresentationRows,
+    sourceDrivenExpenseCoverage.rows,
+  );
+  const journalFirstAttribution = applyJournalFirstPresentationAttribution(
+    basePresentationRows,
+    crossJournalEvidence,
+  );
+  const presentationRows = journalFirstAttribution.rows;
+  sourceDrivenExpenseCoverage.journal_first_attribution = {
+    audit: journalFirstAttribution.audit,
+    structure_bindings: journalFirstAttribution.structure_bindings,
+    parent_rollups: journalFirstAttribution.parent_rollups,
+    applied: journalFirstAttribution.applied,
+    unresolved: journalFirstAttribution.unresolved,
+  };
+  console.log(
+    `JOURNAL_FIRST_PRESENTATION_JSON=${JSON.stringify(sourceDrivenExpenseCoverage.journal_first_attribution)}`,
+  );
+  const reportStructuralControlResults = /^\d{4}-(0[1-9]|1[0-2])$/.test(periodLabel)
+    ? assessConfiguredStructuralControlGroups(
+      presentationRows.map((row) => ({
         ...row,
         organization,
-        period: month.period,
+        period: periodLabel,
         intalev_amount: row?.intalev?.amount ?? row?.intalev_amount,
         erp_amount: row?.erp?.amount ?? row?.erp_amount,
       })),
       {
         organization,
-        period: month.period,
+        period: periodLabel,
         groups: activeStructuralControlGroups,
       },
-    ));
+    )
+    : monthly.flatMap((month) =>
+      assessConfiguredStructuralControlGroups(
+        (month?.rows ?? []).map((row) => ({
+          ...row,
+          organization,
+          period: month.period,
+          intalev_amount: row?.intalev?.amount ?? row?.intalev_amount,
+          erp_amount: row?.erp?.amount ?? row?.erp_amount,
+        })),
+        {
+          organization,
+          period: month.period,
+          groups: activeStructuralControlGroups,
+        },
+      ));
   const reportControlsBySet = new Map();
   for (const control of reportStructuralControlResults) {
     const controlSetId = normalizeText(control?.control_set_id);
@@ -6922,8 +7728,10 @@ async function buildReportWorkbook(context) {
   const rulesPath = path.resolve(profile.rulesPath);
   const rulesHash = sourceProvenance.rules.sha256_after;
   const generatedAt = new Date().toISOString();
-  const presentationRows = attachCanonicalBindingStatuses(
-    buildHierarchyPresentationRows(aggregateRows),
+  const visibleGroupDeltaControlsForReport =
+    calculateVisibleGroupDeltaResiduals(presentationRows, tolerance);
+  const visibleGroupDeltaControlByCode = new Map(
+    visibleGroupDeltaControlsForReport.map((control) => [control.code, control]),
   );
   const financialOutlineLevels = validatePresentationOutlineRows(presentationRows);
   const treePresentation = expandHierarchyWithOperations(
@@ -6931,12 +7739,27 @@ async function buildReportWorkbook(context) {
     financialOutlineLevels,
     operationEvidence,
   );
+  const treePresentationWithDeltaResiduals =
+    expandHierarchyWithGroupDeltaResiduals(
+      treePresentation,
+      presentationRows,
+      tolerance,
+    );
   const treePresentationWithBlankArticles = expandHierarchyWithBlankArticleRows(
-    treePresentation,
+    treePresentationWithDeltaResiduals,
     monthly,
   );
   const treeDisplayRows = treePresentationWithBlankArticles.displayRows;
   const treeOutlineLevels = treePresentationWithBlankArticles.outlineLevels;
+  const primaryCodeByIntalevNode = new Map();
+  for (const item of treeDisplayRows) {
+    if (item.kind !== "FINANCIAL") continue;
+    const nodeId = normalizeText(item.financial?.hierarchy_node_id);
+    const code = normalizeText(item.financial?.code);
+    if (nodeId && code && !primaryCodeByIntalevNode.has(nodeId)) {
+      primaryCodeByIntalevNode.set(nodeId, code);
+    }
+  }
 
   function intalevBusinessLabel(row) {
     if (row?.blank_article_binding) {
@@ -6955,6 +7778,48 @@ async function buildReportWorkbook(context) {
     return row?.intalev_label;
   }
 
+  function isActualIntalevExpenseBlock(row) {
+    const hierarchyPath = Array.isArray(row?.hierarchy_path)
+      ? row.hierarchy_path.map(normalizeText).filter(Boolean)
+      : [];
+    const normalizedPath = hierarchyPath.map((item) => item
+      .toLocaleLowerCase("ru-RU")
+      .replace(/ё/g, "е")
+      .replace(/^_+/u, "")
+      .replace(/\s+/gu, " ")
+      .trim());
+    const marker = normalizedPath.indexOf("статьи опиу 2025");
+    if (marker < 0 || marker !== normalizedPath.length - 2) return false;
+    const label = normalizeText(row?.intalev_label || hierarchyPath.at(-1))
+      .toLocaleLowerCase("ru-RU")
+      .replace(/ё/g, "е");
+    return /расход|затрат|себестоим/u.test(label)
+      && !/итого|прибыл|результат|доход|выруч|чистая/u.test(label);
+  }
+
+  function intalevPresentationRole(row) {
+    if (row?.journal_structure_binding?.status === "PROVEN") {
+      return `ВНУТРИ ${normalizeText(row.journal_structure_binding.parent_code)} ПО ЖУРНАЛУ`;
+    }
+    if (!normalizeText(row?.hierarchy_node_id)) return "НЕТ УЗЛА ИНТАЛЕВ";
+    const primaryCode = primaryCodeByIntalevNode.get(
+      normalizeText(row.hierarchy_node_id),
+    );
+    if (primaryCode && primaryCode !== normalizeText(row.code)) {
+      return `ДУБЛЬ УЗЛА ${primaryCode}`;
+    }
+    const parentCode = normalizeText(row?.presentation_parent_code);
+    if (parentCode) return `ВНУТРИ ${parentCode}`;
+    if (isActualIntalevExpenseBlock(row)) return "БЛОК ИНТАЛЕВ";
+    return "СТАТЬЯ / ДЕТАЛЬ ИНТАЛЕВ";
+  }
+
+  function intalevPresentationPath(row) {
+    return Array.isArray(row?.hierarchy_path)
+      ? row.hierarchy_path.map(normalizeText).filter(Boolean).join(" / ")
+      : "";
+  }
+
   const workbook = Workbook.create();
   workbook.comments.setSelf({ displayName: "Codex — сверка ОПИУ" });
   const passport = workbook.worksheets.add("00_Паспорт");
@@ -6964,6 +7829,13 @@ async function buildReportWorkbook(context) {
   const intalevSheet = workbook.worksheets.add("03_Инталев_узлы");
   const intalevBlankArticleSheet = workbook.worksheets.add("03A_Пустые_статьи");
   const erpSheet = workbook.worksheets.add("04_ERP_статьи");
+  const crossJournalSheet = crossJournalEvidence?.applicable === true
+    ? workbook.worksheets.add("04A_Расхождения_проводок")
+    : null;
+  const crossJournalCorrectionSheet = crossJournalEvidence?.applicable === true
+    && Number(crossJournalEvidence?.counts?.proven_intergroup_reposts ?? 0) > 0
+    ? workbook.worksheets.add("04B_R001_решения")
+    : null;
   const issuesSheet = workbook.worksheets.add("05_Несопоставленные");
   const sourcesSheet = workbook.worksheets.add("06_Источники");
   const controlsSheet = workbook.worksheets.add("07_Контроли");
@@ -6983,6 +7855,8 @@ async function buildReportWorkbook(context) {
   const intalevEndRow = buildIntalevNodes();
   const intalevBlankArticleEndRow = buildIntalevBlankArticleDiagnostics();
   const erpEndRow = buildErpRows();
+  const crossJournalEndRow = buildCrossJournalDiscrepancies();
+  const crossJournalCorrectionEndRow = buildCrossJournalCorrectionDecisions();
   const issuesEndRow = buildIssues();
   const sourcesEndRow = buildSources();
   const controlsEndRow = buildControls();
@@ -7001,6 +7875,20 @@ async function buildReportWorkbook(context) {
   } else {
     operationEvidence.workbook_source_proof_sheet = null;
     operationEvidence.workbook_source_proof_rows = 0;
+  }
+  if (crossJournalSheet) {
+    crossJournalEvidence.workbook_sheet = "04A_Расхождения_проводок";
+    crossJournalEvidence.workbook_rows = Math.max(0, crossJournalEndRow - 4);
+  } else {
+    crossJournalEvidence.workbook_sheet = null;
+    crossJournalEvidence.workbook_rows = 0;
+  }
+  if (crossJournalCorrectionSheet) {
+    crossJournalEvidence.correction_workbook_sheet = "04B_R001_решения";
+    crossJournalEvidence.correction_workbook_rows = Math.max(0, crossJournalCorrectionEndRow - 4);
+  } else {
+    crossJournalEvidence.correction_workbook_sheet = null;
+    crossJournalEvidence.correction_workbook_rows = 0;
   }
 
   const preExport = await workbook.inspect({
@@ -7036,8 +7924,20 @@ async function buildReportWorkbook(context) {
       ["04_ERP_статьи", `A1:L${Math.min(erpEndRow, 28)}`],
       ["05_Несопоставленные", `A1:I${Math.min(issuesEndRow, 28)}`],
       ["06_Источники", `A1:J${Math.min(sourcesEndRow, 24)}`],
-      ["07_Контроли", `A1:O${controlsEndRow}`],
+      ["07_Контроли", `A1:D${Math.min(controlsEndRow, 24)}`],
     ];
+    if (crossJournalSheet) {
+      specs.splice(7, 0, [
+        "04A_Расхождения_проводок",
+        `A1:AG${Math.min(crossJournalEndRow, 28)}`,
+      ]);
+    }
+    if (crossJournalCorrectionSheet) {
+      specs.splice(8, 0, [
+        "04B_R001_решения",
+        `A1:N${Math.min(crossJournalCorrectionEndRow, 24)}`,
+      ]);
+    }
     if (journalCandidatesSheet) {
       specs.push([
         "08_Операции_журнала",
@@ -7107,23 +8007,11 @@ async function buildReportWorkbook(context) {
     intalevTemplateGraph,
     erpInputAuthority,
     operationEvidence,
+    crossJournalEvidence,
+    postedCorrectionJournalOverlays,
+    sourceDrivenExpenseCoverage,
     economicHierarchyMapping,
     economicRouteProofDocument,
-  });
-  const authoritativeInventoryHierarchyPeriods = codexInput.hierarchy_periods.map((hierarchyPeriod, index) => {
-    const month = monthly[index];
-    if (!month || normalizeText(month.period) !== normalizeText(hierarchyPeriod.period)) {
-      throw new Error(`BLOCKED_STRUCTURAL_CONTROL_INVENTORY_PERIOD_BINDING:${hierarchyPeriod.period}`);
-    }
-    return buildAuthoritativeStructuralControlInventoryHierarchyPeriod({
-      ...month,
-      rows: (month.rows ?? []).map((row) => ({
-        ...row,
-        intalev_amount: row?.intalev_amount ?? row?.intalev?.amount,
-        erp_amount: row?.erp_amount ?? row?.erp?.amount,
-        erp_paths: row?.erp_paths ?? uniqueTraceValues(row?.erp?.trace, "full_path"),
-      })),
-    }, hierarchyPeriod);
   });
   const structuralInventoryInput = {
     runId: structuralInventoryScope?.run_id,
@@ -7135,7 +8023,7 @@ async function buildReportWorkbook(context) {
     },
     reconciliationOrganizationName: organization,
     period: periodLabel,
-    hierarchyPeriods: authoritativeInventoryHierarchyPeriods,
+    hierarchyPeriods: codexInput.hierarchy_periods,
     generatedAt,
   };
   const structuralControlInventoryPlan = planStructuralControlInventoryV3(
@@ -7179,11 +8067,25 @@ async function buildReportWorkbook(context) {
     source_provenance: sourceProvenance,
     erp_input_authority: erpInputAuthority,
     operation_evidence: operationEvidence,
+    cross_journal_discrepancy_evidence: crossJournalEvidence
+      ? {
+          schema: crossJournalEvidence.schema,
+          status: crossJournalEvidence.status,
+          applicable: crossJournalEvidence.applicable,
+          organization: crossJournalEvidence.organization,
+          period: crossJournalEvidence.period,
+          sources: crossJournalEvidence.sources,
+          counts: crossJournalEvidence.counts,
+          gates: crossJournalEvidence.gates,
+          workbook_sheet: crossJournalEvidence.workbook_sheet,
+          workbook_rows: crossJournalEvidence.workbook_rows,
+        }
+      : null,
     decision_engine: codexInput?.decision_engine ?? null,
     structural_group_control_sets:
       codexInput?.structural_group_control_sets ?? [],
     structural_control_settings_binding:
-      codexInput?.structural_control_settings_binding ?? structuralControlSettingsAudit,
+      codexInput?.structural_control_settings_binding ?? structuralControlSettingsBinding.audit,
     empty_article_binding_settings:
       codexInput?.empty_article_binding_settings ?? [],
     empty_article_binding_audit:
@@ -7385,7 +8287,7 @@ async function buildReportWorkbook(context) {
     );
     hierarchySheet.getRange("A2:AD2").merge();
     hierarchySheet.getRange("A2").values = [[
-      "Кнопки группировки слева повторяют полный путь текущего ОПИУ/Инталев. Дочерние и пустые статьи расположены непосредственно под родителем; родительский Инталев показан all-in, а 03A_Пустые_статьи остаётся дополнительным реестром. Контрольный лист 01_Сверка_ОПИУ сохраняет порядок R001–R065.",
+      "Дерево строится по фактическому пути из выбранного архива Инталев. Если название статьи ERP отличается от физической строки Инталев, место статьи определяется только по взаимно-уникальной операции двух журналов; сумма ERP при этом не переносится на другую статью. Нераспознанные строки остаются серыми. Полные источники приведены в комментариях и на листах 03_Инталев_узлы / 04_ERP_статьи / 04A_Расхождения_проводок.",
     ]];
     hierarchySheet.getRange("A2:AD2").format = {
       fill: colors.blueLight,
@@ -7408,7 +8310,7 @@ async function buildReportWorkbook(context) {
       [
         hierarchyProofPassed
           ? "Иерархия Инталева доказана текущим прогоном; ERP binding проверяется отдельно."
-          : "Группировка построена только по полному пути и parent-коду Инталева; неполные/конфликтные ветви помечены HIERARCHY_UNPROVEN.",
+          : "Показан фактический путь Инталев; неоднозначные сопоставления не назначаются родителями и помечены HIERARCHY_UNPROVEN.",
         `Операции: ${operationEvidence?.status ?? "NOT_APPLICABLE"}; source_contributor_rows=${operationEvidence?.source_contributor_rows ?? 0}; display_operation_rows=${operationEvidence?.display_operation_rows ?? 0}.`,
         "REPORT_ONLY; correction_operation_rows=0; posting_rows=0; ready_to_upload=false; release_allowed=false.",
       ].join(" "),
@@ -7422,8 +8324,8 @@ async function buildReportWorkbook(context) {
 
     const headers = [
       "Код / PairID",
-      "Уровень",
-      "Строка ОПИУ / операция",
+      "Положение в дереве Инталев",
+      "Статья ОПИУ / строка источника",
       "Инталев",
       "ERP",
       "Дельта = Инталев − ERP",
@@ -7480,6 +8382,30 @@ async function buildReportWorkbook(context) {
         "04_ERP_статьи",
       );
       const where = `Инталев: ${intalevTrace || "НЕ ДОКАЗАНО"} | ERP: ${erpTrace || "НЕ ДОКАЗАНО"}`;
+      const groupDeltaControl = visibleGroupDeltaControlByCode.get(
+        normalizeText(row.code),
+      );
+
+      if (
+        groupDeltaControl &&
+        typeof delta === "number" &&
+        Math.abs(delta) > tolerance
+      ) {
+        const residualText = Math.abs(groupDeltaControl.residual) > tolerance
+          ? ` Нераспределённый по полным дочерним статьям остаток: ${groupDeltaControl.residual.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`
+          : " Дельта полностью раскрыта дочерними статьями.";
+        return {
+          status: Math.abs(groupDeltaControl.residual) > tolerance
+            ? "ДЕЛЬТА ГРУППЫ / ЕСТЬ НЕРАСПРЕДЕЛЁННЫЙ ОСТАТОК"
+            : "ДЕЛЬТА ГРУППЫ / РАСКРЫТА ПО ДОЧЕРНИМ СТАТЬЯМ",
+          what: `Инталев ${row.intalev.amount.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} − ERP ${row.erp.amount.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} = ${delta.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.${residualText}`,
+          where: `Группа ${row.code}; полные дочерние статьи: ${groupDeltaControl.complete_children.map((item) => item.code).join(", ") || "нет"}; неполные дочерние статьи: ${groupDeltaControl.incomplete_child_codes.join(", ") || "нет"}. ${where}`,
+          how: Math.abs(groupDeltaControl.residual) > tolerance
+            ? "Проверить выделенную ниже контрольную строку остатка и статьи с неполной парой. Контрольная строка не является статьёй или проводкой."
+            : "Расхождение уже локализовано в дочерних статьях; раскрыть группу и проверять строки с ненулевой дельтой.",
+          delta,
+        };
+      }
 
       if (row.blank_article_binding) {
         return {
@@ -7590,6 +8516,25 @@ async function buildReportWorkbook(context) {
           cells[27] = "CANDIDATE_EXCLUDED; EXCLUDED_FROM_TOTAL; correction_operation_rows=0; posting_rows=0.";
           return cells;
         }
+        if (displayRow.kind === "GROUP_DELTA_RESIDUAL") {
+          const row = displayRow.financial;
+          const control = displayRow.control;
+          const cells = Array(30).fill(null);
+          cells[0] = `${row.code}-Δ`;
+          cells[1] = `${level + 1} — КОНТРОЛЬ ДЕЛЬТЫ`;
+          cells[2] = `${"   ".repeat(level)}Нераспределённая дельта внутри группы «${intalevBusinessLabel(row) || row.erp_label || row.code}»`;
+          cells[5] = control.residual;
+          cells[6] = "ДЕЛЬТА ГРУППЫ НЕ РАСКРЫТА ПО СТАТЬЯМ";
+          cells[7] = `Дельта группы ${control.group_delta.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}; по полным дочерним статьям объяснено ${control.known_child_delta_sum.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}; остаток ${control.residual.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`;
+          cells[8] = `Группа ${row.code}; полные дети: ${control.complete_children.map((item) => item.code).join(", ") || "нет"}; неполные дети: ${control.incomplete_child_codes.join(", ") || "нет"}.`;
+          cells[9] = "Раскрыть статьи с неполной парой Инталев/ERP. Эта контрольная строка объясняет место остатка, но не является статьёй или проводкой.";
+          cells[10] = "КОНТРОЛЬ ГРУППИРОВКИ / БЕЗ ПРОВОДКИ";
+          cells[25] = control.residual;
+          cells[27] = `group_delta=${control.group_delta}; known_child_delta_sum=${control.known_child_delta_sum}; residual=${control.residual}; incomplete_child_codes=${control.incomplete_child_codes.join(",")}; correction_authority=false; posting_rows=0; ready_to_upload=false; release_allowed=false.`;
+          cells[28] = "VISIBLE_GROUP_DELTA_CONSERVATION";
+          cells[29] = "REVIEW_ONLY_RESIDUAL";
+          return cells;
+        }
         if (displayRow.kind === "EMPTY_ARTICLE_BRANCH") {
           const scope = displayRow.scope;
           const itemLevels = (scope?.items ?? []).map(
@@ -7619,6 +8564,22 @@ async function buildReportWorkbook(context) {
             ownerBindingCandidates.length > 0 &&
             ownerBoundItems.length === ownerBindingCandidates.length;
           const ownerBindingPartial = ownerBoundItems.length > 0 && !ownerBindingComplete;
+          const explanationItems = ownerBindingCandidates.filter(
+            (item) => normalizeText(item?.source_label) && typeof item?.amount === "number",
+          );
+          const explanationTotal = roundMoney(explanationItems.reduce(
+            (sum, item) => sum + item.amount,
+            0,
+          ));
+          const explanationCloses = explanationItems.length > 0
+            && Math.abs(explanationTotal - Number(scope?.blank_amount ?? 0)) <= tolerance;
+          const userMoney = (value) => Number(value ?? 0).toLocaleString("ru-RU", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          });
+          const detailExplanation = explanationItems.length <= 8
+            ? explanationItems.map((item) => `«${normalizeText(item.source_label)}» ${userMoney(item.amount)}`).join(" + ")
+            : `${explanationItems.length} строк детализации общей суммой ${userMoney(explanationTotal)}`;
           const cells = Array(30).fill(null);
           cells[0] = "EMPTY";
           cells[1] = `${level + 1} — ПУСТАЯ СТАТЬЯ`;
@@ -7631,16 +8592,22 @@ async function buildReportWorkbook(context) {
               ? "UNCLASSIFIED / UPDATE_MAPPING / БЕЗ ПРОВОДКИ"
               : ownerBindingPartial
                 ? "UNCLASSIFIED / ЧАСТИЧНОЕ UPDATE_MAPPING / _СПОРНО / БЕЗ ПРОВОДКИ"
-                : "UNCLASSIFIED / _СПОРНО / БЕЗ ПРОВОДКИ";
-          cells[7] = "Пустая статья включена в all-in родителя и показана отдельно; это не отсутствующая сумма.";
+                : explanationCloses
+                  ? "СУММА НАЙДЕНА / СТРУКТУРНОЕ РАСКРЫТИЕ / БЕЗ ПРОВОДКИ"
+                  : "UNCLASSIFIED / _СПОРНО / БЕЗ ПРОВОДКИ";
+          cells[7] = explanationCloses
+            ? `Сумма найдена полностью: ${detailExplanation} = ${userMoney(scope.blank_amount)}. В Инталеве эти расходы расположены отдельной веткой без статьи, поэтому это объяснение структуры, а не потерянная сумма.`
+            : `Сумма ${userMoney(scope.blank_amount)} найдена в Инталеве отдельной веткой без статьи и уже включена в общий итог родителя один раз; это объяснение структуры, а не потерянная сумма.`;
           cells[8] = scope.source_scope_path;
           cells[9] = fullyMatched
-            ? "Корректировка не требуется; раскрыть строки ниже. Физическую связь ERP проверять отдельно."
+            ? `Корректировка не требуется: те же затраты найдены в ERP на именованных статьях. Инталев all-in ${userMoney(scope.all_in_amount)} − статьи ОПИУ ${userMoney(scope.classified_amount)} = отдельная ветка ${userMoney(scope.blank_amount)}; строки ниже показывают её состав.`
             : ownerBindingComplete || ownerBindingPartial
               ? "Применена настройка классификации организации. Сумму ERP не распределять по строкам; проводку не формировать. Непривязанные строки оставить на ручной проверке."
-              : "Проверить ERP-классификацию вручную. Не подставлять статью, организацию или SourceRowID.";
+              : explanationCloses
+                ? `Проводку не формировать: каждая деталь учтена один раз, а дельта отдельных строк возникает из-за различия иерархии Инталев и ERP. Проверять нужно только расположение в отчёте, не саму сумму.`
+                : "Проверить ERP-классификацию вручную. Не подставлять статью, организацию или SourceRowID.";
           cells[10] = "UNCLASSIFIED_BRANCH / CONTROL_ONLY";
-          cells[27] = `source_scope_id=${scope.source_scope_id}; all_in=${scope.all_in_amount}; classified=${scope.classified_amount}; blank=${scope.blank_amount}; count_in_parent_once=true; financial_posting_rows=0; ready_to_upload=false; release_allowed=false.`;
+          cells[27] = `source_scope_id=${scope.source_scope_id}; all_in=${scope.all_in_amount}; classified=${scope.classified_amount}; blank=${scope.blank_amount}; detail_sum=${explanationTotal}; detail_sum_closes_blank=${explanationCloses}; count_in_parent_once=true; financial_posting_rows=0; ready_to_upload=false; release_allowed=false.`;
           cells[28] = "UNCLASSIFIED / EMPTY_ARTICLE";
           cells[29] = fullyMatched
             ? "ERP_REPORT_ARTICLE_PRESENT"
@@ -7653,6 +8620,15 @@ async function buildReportWorkbook(context) {
         }
         if (displayRow.kind === "EMPTY_ARTICLE_DETAIL") {
           const item = displayRow.item;
+          const scopeItems = (displayRow.scope?.items ?? []).some((entry) => entry?.source_is_leaf === true)
+            ? (displayRow.scope?.items ?? []).filter((entry) => entry?.source_is_leaf === true)
+            : (displayRow.scope?.items ?? []);
+          const scopeDetailTotal = roundMoney(scopeItems.reduce(
+            (sum, entry) => sum + (typeof entry?.amount === "number" ? entry.amount : 0),
+            0,
+          ));
+          const scopeDetailsClose = scopeItems.length > 0
+            && Math.abs(scopeDetailTotal - Number(displayRow.scope?.blank_amount ?? 0)) <= tolerance;
           const hasErpArticle = Boolean(normalizeText(item?.target_code) && normalizeText(item?.erp_article));
           const ownerClassificationBinding =
             item?.binding_status === "OWNER_APPROVED_BINDING";
@@ -7670,31 +8646,50 @@ async function buildReportWorkbook(context) {
             ? "BINDING_REPAIR_PROVEN / UPDATE_MAPPING / БЕЗ ПРОВОДКИ"
             : hasErpArticle
               ? "ERP СТАТЬЯ УКАЗАНА / КОРРЕКТИРОВКА НЕ НУЖНА"
-              : "_СПОРНО / ERP СТАТЬЯ НЕ ДОКАЗАНА";
+              : scopeDetailsClose
+                ? "СУММА НАЙДЕНА / ДЕТАЛИЗАЦИЯ / БЕЗ ПРОВОДКИ"
+                : "_СПОРНО / ERP СТАТЬЯ НЕ ДОКАЗАНА";
           cells[7] = ownerClassificationBinding
             ? "Исходная сумма Инталева сохранена без статьи; ERP-статья определена настройкой организации."
-            : "Исходная сумма Инталева сохранена без статьи.";
+            : `Деталь «${normalizeText(item?.source_label) || "без названия"}» на сумму ${Number(item?.amount ?? 0).toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} уже входит в итог пустой ветки Инталева; это расшифровка суммы, а не отдельная дополнительная дельта.`;
           cells[8] = `${item.source_file}; ${item.sheet}!${item.source_cell}`;
           cells[9] = ownerClassificationBinding
             ? "Сопоставлено по настройке организации; не формировать проводку и не распределять общую сумму ERP по исходным строкам."
             : hasErpArticle
               ? "Не формировать проводку; отчётное сопоставление выполнено по уникальной сумме внутри родителя."
-              : "Оставить без статьи и направить на ручную проверку; физические поля не придумывать.";
+              : "Показать пользователю как объясняющую детализацию. Проводку не формировать: сумма уже учтена в all-in родителя; проверка нужна только при обязательном выборе новой статьи ERP.";
           cells[10] = "UNCLASSIFIED_DETAIL / CONTROL_ONLY";
           cells[27] = `source_path=${item.source_path}; source_row=${item.source_row}; source_sha256=${item.source_sha256}; match_basis=${item.match_basis}; binding_status=${item.binding_status ?? ""}; binding_classification=${item.binding_classification ?? ""}; binding_decision_type=${item.binding_decision_type ?? ""}; article=""; correction_allowed=false; residual_consumption=0; financial_posting_rows=0.`;
           cells[28] = ownerClassificationBinding
             ? "SOURCE_CLASSIFICATION_GAP / EMPTY_ARTICLE"
-            : "UNCLASSIFIED / EMPTY_ARTICLE";
+            : scopeDetailsClose
+              ? "STRUCTURAL_EXPLANATION / EMPTY_ARTICLE"
+              : "UNCLASSIFIED / EMPTY_ARTICLE";
           cells[29] = ownerClassificationBinding
             ? "OWNER_APPROVED_CLASSIFICATION_BINDING"
             : hasErpArticle
-              ? "REPORT_AMOUNT_BINDING_ONLY"
-              : "ERP_BINDING_UNPROVEN";
+              ? "ERP_REPORT_ARTICLE_PRESENT"
+              : scopeDetailsClose
+                ? "INTALEV_DETAIL_SUM_PROVEN"
+                : "ERP_PHYSICAL_BINDING_UNPROVEN";
           return cells;
         }
         if (displayRow.kind === "FINANCIAL") {
           const row = displayRow.financial;
           const decision = decisionsByCode.get(row.code);
+          const journalStructureBound = row?.journal_structure_binding?.status === "PROVEN";
+          const journalStructureOnly = journalStructureBound && !(
+            typeof row?.intalev?.amount === "number" &&
+            typeof row?.erp?.amount === "number"
+          );
+          const visibleDecision = journalStructureOnly
+            ? {
+                status: "ПРИВЯЗАНО К ГРУППЕ ПО ЖУРНАЛУ / БЕЗ ПРОВОДКИ",
+                what: `Статья ERP «${row.erp_label}» относится к группе Инталев «${row.journal_structure_binding.parent_article}».`,
+                where: `Инталев: ${row.presentation_structural_proof?.source_report_paths?.join(" | ") || row.journal_structure_binding.parent_article}; ERP: физические строки журнала, ${row.journal_structure_binding.operation_count} доказанных операций.`,
+                how: "Статью и сумму ERP не менять. В сверке показать её дочерней строкой соответствующей группы Инталев.",
+              }
+            : decision;
           const labelsDiffer =
             normalizeLabel(row.intalev_label) !== normalizeLabel(row.erp_label);
           const childOperationCount = (operationEvidence?.rows ?? []).filter(
@@ -7711,17 +8706,21 @@ async function buildReportWorkbook(context) {
           const structuralProof = row.presentation_structural_proof ?? {
             status: "HIERARCHY_UNPROVEN",
           };
+          const sourcePath = intalevPresentationPath(row);
+          const sourceRole = intalevPresentationRole(row);
           return [
             row.code,
-            `${level + 1} — ${row.type}`,
+            sourceRole === "НЕТ УЗЛА ИНТАЛЕВ" && !journalStructureBound
+              ? "— СТАТЬЯ ERP, НЕТ В ДЕРЕВЕ ИНТАЛЕВ"
+              : sourceRole,
             `${"   ".repeat(level)}${intalevBusinessLabel(row) || row.erp_label || row.code}`,
             row.intalev.amount,
             row.erp.amount,
             null,
-            decision.status,
-            decision.what,
-            decision.where,
-            decision.how,
+            visibleDecision.status,
+            visibleDecision.what,
+            visibleDecision.where,
+            visibleDecision.how,
             row.type,
             null,
             null,
@@ -7741,7 +8740,7 @@ async function buildReportWorkbook(context) {
             labelsDiffer
               ? `${row.intalev_label || "—"} → ${row.erp_label || "—"}`
               : null,
-            `Статус Инталев: ${row.intalev.status}; ERP: ${row.erp.status}; source parent=${row.presentation_parent_code || "ROOT"}; parent basis=${row.presentation_parent_basis}; source outlineLevel=${row.presentation_source_outline_level}; display outlineLevel=${level}; structural status=${row.presentation_hierarchy_status}; proof status=${structuralProof.status}; proof source=${structuralProof.system || "INTALEV"}; proof cell=${structuralProof.source_sheet && structuralProof.source_cell ? `${structuralProof.source_sheet}!${structuralProof.source_cell}` : "LIVE_INTALEV_NODE"}; graph SHA-256=${structuralProof.graph_sha256 || "LIVE_INTALEV"}; ERP used=${structuralProof.erp_used === true ? "true" : "false"}; ${row.presentation_reason || "parent-граф без локальных замечаний"}; child_operation_rows=${childOperationCount}; proven_operation_rows=${provenChildOperationCount}; candidate_operation_rows=${candidateChildOperationCount}.`,
+            `Тип строки: статья ОПИУ${journalStructureBound ? ` ERP, привязанная к группе Инталев «${row.journal_structure_binding.parent_article}» по одинаковой операции журналов` : sourceRole === "НЕТ УЗЛА ИНТАЛЕВ" ? " из структуры ERP; в дереве Инталев точного узла нет" : " из дерева Инталев"}. Путь Инталев: ${sourcePath || "НЕТ УЗЛА В АРХИВЕ"}; Статус Инталев: ${row.intalev.status}; ERP: ${row.erp.status}; source parent=${row.presentation_parent_code || "ROOT"}; parent basis=${row.presentation_parent_basis}; source outlineLevel=${row.presentation_source_outline_level}; display outlineLevel=${level}; structural status=${row.presentation_hierarchy_status}; proof status=${structuralProof.status}; proof source=${structuralProof.system || "INTALEV"}; proof cell=${structuralProof.source_sheet && structuralProof.source_cell ? `${structuralProof.source_sheet}!${structuralProof.source_cell}` : "LIVE_INTALEV_NODE"}; graph SHA-256=${structuralProof.graph_sha256 || "LIVE_INTALEV"}; ERP used=${structuralProof.erp_used === true ? "true" : "false"}; group rollup Intalev=${(row.intalev.presentation_group_rollups ?? []).map((item) => item.basis).join(",") || "NO"}; group rollup ERP=${(row.erp.presentation_group_rollups ?? []).map((item) => item.basis).join(",") || "NO"}; ${row.presentation_reason || "parent-граф без локальных замечаний"}; child_operation_rows=${childOperationCount}; proven_operation_rows=${provenChildOperationCount}; candidate_operation_rows=${candidateChildOperationCount}.`,
             row.intalev_hierarchy_status,
             row.erp_binding_status,
           ];
@@ -7836,6 +8835,9 @@ async function buildReportWorkbook(context) {
       6,
       treeDisplayRows.map((displayRow, index) => {
         const excelRow = dataStartRow + index;
+        if (displayRow.kind === "GROUP_DELTA_RESIDUAL") {
+          return [`=${displayRow.control.residual}`];
+        }
         return ["FINANCIAL", "EMPTY_ARTICLE_BRANCH", "EMPTY_ARTICLE_DETAIL"].includes(
           displayRow.kind,
         )
@@ -7851,6 +8853,9 @@ async function buildReportWorkbook(context) {
       26,
       treeDisplayRows.map((displayRow, index) => {
         const excelRow = dataStartRow + index;
+        if (displayRow.kind === "GROUP_DELTA_RESIDUAL") {
+          return [`=F${excelRow}`];
+        }
         return ["FINANCIAL", "EMPTY_ARTICLE_BRANCH", "EMPTY_ARTICLE_DETAIL"].includes(
           displayRow.kind,
         )
@@ -7886,6 +8891,32 @@ async function buildReportWorkbook(context) {
         };
         hierarchySheet.getRange(`C${excelRow}:J${excelRow}`).format.wrapText = true;
         hierarchySheet.getRange(`AB${excelRow}:AD${excelRow}`).format.wrapText = true;
+        return;
+      }
+      if (displayRow.kind === "GROUP_DELTA_RESIDUAL") {
+        rowRange.format = {
+          fill: "#FCE4D6",
+          font: { bold: true, color: "#9C0006" },
+          verticalAlignment: "top",
+          rowHeight: 52,
+          borders: {
+            bottom: { style: "thin", color: "#E6B8AF" },
+          },
+        };
+        hierarchySheet.getRange(`C${excelRow}:J${excelRow}`).format.wrapText = true;
+        hierarchySheet.getRange(`AB${excelRow}:AD${excelRow}`).format.wrapText = true;
+        workbook.comments.addThread(
+          { cell: hierarchySheet.getRange(`C${excelRow}`) },
+          [
+            "Это контроль сохранения дельты, а не статья и не операция.",
+            `Группа: ${displayRow.control.code}`,
+            `Дельта группы: ${displayRow.control.group_delta}`,
+            `Сумма известных дочерних дельт: ${displayRow.control.known_child_delta_sum}`,
+            `Нераспределённый остаток: ${displayRow.control.residual}`,
+            `Неполные дочерние статьи: ${displayRow.control.incomplete_child_codes.join(", ") || "нет"}`,
+            "correction_authority=false; posting_rows=0; ready_to_upload=false; release_allowed=false.",
+          ].join("\n"),
+        );
         return;
       }
       if (["EMPTY_ARTICLE_BRANCH", "EMPTY_ARTICLE_DETAIL"].includes(displayRow.kind)) {
@@ -8005,8 +9036,14 @@ async function buildReportWorkbook(context) {
           : level === 2
             ? { fill: "#E2F0D9", font: { color: "#1F1F1F" } }
             : { fill: "#FFF2CC", font: { color: "#1F1F1F" } };
+      const presentationRole = intalevPresentationRole(row);
+      const journalStructureBound = row?.journal_structure_binding?.status === "PROVEN";
+      const missingIntalevNode = !normalizeText(row?.hierarchy_node_id) && !journalStructureBound;
+      const duplicateIntalevNode = presentationRole.startsWith("ДУБЛЬ УЗЛА ");
       rowRange.format = {
-        ...levelFormat,
+        ...(missingIntalevNode || duplicateIntalevNode
+          ? { fill: "#E7E6E6", font: { color: "#595959", italic: true } }
+          : levelFormat),
         verticalAlignment: "top",
         rowHeight: level <= 1 ? 52 : 44,
         borders: {
@@ -8015,9 +9052,18 @@ async function buildReportWorkbook(context) {
           bottom: { style: "thin", color: "#D9E2F3" },
         },
       };
-      const status = decisionsByCode.get(row.code).status;
+      const rowDecision = decisionsByCode.get(row.code);
+      const journalStructureOnly = row?.journal_structure_binding?.status === "PROVEN" && !(
+        typeof row?.intalev?.amount === "number" &&
+        typeof row?.erp?.amount === "number"
+      );
+      const status = journalStructureOnly
+        ? "ПРИВЯЗАНО К ГРУППЕ ПО ЖУРНАЛУ / БЕЗ ПРОВОДКИ"
+        : rowDecision.status;
       const statusFill = status === "СОШЛОСЬ"
         ? colors.greenStrong
+        : status.startsWith("ПРИВЯЗАНО К ГРУППЕ ПО ЖУРНАЛУ")
+          ? colors.greenStrong
         : status.startsWith("НУЛЕВАЯ ГРУППА") ||
             status.includes("ИЕРАРХИЯ") ||
             status.includes("ПУСТЫХ СТАТЕЙ") ||
@@ -8044,7 +9090,9 @@ async function buildReportWorkbook(context) {
           `Исходная позиция контрольного листа: ${row.presentation_source_index + 1}`,
           `Доказательность ветви: ${row.presentation_hierarchy_status}; ${row.presentation_reason || "без локальных замечаний"}`,
           `Строка ERP: ${row.erp_label || "—"}`,
-          decisionsByCode.get(row.code).where,
+          journalStructureOnly
+            ? `Привязка по журналам: ${row.journal_structure_binding.operation_count} операций; сумма ERP сохранена без изменения.`
+            : rowDecision.where,
           `Статус Инталев: ${row.intalev.status}`,
           `Статус ERP: ${row.erp.status}`,
           `INTALEV_HIERARCHY: ${row.intalev_hierarchy_status}`,
@@ -8061,7 +9109,7 @@ async function buildReportWorkbook(context) {
       "dd.mm.yyyy hh:mm:ss";
 
     const widths = {
-      A: 14, B: 17, C: 47, D: 15, E: 15, F: 18, G: 34, H: 42, I: 52,
+      A: 14, B: 28, C: 47, D: 15, E: 15, F: 18, G: 34, H: 42, I: 52,
       J: 48, K: 17, L: 21, M: 12, N: 42, O: 12, P: 10, Q: 36, R: 30,
       S: 10, T: 36, U: 30, V: 34, W: 16, X: 15, Y: 15, Z: 18, AA: 48,
       AB: 58, AC: 22, AD: 20,
@@ -8168,34 +9216,49 @@ async function buildReportWorkbook(context) {
     const decisionByCode = new Map(
       (decisionInput?.rows ?? []).map((item) => [normalizeText(item.code), item]),
     );
-    const sourceValues = aggregateRows.map((row) => [
-      row.code,
-      intalevBusinessLabel(row),
-      row.erp_label,
-      row.intalev.amount,
-      row.erp.amount,
-      null,
-      null,
-      null,
-      null,
-      null,
-      row.intalev.status,
-      row.erp.status,
-      traceText("AGG", deduplicateTrace(row.intalev.trace), 4, "02_Помесячно"),
-      traceText("AGG", deduplicateTrace(row.erp.trace), 4, "02_Помесячно"),
-      row.erp.normalized_amount,
-      [
-        row.erp.normalization_status,
-        row.erp.normalization_note,
-        decisionByCode.get(normalizeText(row.code))?.status_text,
-        decisionByCode.get(normalizeText(row.code))?.priority_stage,
-      ]
-        .map(normalizeText)
-        .filter(Boolean)
-        .join(": "),
-      row.intalev_hierarchy_status,
-      row.erp_binding_status,
-    ]);
+    const presentationByCode = new Map(
+      presentationRows.map((row) => [normalizeText(row?.code), row]),
+    );
+    const sourceValues = aggregateRows.map((sourceRow) => {
+      const row = presentationByCode.get(normalizeText(sourceRow?.code)) ?? sourceRow;
+      const journalStructureBound = row?.journal_structure_binding?.status === "PROVEN";
+      return [
+        row.code,
+        intalevBusinessLabel(row),
+        row.erp_label,
+        row.intalev.amount,
+        row.erp.amount,
+        null,
+        null,
+        null,
+        null,
+        null,
+        journalStructureBound
+          ? "ПРИВЯЗАНО К ГРУППЕ ПО ЖУРНАЛУ"
+          : row.intalev.status,
+        row.erp.status,
+        traceText("AGG", deduplicateTrace(row.intalev.trace), 4, "02_Помесячно"),
+        traceText("AGG", deduplicateTrace(row.erp.trace), 4, "02_Помесячно"),
+        row.erp.normalized_amount,
+        [
+          row.erp.normalization_status,
+          row.erp.normalization_note,
+          row.erp.note,
+          row.journal_structure_rollup?.status === "PROVEN"
+            ? `ERP восстановлена по дочерним статьям журнала: ${row.journal_structure_rollup.child_codes.join(", ")}`
+            : "",
+          decisionByCode.get(normalizeText(row.code))?.status_text,
+          decisionByCode.get(normalizeText(row.code))?.priority_stage,
+        ]
+          .map(normalizeText)
+          .filter(Boolean)
+          .join(": "),
+        journalStructureBound
+          ? "HIERARCHY_PROVEN_BY_JOURNAL"
+          : row.intalev_hierarchy_status,
+        row.erp_binding_status,
+      ];
+    });
     writeValues(summary, 7, 1, sourceValues);
     const formulas = aggregateRows.map((_, index) => {
       const row = index + 7;
@@ -8717,6 +9780,269 @@ async function buildReportWorkbook(context) {
     return endRow;
   }
 
+  function buildCrossJournalDiscrepancies() {
+    if (!crossJournalSheet) return 0;
+    const evidenceRows = Array.isArray(crossJournalEvidence?.rows)
+      ? crossJournalEvidence.rows
+      : [];
+    const rows = evidenceRows.map((row) => [
+      row.classification ?? "",
+      row.row_type ?? "",
+      row.confidence ?? 0,
+      row.period ?? "",
+      row.block_intalev ?? "",
+      row.article_intalev ?? "",
+      row.article_erp ?? "",
+      row.amount ?? null,
+      row.date ?? "",
+      row.debit ?? "",
+      row.credit ?? "",
+      row.analytics ?? "",
+      row.content ?? "",
+      row.intalev_document ?? "",
+      row.intalev_rows ?? "",
+      row.erp_document ?? "",
+      row.erp_rows ?? "",
+      row.reason ?? "",
+      row.action ?? "",
+      row.reused === true ? "ДА — ОШИБКА КОНТРОЛЯ" : "НЕТ",
+      row.intalev_source_row_id ?? "",
+      row.erp_source_row_id ?? "",
+      row.intalev_path ?? "",
+      row.erp_path ?? "",
+      row.source_block_erp ?? "",
+      row.target_block_intalev ?? "",
+      row.source_article_code_erp ?? "",
+      row.source_operating_account ?? "",
+      row.target_article_erp ?? "",
+      row.target_article_code_erp ?? "",
+      row.target_operating_account ?? "",
+      row.target_catalog_path ?? "",
+      row.target_status ?? "",
+    ]);
+    const endRow = Math.max(5, 4 + rows.length);
+    const counts = crossJournalEvidence?.counts ?? {};
+    styleTitle(
+      crossJournalSheet,
+      "A1:AG1",
+      `Сопоставление физических проводок Инталев ↔ ERP — ${periodLabel}`,
+    );
+    crossJournalSheet.getRange("A2:AG2").merge();
+    crossJournalSheet.getRange("A2").values = [[
+      `Пара ищется по физическим журналам: дата + сумма + расчётная сторона + содержание + общие аналитики. Счёт затрат может различаться — это признак межгрупповой переклассификации. Уникальных пар: ${counts.unique_pairs ?? 0}; пересортов: ${counts.different_article_pairs ?? 0}; доказанных межгрупповых целей: ${counts.proven_intergroup_reposts ?? 0}; неоднозначных: ${counts.ambiguous_pairs ?? 0}.`,
+    ]];
+    crossJournalSheet.getRange("A2:AG2").format = {
+      fill: colors.yellow,
+      font: { bold: true, color: "#7F6000" },
+      wrapText: true,
+      rowHeight: 46,
+    };
+    writeValues(crossJournalSheet, 4, 1, [[
+      "Результат сопоставления",
+      "Тип строки",
+      "Уверенность, %",
+      "Период",
+      "Блок Инталев",
+      "Статья Инталев",
+      "Статья ERP",
+      "Сумма",
+      "Дата",
+      "Дт",
+      "Кт",
+      "Общие аналитики",
+      "Содержание операции",
+      "Документ Инталев",
+      "Строка Инталев",
+      "Документ ERP",
+      "Строка ERP",
+      "Почему строки признаны одной операцией",
+      "Что делать пользователю",
+      "Повторное использование строки",
+      "SourceRowID Инталев",
+      "SourceRowID ERP",
+      "Путь статьи Инталев",
+      "Путь статьи ERP",
+      "Фактический блок ERP",
+      "Целевой блок по Инталев",
+      "Код исходной статьи ERP",
+      "Счёт исходного блока ERP",
+      "Целевая статья ERP",
+      "Код целевой статьи ERP",
+      "Счёт целевого блока ERP",
+      "Целевой путь ERP",
+      "Статус выбора цели",
+    ]]);
+    styleHeader(crossJournalSheet.getRange("A4:AG4"));
+    if (rows.length > 0) {
+      writeValues(crossJournalSheet, 5, 1, rows);
+      styleData(crossJournalSheet.getRange(`A5:AG${4 + rows.length}`));
+      crossJournalSheet.getRange(`C5:C${4 + rows.length}`).format.numberFormat = "0";
+      crossJournalSheet.getRange(`H5:H${4 + rows.length}`).format.numberFormat =
+        '#,##0.00;[Red](#,##0.00);-';
+      crossJournalSheet.getRange(`E5:AG${4 + rows.length}`).format.wrapText = true;
+      crossJournalSheet.getRange(`A5:A${4 + rows.length}`).conditionalFormats.add(
+        "containsText",
+        {
+          text: "ПЕРЕСОРТ",
+          format: { fill: colors.yellow, font: { color: "#9C5700", bold: true } },
+        },
+      );
+      crossJournalSheet.getRange(`A5:A${4 + rows.length}`).conditionalFormats.add(
+        "containsText",
+        {
+          text: "ОДНА СТАТЬЯ",
+          format: { fill: colors.green, font: { color: "#006100", bold: true } },
+        },
+      );
+      crossJournalSheet.getRange(`A5:A${4 + rows.length}`).conditionalFormats.add(
+        "containsText",
+        {
+          text: "НЕОДНОЗНАЧНОЕ",
+          format: { fill: colors.yellow, font: { color: "#9C5700", bold: true } },
+        },
+      );
+      crossJournalSheet.getRange(`A5:A${4 + rows.length}`).conditionalFormats.add(
+        "containsText",
+        {
+          text: "ДУБЛЬ",
+          format: { fill: colors.red, font: { color: "#9C0006", bold: true } },
+        },
+      );
+      crossJournalSheet.getRange(`T5:T${4 + rows.length}`).conditionalFormats.add(
+        "containsText",
+        {
+          text: "ОШИБКА",
+          format: { fill: colors.red, font: { color: "#9C0006", bold: true } },
+        },
+      );
+    } else {
+      crossJournalSheet.getRange("A5:AG5").merge();
+      crossJournalSheet.getRange("A5").values = [[
+        "В выбранном периоде нет строк сопоставления журналов.",
+      ]];
+      crossJournalSheet.getRange("A5:AG5").format.fill = colors.yellow;
+    }
+    setColumnWidths(
+      crossJournalSheet,
+      [
+        38, 24, 14, 12, 30, 36, 36, 16, 14, 10, 10, 42,
+        54, 46, 16, 46, 16, 76, 68, 24, 44, 44, 72, 72,
+        34, 34, 22, 20, 36, 22, 20, 72, 34,
+      ],
+      endRow,
+    );
+    crossJournalSheet.freezePanes.freezeRows(4);
+    crossJournalSheet.freezePanes.freezeColumns(7);
+    return endRow;
+  }
+
+  function buildCrossJournalCorrectionDecisions() {
+    if (!crossJournalCorrectionSheet) return 0;
+    const proven = (Array.isArray(crossJournalEvidence?.rows) ? crossJournalEvidence.rows : [])
+      .filter((row) => row.classification?.includes("МЕЖГРУППОВОЙ"))
+      .filter((row) => row.target_status === "PROVEN_UNIQUE_TARGET_IN_INTALEV_BLOCK")
+      .filter((row) => normalizeLabel(row.source_block_erp) !== normalizeLabel(row.target_block_intalev));
+    const headers = [
+      "CaseID", "PairID", "Тип решения", "Решение владельца", "Период",
+      "Строка сверки", "Группа", "Статья", "Роль доказательства",
+      "classification", "reclass_scope", "Proof status", "effective_delta",
+      "ECONOMIC_ROUTE_PROVEN", "SOURCE_OPERATION_PROVEN", "PHYSICAL_SOURCE_UNIQUE",
+      "ECONOMIC_CORRECTION_PROVEN", "partial_source_amount_proven",
+      "Архив источника ERP", "SHA256 архива источника ERP", "Файл журнала внутри архива",
+      "SHA256 журнала ERP", "Лист источника ERP", "SourceRowID ERP",
+      "ERP файл/лист/диапазон", "Дата источника", "Регистратор/документ",
+      "№ проводки источника", "Дт источник", "Аналитика Дт источник 1",
+      "Аналитика Дт источник 2", "Аналитика Дт источник 3", "Подразделение Дт источник",
+      "Кт источник", "Аналитика Кт источник 1", "Аналитика Кт источник 2",
+      "Аналитика Кт источник 3", "Подразделение Кт источник", "Организация",
+      "Организация сверки", "Организация источника ERP", "Физическая сумма источника",
+      "Сумма корректировки", "Причина", "Предлагаемое решение", "Исходная статья",
+      "Счет доходов/расходов Инталев", "Целевая статья analytical", "Код целевой статьи",
+      "Слот целевой аналитики", "Блок Инталев", "Полный путь Инталев",
+      "Путь целевой статьи ERP", "Счет целевой статьи ERP", "Комментарий",
+    ];
+    const rows = proven.flatMap((row) => {
+      const suffix = normalizeText(row.erp_source_row_id).slice(0, 24) || String(row.erp_rows);
+      const caseId = `XJ-${suffix}`;
+      const pairId = `PAIR-${suffix}`;
+      const amount = Math.abs(Number(row.source_amount ?? row.amount));
+      const physical = [
+        row.source_archive_path ?? "", row.source_archive_sha256 ?? "", row.journal_entry ?? "",
+        row.journal_sha256 ?? "", row.source_sheet ?? "", row.erp_source_row_id ?? "",
+        row.source_range ?? `B${row.erp_rows}:AG${row.erp_rows}`, row.source_date ?? row.date ?? "",
+        row.erp_document ?? "", row.posting_number ?? "", row.source_dt ?? row.debit ?? "",
+        row.source_analytics_dt1 ?? "", row.source_analytics_dt2 ?? "", row.source_analytics_dt3 ?? "",
+        row.source_department_dt ?? "", row.source_kt ?? row.credit ?? "",
+        row.source_analytics_kt1 ?? "", row.source_analytics_kt2 ?? "", row.source_analytics_kt3 ?? "",
+        row.source_department_kt ?? "", organization, organization,
+        row.source_organization ?? "", amount, amount,
+      ];
+      const common = [
+        "STORNO_REPOST", "ДОКАЗАНО_СВЕРКОЙ", row.period ?? periodLabel,
+      ];
+      const proof = [
+        "FINANCIAL_RECLASS", "INTER_GROUP", "ECONOMIC_RECLASS_PROVEN",
+      ];
+      const tail = [
+        row.reason ?? "", row.action ?? "", row.source_article ?? row.article_erp ?? "",
+        row.source_operating_account ?? "", row.target_article_erp ?? "",
+        row.target_article_code_erp ?? "", 1, row.target_block_intalev ?? "",
+        row.intalev_path ?? "", row.target_catalog_path ?? "",
+        row.target_operating_account ?? "",
+        `Инталев: ${row.intalev_document ?? ""}, строки ${row.intalev_rows ?? ""}; ERP: ${row.erp_document ?? ""}, строка ${row.erp_rows ?? ""}.`,
+      ];
+      const sourceRow = [
+        caseId, pairId, ...common,
+        `XJS-${suffix}`, row.article_erp ?? row.source_article ?? "",
+        row.source_article ?? row.article_erp ?? "", "RECLASS_SOURCE",
+        ...proof, -amount, true, true, true, true, true,
+        ...physical, ...tail,
+      ];
+      const targetRow = [
+        caseId, pairId, ...common,
+        `XJT-${suffix}`, row.target_article_erp ?? "", row.target_article_erp ?? "",
+        "RECLASS_TARGET", ...proof, amount, true, true, true, true, true,
+        ...physical, ...tail,
+      ];
+      return [sourceRow, targetRow];
+    });
+    const endRow = Math.max(5, 4 + rows.length);
+    styleTitle(
+      crossJournalCorrectionSheet,
+      `A1:${columnName(headers.length)}1`,
+      `Доказанные решения для движка корректировок R001 — ${periodLabel}`,
+    );
+    crossJournalCorrectionSheet.getRange(`A2:${columnName(headers.length)}2`).merge();
+    crossJournalCorrectionSheet.getRange("A2").values = [[
+      `Каждый CaseID содержит две равные строки: STORNO с фактического кода статьи ERP и REPOST на одноимённую статью внутри блока Инталев. Доказанных межгрупповых переносов: ${proven.length}; строк решений: ${rows.length}. Счета Дт/Кт физической проводки не подменяются — меняется код статьи ОПИУ.`,
+    ]];
+    crossJournalCorrectionSheet.getRange(`A2:${columnName(headers.length)}2`).format = {
+      fill: colors.green,
+      font: { bold: true, color: "#006100" },
+      wrapText: true,
+      rowHeight: 46,
+    };
+    writeValues(crossJournalCorrectionSheet, 4, 1, [headers]);
+    styleHeader(crossJournalCorrectionSheet.getRange(`A4:${columnName(headers.length)}4`));
+    if (rows.length > 0) {
+      writeValues(crossJournalCorrectionSheet, 5, 1, rows);
+      styleData(crossJournalCorrectionSheet.getRange(`A5:${columnName(headers.length)}${4 + rows.length}`));
+      crossJournalCorrectionSheet.getRange(`M5:M${4 + rows.length}`).format.numberFormat =
+        '#,##0.00;[Red]-#,##0.00;0.00';
+      crossJournalCorrectionSheet.getRange(`AP5:AQ${4 + rows.length}`).format.numberFormat =
+        '#,##0.00;[Red]-#,##0.00;0.00';
+      crossJournalCorrectionSheet.getRange(`A5:A${4 + rows.length}`).format.font = { bold: true };
+    }
+    setColumnWidths(
+      crossJournalCorrectionSheet,
+      headers.map((_, index) => index < 18 ? 20 : index < 43 ? 24 : 36),
+      endRow,
+    );
+    crossJournalCorrectionSheet.freezePanes.freezeRows(4);
+    crossJournalCorrectionSheet.freezePanes.freezeColumns(9);
+    return endRow;
+  }
+
   function buildIssues() {
     const issues = [];
     for (const month of monthly) {
@@ -8868,6 +10194,34 @@ async function buildReportWorkbook(context) {
             ? "Обнаружение ERP ОСВ не означает выполнение парного контроля ОСВ."
             : "",
         ].filter(Boolean).join(" "),
+      ]);
+    }
+    if (crossJournalEvidence?.sources?.intalev) {
+      rows.push([
+        "INTALEV_POSTING_JOURNAL",
+        crossJournalEvidence.period,
+        crossJournalEvidence.sources.intalev.path,
+        crossJournalEvidence.sources.intalev.sheet,
+        crossJournalEvidence.sources.intalev.sha256,
+        null,
+        runIdFromWorkDir(workDir),
+        crossJournalEvidence.sources.intalev.path,
+        "VERIFIED_FOR_DIAGNOSTIC_MATCH",
+        "Физические проводки Инталев; используются только для взаимно-уникального сопоставления с ERP. Финансовая корректировка автоматически не создаётся.",
+      ]);
+    }
+    if (crossJournalEvidence?.sources?.erp) {
+      rows.push([
+        "ERP_POSTING_JOURNAL_CROSS_MATCH",
+        crossJournalEvidence.period,
+        crossJournalEvidence.sources.erp.path,
+        crossJournalEvidence.sources.erp.sheet,
+        crossJournalEvidence.sources.erp.sha256,
+        null,
+        runIdFromWorkDir(workDir),
+        crossJournalEvidence.sources.erp.path,
+        "VERIFIED_FOR_DIAGNOSTIC_MATCH",
+        "Физические проводки ERP; используются только для взаимно-уникального сопоставления с Инталев. Повторное использование строки запрещено.",
       ]);
     }
     rows.push([
@@ -9144,20 +10498,14 @@ async function buildReportWorkbook(context) {
         "structural_control_financial_posting_rows=0",
       ].join("; "),
     ]);
-    const structuralControlDetail = buildStructuralControlReportDetail({
-      controls: reportStructuralControlResults,
-      settingsAudit: structuralControlSettingsAudit,
-    });
-    const summaryEndRow = 21 + structuralControlRows.length;
-    const detailTitleRow = summaryEndRow + 2;
-    const detailHeaderRow = detailTitleRow + 1;
-    const detailStartRow = detailHeaderRow + 1;
-    const detailEndRow = structuralControlDetail.row_count > 0
-      ? detailStartRow + structuralControlDetail.row_count - 1
-      : detailHeaderRow;
-    const endRow = detailEndRow;
+    const journalPairCounts = crossJournalEvidence?.counts ?? {};
+    const journalReuseCount = Number(journalPairCounts.reused_intalev_rows ?? 0) +
+      Number(journalPairCounts.reused_erp_rows ?? 0);
+    const endRow = 25 + structuralControlRows.length;
     const operationEvidenceStatus = String(operationEvidence?.status ?? "NOT_APPLICABLE");
-    const operationEvidenceControlStatus = operationEvidenceStatus.startsWith("PASS")
+    const operationEvidenceControlStatus = crossJournalEvidence?.applicable === true
+      ? "INFO"
+      : operationEvidenceStatus.startsWith("PASS")
       ? "PASS"
       : operationEvidenceStatus === "NOT_APPLICABLE"
         ? "INFO"
@@ -9203,21 +10551,25 @@ async function buildReportWorkbook(context) {
         archiveSourceGate.osvControlComment,
       ],
       [
-        "Журнал ERP и точная трасса операций",
+        "Старая однофайловая трасса ERP (справочно)",
         operationEvidence?.display_operation_rows ?? 0,
         operationEvidenceControlStatus,
-        `status=${operationEvidenceStatus}; exact_bound_operation_rows=${operationEvidence?.exact_bound_operation_rows ?? 0}; exact_bound_r_codes=${(operationEvidence?.exact_bound_r_codes ?? []).join(",") || "NONE"}; source_contributor_rows=${operationEvidence?.source_contributor_rows ?? 0}; candidate_excluded_rows=${operationEvidence?.candidate_excluded_rows ?? 0}; correction_operation_rows=0; отчёт не формирует проводки.`,
+        `Не используется для межсистемной привязки Инталев ↔ ERP. status=${operationEvidenceStatus}; exact_bound_operation_rows=${operationEvidence?.exact_bound_operation_rows ?? 0}; candidate_excluded_rows=${operationEvidence?.candidate_excluded_rows ?? 0}.`,
       ],
       [
-        "Покрытие конечных суммовых строк операциями",
+        "Старая трасса ERP: покрытие конечных строк (справочно)",
         `${operationEvidence?.proven_r_code_count ?? 0} / ${operationEvidence?.operation_bearing_terminal_rows ?? 0}`,
-        operationEvidence?.operation_coverage_complete === true ? "PASS" : "BLOCKED",
+        crossJournalEvidence?.applicable === true
+          ? "INFO"
+          : operationEvidence?.operation_coverage_complete === true ? "PASS" : "BLOCKED",
         `Доказаны: ${(operationEvidence?.proven_r_codes ?? []).join(", ") || "нет"}. Заблокированы: ${(operationEvidence?.blocked_direct_leaf_nodes ?? []).join(", ") || "нет"}.`,
       ],
       [
-        "Доказанные физические строки журнала",
+        "Старая трасса ERP: доказанные строки (справочно)",
         operationEvidence?.source_contributor_rows ?? 0,
-        operationEvidence?.source_operation_proof_verified === true ? "PASS" : "BLOCKED",
+        crossJournalEvidence?.applicable === true
+          ? "INFO"
+          : operationEvidence?.source_operation_proof_verified === true ? "PASS" : "BLOCKED",
         `source_proof_status=${operationEvidence?.source_trace?.source_operation_proof_status ?? "SOURCE_OPERATION_UNPROVEN"}; journal_sha256=${operationEvidence?.journal_sha256 ?? "MISSING"}.`,
       ],
       [
@@ -9225,6 +10577,31 @@ async function buildReportWorkbook(context) {
         operationEvidence?.candidate_excluded_rows ?? 0,
         operationEvidence?.gates?.candidate_rows_excluded_from_totals === true ? "PASS" : "BLOCKED",
         "Жёлтые строки нужны только для проверки документов; count_in_parent=false.",
+      ],
+      [
+        "Межсистемное сопоставление журналов Инталев ↔ ERP",
+        journalPairCounts.unique_pairs ?? 0,
+        crossJournalEvidence?.applicable === true ? "PASS" : "INFO",
+        `Уникальных пар=${journalPairCounts.unique_pairs ?? 0}; межгрупповых=${journalPairCounts.proven_intergroup_reposts ?? 0}; неоднозначных=${journalPairCounts.ambiguous_pairs ?? 0}. Подробности: 04A_Расхождения_проводок.`,
+      ],
+      [
+        "Статьи ERP, помещённые в группы Инталев по журналу",
+        `${journalFirstAttribution.audit.structure_bindings_applied ?? 0} / ${journalFirstAttribution.audit.structure_binding_candidates ?? 0}`,
+        Number(journalFirstAttribution.audit.structure_bindings_applied ?? 0) > 0 ? "PASS" : "INFO",
+        `Применены только однозначные связи по физической операции. Родительских ERP-сумм восстановлено=${journalFirstAttribution.audit.journal_parent_rollups_applied ?? 0}.`,
+      ],
+      [
+        "Родительские суммы ERP, восстановленные по привязанным статьям",
+        journalFirstAttribution.audit.journal_parent_rollups_applied ?? 0,
+        "PASS",
+        (journalFirstAttribution.parent_rollups ?? []).map((item) =>
+          `${item.parent_code}=${item.amount} (${item.child_codes.join(",")})`).join("; ") || "Не требовалось.",
+      ],
+      [
+        "Повторное использование физических строк журналов",
+        journalReuseCount,
+        journalReuseCount === 0 ? "PASS" : "BLOCKED",
+        `Фактически повторно использовано: Инталев=${journalPairCounts.reused_intalev_rows ?? 0}; ERP=${journalPairCounts.reused_erp_rows ?? 0}. Предотвращено конфликтов payroll=${journalPairCounts.payroll_intalev_reuse_conflicts ?? 0}.`,
       ],
       ["Корректировки", 0, "PASS", "REPORT_ONLY; проводки отсутствуют."],
       ["ready_to_upload", false, "BLOCKED", "Fail-closed."],
@@ -9239,50 +10616,20 @@ async function buildReportWorkbook(context) {
       [`=COUNTIF('04_ERP_статьи'!$H$5:$H$${erpEnd},"UNMAPPED")+COUNTIF('04_ERP_статьи'!$H$5:$H$${erpEnd},"CATALOG_*")`, `=IF(B10=0,"PASS","BLOCKED")`],
       [erpHierarchyBlockedControlFormula(5, erpEnd), `=IF(B11=0,"PASS","BLOCKED")`],
     ]);
-    styleData(controlsSheet.getRange(`A5:D${summaryEndRow}`));
-    controlsSheet.getRange(`C5:C${summaryEndRow}`).conditionalFormats.add("containsText", {
+    styleData(controlsSheet.getRange(`A5:D${endRow}`));
+    controlsSheet.getRange(`C5:C${endRow}`).conditionalFormats.add("containsText", {
       text: "PASS",
       format: { fill: colors.green, font: { color: "#006100", bold: true } },
     });
-    controlsSheet.getRange(`C5:C${summaryEndRow}`).conditionalFormats.add("containsText", {
+    controlsSheet.getRange(`C5:C${endRow}`).conditionalFormats.add("containsText", {
       text: "BLOCKED",
       format: { fill: colors.red, font: { color: "#9C0006", bold: true } },
     });
-    controlsSheet.getRange(`A${summaryEndRow}:D${summaryEndRow}`).format = {
+    controlsSheet.getRange(`A${endRow}:D${endRow}`).format = {
       fill: colors.red,
       font: { bold: true, color: "#9C0006" },
     };
-    controlsSheet.getRange(`A${detailTitleRow}:O${detailTitleRow}`).merge();
-    controlsSheet.getRange(`A${detailTitleRow}`).values = [[
-      "Детали структурных групп — выбранные блоки Инталев и ERP",
-    ]];
-    controlsSheet.getRange(`A${detailTitleRow}:O${detailTitleRow}`).format = {
-      fill: colors.blueLight,
-      font: { bold: true, color: "#17365D" },
-    };
-    writeValues(controlsSheet, detailHeaderRow, 1, [
-      [...STRUCTURAL_CONTROL_REPORT_DETAIL_HEADERS],
-    ]);
-    styleHeader(controlsSheet.getRange(`A${detailHeaderRow}:O${detailHeaderRow}`));
-    if (structuralControlDetail.row_count > 0) {
-      writeValues(controlsSheet, detailStartRow, 1, structuralControlDetail.rows);
-      styleData(controlsSheet.getRange(`A${detailStartRow}:O${detailEndRow}`));
-      controlsSheet.getRange(`H${detailStartRow}:M${detailEndRow}`).format.numberFormat =
-        '#,##0.00;[Red](#,##0.00);-';
-      controlsSheet.getRange(`N${detailStartRow}:N${detailEndRow}`).conditionalFormats.add("containsText", {
-        text: "CLOSED",
-        format: { fill: colors.green, font: { color: "#006100", bold: true } },
-      });
-      controlsSheet.getRange(`N${detailStartRow}:N${detailEndRow}`).conditionalFormats.add("containsText", {
-        text: "BLOCK",
-        format: { fill: colors.red, font: { color: "#9C0006", bold: true } },
-      });
-    }
-    setColumnWidths(
-      controlsSheet,
-      [38, 30, 22, 18, 14, 34, 58, 18, 18, 18, 18, 18, 18, 30, 48],
-      endRow,
-    );
+    setColumnWidths(controlsSheet, [38, 30, 22, 70], endRow);
     controlsSheet.freezePanes.freezeRows(4);
     return endRow;
   }

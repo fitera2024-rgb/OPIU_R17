@@ -55,7 +55,9 @@ function decisionBlockers(decision) {
 
 function economicAccepted(decision) {
   const authority = upper(decision?.correction_authority);
-  return decision?.accepted_intergroup_reclass === true
+  return decision?.accepted_economic_reclass === true
+    || decision?.accepted_intergroup_reclass === true
+    || decision?.accepted_intragroup_reclass === true
     || decision?.ECONOMIC_CORRECTION_PROVEN === true
     || decision?.economic_correction_proven === true
     || decision?.correction_allowed === true
@@ -224,7 +226,8 @@ function bridgeOne(decision, index, provenance) {
   const correctionAmount = number(decision?.correction_amount)
     ?? Math.abs(number(decision?.analytical_effect) ?? 0);
   const upstreamEffect = number(decision?.analytical_effect)
-    ?? number(decision?.accepted_intergroup_effect);
+    ?? number(decision?.accepted_intergroup_effect)
+    ?? number(decision?.accepted_intragroup_effect);
   const signedEffect = upstreamEffect ?? (action === "STORNO"
     ? -Math.abs(correctionAmount)
     : action === "REPOST" ? Math.abs(correctionAmount) : 0);
@@ -273,12 +276,6 @@ function bridgeOne(decision, index, provenance) {
       output_route: route,
       physical_source: source,
       target_accounting: targetAccounting(decision),
-      physical_proof: {
-        source_operation_proven: decision?.SOURCE_OPERATION_PROVEN === true,
-        physical_source_unique: decision?.PHYSICAL_SOURCE_UNIQUE === true,
-        target_classification_proven: decision?.TARGET_CLASSIFICATION_PROVEN === true
-          || decision?.ECONOMIC_CORRECTION_PROVEN === true,
-      },
       analytical_basis: {
         reconciliation_row: decision?.reconciliation_row,
         analytical_basis_id: decision?.analytical_basis_id,
@@ -287,12 +284,22 @@ function bridgeOne(decision, index, provenance) {
         raw_delta: number(decision?.raw_delta),
         effective_delta: number(decision?.root_effective_delta ?? decision?.effective_delta),
       },
+      intalev_source: {
+        reconciliation_row: decision?.reconciliation_row,
+        block: decision?.intalev_block,
+        path: decision?.intalev_path,
+        source_reference: decision?.intalev_reference,
+        amount: number(decision?.intalev_target),
+      },
       economic_route: {
         route_id: first(decision?.intergroup_reclass_id, decision?.economic_route_id),
         proof_status: first(decision?.intergroup_reclass_proof_status, decision?.proof_status),
-        accepted: decision?.accepted_intergroup_reclass === true,
+        accepted: decision?.accepted_economic_reclass === true
+          || decision?.accepted_intergroup_reclass === true
+          || decision?.accepted_intragroup_reclass === true,
         accepted_amount: number(decision?.accepted_amount),
-        accepted_effect: number(decision?.accepted_intergroup_effect),
+        accepted_effect: number(decision?.accepted_intergroup_effect)
+          ?? number(decision?.accepted_intragroup_effect),
         root_effective_delta: number(decision?.root_effective_delta),
         processing_stage: decision?.processing_stage,
         stage_order: number(decision?.stage_order),
@@ -306,22 +313,6 @@ function bridgeOne(decision, index, provenance) {
         intalev_source_scope_inventory_complete: intalevAbsenceProof?.source_inventory_complete === true,
         intalev_source_scope_complete: intalevAbsenceProof?.source_scope_complete === true,
         intalev_source_amount_lost: intalevAbsenceProof?.source_amount_lost ?? null,
-      },
-      business_evidence: {
-        intalev_references: [
-          ...(Array.isArray(decision?.intalev_references) ? decision.intalev_references : []),
-          ...(Array.isArray(decision?.intalev_sources) ? decision.intalev_sources : []),
-          ...(Array.isArray(decision?.intalev_source_references) ? decision.intalev_source_references : []),
-          ...(decision?.intalev_reference && typeof decision.intalev_reference === "object"
-            ? [decision.intalev_reference]
-            : []),
-          ...(decision?.intalev_source_reference && typeof decision.intalev_source_reference === "object"
-            ? [decision.intalev_source_reference]
-            : []),
-        ],
-        intalev_technical_reference: decision?.intalev_technical_reference,
-        intalev_document_absent: decision?.intalev_document_absent === true
-          || decision?.intalev_registrar_absent === true,
       },
       reason: first(decision?.reason, decision?.proof_reason),
       blockers,

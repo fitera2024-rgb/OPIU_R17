@@ -4,9 +4,7 @@ import {
   LOADER_A_AA_FIELDS,
   REPORT_ONLY_SAFETY,
   createCanonicalPostingRow,
-  createMaterializationCase,
 } from "./r001_materialization_contract.mjs";
-import { buildR001BusinessContent } from "./r001_business_content.mjs";
 
 export const R001_CANONICAL_OUTPUT_SCHEMA = "opiu-r001-canonical-output.v1";
 
@@ -25,6 +23,50 @@ function fail(code, message, details) {
 
 function text(value) {
   return String(value ?? "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function normalized(value) {
+  return text(value).toLocaleLowerCase("ru-RU").replace(/ё/g, "е");
+}
+
+function moneyText(value) {
+  return Number(value ?? 0).toLocaleString("ru-RU", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function userIntalevSource(materializationCase) {
+  const source = materializationCase?.intalev_source ?? {};
+  const reconciliationRow = text(source.reconciliation_row)
+    || text(materializationCase?.analytical_basis?.reconciliation_row)
+    || text(materializationCase?.economic?.source_code);
+  const path = text(source.path);
+  const block = text(source.block);
+  const reference = text(source.source_reference);
+  const parts = [
+    reconciliationRow ? `строка сверки ${reconciliationRow}` : "",
+    path ? `путь «${path}»` : (block ? `блок «${block}»` : ""),
+    source.amount !== null && source.amount !== undefined ? `итог строки Инталев ${moneyText(source.amount)}` : "",
+    reference ? `ячейка/агрегат: ${reference}` : "",
+  ].filter(Boolean);
+  return `Источник Инталев: ${parts.length ? parts.join("; ") : "строка и путь указаны в доказательной сверке ОПИУ"}`;
+}
+
+function userLoaderContent(materializationCase, operation, source) {
+  const sourceArticle = text(materializationCase?.economic?.source_article) || "исходная статья ERP";
+  const targetArticle = text(materializationCase?.economic?.target_article) || "целевая статья ERP";
+  const action = operation === "STORNO"
+    ? `СТОРНО: снимаем ${moneyText(materializationCase.correction_amount)} со статьи «${sourceArticle}»`
+    : `РЕПОСТ: относим ${moneyText(materializationCase.correction_amount)} на статью «${targetArticle}»`;
+  return [
+    action,
+    `Причина: ${text(materializationCase.reason) || `переклассификация расходов «${sourceArticle}» → «${targetArticle}» по сверке ОПИУ`}`,
+    userIntalevSource(materializationCase),
+    text(source?.content) ? `Исходное содержание: ${text(source.content)}` : "",
+    `Источник ERP: ${text(source?.document) || "документ не указан"}; проводка ${text(source?.posting_number || source?.posting_no) || "не указана"}; строка ${text(source?.source_range) || "не указана"}`,
+    `Техническая ссылка: PairID=${text(materializationCase.pair_id)}; SourceRowID=${text(source?.source_row_id) || "UNKNOWN"}`,
+  ].filter(Boolean).join(" | ");
 }
 
 function stableValue(value) {
@@ -57,9 +99,17 @@ function safeOrganizationLabel(value) {
     .trim();
 }
 
+function shortOrganizationLabel(value) {
+  const safe = safeOrganizationLabel(value).replace(/\s+/g, "_");
+  if (safe.length <= 24) return safe;
+  const suffix = crypto.createHash("sha256").update(safe).digest("hex").slice(0, 6).toUpperCase();
+  return `${safe.slice(0, 17)}_${suffix}`;
+}
+
 export function canonicalOutputFilename({ output_route: outputRoute, source_organization: sourceOrganization, period }) {
-  const base = `[${safeOrganizationLabel(sourceOrganization)}][${periodEndDate(period)}]_ОПИУ_ГОТОВО`;
-  return `${base}${outputRoute === "SPORNO" ? "_СПОРНО" : ""}.xlsx`;
+  periodEndDate(period);
+  const route = outputRoute === "SPORNO" ? "СПОРНО" : "ГОТОВО";
+  return `CORR_${period}_${shortOrganizationLabel(sourceOrganization)}_${route}.xlsx`;
 }
 
 function revalidateCanonicalRow(row) {
@@ -102,22 +152,7 @@ export function canonicalSpornoRowFromMaterializationCase(materializationCase) {
       output_route: materializationCase.output_route,
     });
   }
-  const sourceProven = materializationCase.physical_proof?.source_operation_proven === true
-    && materializationCase.physical_proof?.physical_source_unique === true;
-  const targetProven = sourceProven
-    && materializationCase.physical_proof?.target_classification_proven === true;
-  const canonicalCase = sourceProven && (operation === "STORNO" || targetProven)
-    ? materializationCase
-    : createMaterializationCase({
-      ...materializationCase,
-      correction_allowed: false,
-      physical_source: sourceProven ? materializationCase.physical_source : {},
-      target_accounting: targetProven ? materializationCase.target_accounting : {},
-      blockers: [...materializationCase.blockers, ...(!sourceProven
-        ? ["PHYSICAL_SOURCE_FIELDS_SUPPRESSED_UNPROVEN"]
-        : !targetProven ? ["TARGET_ACCOUNTING_FIELDS_SUPPRESSED_UNPROVEN"] : [])],
-    });
-  const source = canonicalCase.physical_source;
+  const source = materializationCase.physical_source;
   const resultAccounting = operation === "STORNO" ? {
     debit: source.debit,
     credit: source.credit,
@@ -125,45 +160,38 @@ export function canonicalSpornoRowFromMaterializationCase(materializationCase) {
     credit_analytics: source.credit_analytics,
     debit_department: source.debit_department,
     credit_department: source.credit_department,
-    article: canonicalCase.economic.source_article,
-  } : canonicalCase.target_accounting;
+    article: materializationCase.economic.source_article,
+  } : materializationCase.target_accounting;
   const loader = Object.fromEntries(LOADER_A_AA_FIELDS.map((field) => [field, null]));
+  const targetCode = text(materializationCase.economic.target_code);
+  let targetRuleSide = "";
+  if (operation === "REPOST" && targetCode) {
+    const article = normalized(materializationCase.economic.target_article);
+    const debitHasArticle = article && resultAccounting.debit_analytics.some((value) => normalized(value) === article);
+    const creditHasArticle = article && resultAccounting.credit_analytics.some((value) => normalized(value) === article);
+    if (debitHasArticle !== creditHasArticle) targetRuleSide = debitHasArticle ? "DEBIT" : "CREDIT";
+    else {
+      const debitChanged = JSON.stringify(resultAccounting.debit_analytics) !== JSON.stringify(source.debit_analytics)
+        || text(resultAccounting.debit) !== text(source.debit);
+      const creditChanged = JSON.stringify(resultAccounting.credit_analytics) !== JSON.stringify(source.credit_analytics)
+        || text(resultAccounting.credit) !== text(source.credit);
+      if (debitChanged !== creditChanged) targetRuleSide = debitChanged ? "DEBIT" : "CREDIT";
+    }
+  }
   Object.assign(loader, {
     "СчетДт": resultAccounting.debit || null,
     "СчетКт": resultAccounting.credit || null,
     "ВидОперации": operation,
     "ПодразделениеДт": resultAccounting.debit_department || null,
     "ПодразделениеКт": resultAccounting.credit_department || null,
-    "СуммаВВалютеУчета": canonicalCase.correction_amount,
-    "СуммаВВалютеОтчетности": canonicalCase.correction_amount,
-    "Содержание": buildR001BusinessContent({
-      operation,
-      erp: {
-        document: source.document,
-        date: source.date,
-        postingNumber: source.posting_number,
-        debit: source.debit,
-        credit: source.credit,
-        amount: canonicalCase.correction_amount,
-        organization: source.source_organization,
-        debitDepartment: source.debit_department,
-        creditDepartment: source.credit_department,
-      },
-      economic: {
-        sourceArticle: canonicalCase.economic.source_article,
-        targetArticle: operation === "REPOST"
-          ? canonicalCase.economic.target_article
-          : canonicalCase.economic.source_article,
-      },
-      decision: canonicalCase.business_evidence,
-      caseId: canonicalCase.case_id,
-      pairId: canonicalCase.pair_id,
-      sourceRowId: source.source_row_id,
-      intalevDocumentNotPresented: canonicalCase.business_evidence.intalev_document_absent === true,
-    }),
+    "СуммаВВалютеУчета": materializationCase.correction_amount,
+    "СуммаВВалютеОтчетности": materializationCase.correction_amount,
+    "Содержание": userLoaderContent(materializationCase, operation, source),
     "СчетДтИсточник": source.debit || null,
     "СчетКтИсточник": source.credit || null,
     "ИдентификаторФинЗаписи": source.source_row_id || null,
+    "ПравилоДт": targetRuleSide === "DEBIT" ? targetCode : null,
+    "ПравилоКт": targetRuleSide === "CREDIT" ? targetCode : null,
     "СубконтоДт1": resultAccounting.debit_analytics[0] || null,
     "СубконтоДт2": resultAccounting.debit_analytics[1] || null,
     "СубконтоДт3": resultAccounting.debit_analytics[2] || null,
@@ -172,20 +200,20 @@ export function canonicalSpornoRowFromMaterializationCase(materializationCase) {
     "СубконтоКт3": resultAccounting.credit_analytics[2] || null,
   });
   const auditIdentity = `R001-SPORNO-${crypto.createHash("sha256").update(JSON.stringify([
-    canonicalCase.case_id,
-    canonicalCase.pair_id,
-    canonicalCase.role,
+    materializationCase.case_id,
+    materializationCase.pair_id,
+    materializationCase.role,
     operation,
     source.source_row_id,
-    canonicalCase.correction_amount,
+    materializationCase.correction_amount,
   ])).digest("hex").slice(0, 24).toUpperCase()}`;
   return createCanonicalPostingRow({
-    materialization_case: canonicalCase,
+    materialization_case: materializationCase,
     operation,
     output_route: "SPORNO",
     materialization_state: "MATERIALIZED_SPORNO",
     audit_identity: auditIdentity,
-    amount: canonicalCase.correction_amount,
+    amount: materializationCase.correction_amount,
     result_accounting: resultAccounting,
     loader,
     safety: REPORT_ONLY_SAFETY,
@@ -226,22 +254,23 @@ function registryRow(row) {
 }
 
 function sortRows(rows) {
+  const operationOrder = (value) => text(value).toUpperCase() === "STORNO" ? "0" : "1";
   return [...rows].sort((left, right) => [
     left.output_route,
     left.source_organization,
     left.period,
-    left.case_id,
     left.pair_id,
-    left.operation,
+    operationOrder(left.operation),
+    left.case_id,
     left.source.source_row_id,
     left.audit_identity,
   ].join("\u0000").localeCompare([
     right.output_route,
     right.source_organization,
     right.period,
-    right.case_id,
     right.pair_id,
-    right.operation,
+    operationOrder(right.operation),
+    right.case_id,
     right.source.source_row_id,
     right.audit_identity,
   ].join("\u0000"), "en"));
@@ -401,7 +430,6 @@ export function verifyCanonicalOutputIntegrity(output, { workbook_records: workb
     workbook_financial_rows: actualWorkbook.size,
     registry_financial_rows: actualRegistry.size,
     canonical_row_set_sha256: expectedRowSetSha256,
-    ...REPORT_ONLY_SAFETY,
     safety: REPORT_ONLY_SAFETY,
   });
 }

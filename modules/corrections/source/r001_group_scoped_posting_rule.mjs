@@ -194,8 +194,11 @@ function assertPhysicalSource(operation) {
 }
 
 /**
- * STORNO keeps the exact source tuple. REPOST changes only the operating side
- * to the account/article selected from the matching ERP catalog block.
+ * STORNO keeps the exact source tuple. REPOST keeps the physical D/K route and
+ * replaces the OPIU article code with the unique article selected inside the
+ * Intalev business block.  The catalog account is classification metadata: it
+ * must not overwrite the journal account when ERP posted the right D/K but
+ * selected a same-named article from another group.
  */
 export function buildGroupScopedStornoRepostPlan({
   operation,
@@ -217,49 +220,35 @@ export function buildGroupScopedStornoRepostPlan({
   if ([operation.debit, operation.credit, targetOperatingAccount].some(isClosingAccount)) {
     fail("GROUP_SCOPED_DT99_EXCLUDED", "Closing account 99 cannot be used for article replacement");
   }
-  if (!settlement) {
-    const articleKey = normalized(operation.article);
-    const articleOnDebit = articleKey && exactSlots(operation.debit_analytics).some((value) => normalized(value).includes(articleKey));
-    const articleOnCredit = articleKey && exactSlots(operation.credit_analytics).some((value) => normalized(value).includes(articleKey));
-    const sourceOnDebit = accountMatches(sourceOperatingAccount, operation.debit);
-    const sourceOnCredit = accountMatches(sourceOperatingAccount, operation.credit);
-    const targetOnDebit = accountMatches(targetOperatingAccount, operation.debit);
-    const targetOnCredit = accountMatches(targetOperatingAccount, operation.credit);
-    if (articleOnDebit !== articleOnCredit) settlement = canonicalAccount(articleOnDebit ? operation.credit : operation.debit);
-    else if (sourceOnDebit !== sourceOnCredit) settlement = canonicalAccount(sourceOnDebit ? operation.credit : operation.debit);
-    else if (targetOnDebit !== targetOnCredit) settlement = canonicalAccount(targetOnDebit ? operation.credit : operation.debit);
-  }
-  if (!settlement) {
-    fail("GROUP_SCOPED_ACCOUNT_RULE_INCOMPLETE", "Settlement account cannot be determined from the hierarchy-bound physical row");
-  }
-  const settlementOnDebit = accountMatches(settlement, operation.debit);
-  const settlementOnCredit = accountMatches(settlement, operation.credit);
-  if (settlementOnDebit === settlementOnCredit) {
-    fail("GROUP_SCOPED_SETTLEMENT_SIDE_AMBIGUOUS", "Settlement account must match exactly one side of the physical posting", {
-      settlement_account: settlement,
-      debit: operation.debit,
-      credit: operation.credit,
-    });
-  }
-  const operatingSide = settlementOnCredit ? "DEBIT" : "CREDIT";
-  const actualOperatingAccount = operatingSide === "DEBIT" ? operation.debit : operation.credit;
-  if (sourceOperatingAccount && !accountMatches(sourceOperatingAccount, actualOperatingAccount)) {
-    fail("GROUP_SCOPED_SOURCE_OPERATING_ACCOUNT_MISMATCH", "Physical source does not match the Intalev source operating account", {
-      expected: canonicalAccount(sourceOperatingAccount),
-      actual: canonicalAccount(actualOperatingAccount),
-    });
-  }
   const slot = Number(articleAnalyticsSlot) - 1;
   if (![0, 1, 2].includes(slot)) fail("GROUP_SCOPED_ARTICLE_SLOT_INVALID", "articleAnalyticsSlot must be 1, 2 or 3");
 
   const storno = accountingFromOperation(operation);
   const repost = accountingFromOperation(operation);
-  if (operatingSide === "DEBIT") {
-    repost.debit = targetOperatingAccount;
-    repost.debit_analytics[slot] = targetArticle.article;
-  } else {
-    repost.credit = targetOperatingAccount;
-    repost.credit_analytics[slot] = targetArticle.article;
+  const articleKey = normalized(operation.article);
+  const debitSlots = exactSlots(operation.debit_analytics);
+  const creditSlots = exactSlots(operation.credit_analytics);
+  const debitArticleSlot = debitSlots.findIndex((value) => articleKey && normalized(value).includes(articleKey));
+  const creditArticleSlot = creditSlots.findIndex((value) => articleKey && normalized(value).includes(articleKey));
+  const articleOnDebit = debitArticleSlot >= 0;
+  const articleOnCredit = creditArticleSlot >= 0;
+  const targetOnDebit = accountMatches(targetOperatingAccount, operation.debit);
+  const targetOnCredit = accountMatches(targetOperatingAccount, operation.credit);
+  const sourceOnDebit = accountMatches(sourceOperatingAccount, operation.debit);
+  const sourceOnCredit = accountMatches(sourceOperatingAccount, operation.credit);
+  const operatingSide = articleOnDebit !== articleOnCredit
+    ? (articleOnDebit ? "DEBIT" : "CREDIT")
+    : targetOnDebit !== targetOnCredit
+      ? (targetOnDebit ? "DEBIT" : "CREDIT")
+      : sourceOnDebit !== sourceOnCredit
+        ? (sourceOnDebit ? "DEBIT" : "CREDIT")
+        : "ARTICLE_ONLY";
+  if (!settlement && operatingSide === "DEBIT") settlement = canonicalAccount(operation.credit);
+  if (!settlement && operatingSide === "CREDIT") settlement = canonicalAccount(operation.debit);
+  if (articleOnDebit !== articleOnCredit) {
+    const articleSlot = articleOnDebit ? debitArticleSlot : creditArticleSlot;
+    if (articleOnDebit) repost.debit_analytics[articleSlot] = targetArticle.article;
+    else repost.credit_analytics[articleSlot] = targetArticle.article;
   }
   repost.article = targetArticle.article;
   const physicalAmount = Math.abs(Number(operation.amount));
@@ -278,7 +267,8 @@ export function buildGroupScopedStornoRepostPlan({
     status: "PASS_GROUP_SCOPED_STORNO_REPOST",
     physical_source_row_id: text(operation.source_row_id),
     operating_side: operatingSide,
-    source_operating_account: canonicalAccount(actualOperatingAccount),
+    source_operating_account: canonicalAccount(sourceOperatingAccount)
+      || canonicalAccount(operatingSide === "DEBIT" ? operation.debit : operation.credit),
     settlement_account: settlement,
     target_article_code: targetArticle.article_code,
     target_article: targetArticle.article,

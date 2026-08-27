@@ -648,6 +648,21 @@ async function verifyPinnedExtractedSet(directoryPath, fixture, lock) {
 export async function loadR002OperationEvidence(options = {}) {
   const input = normalizedInputs(options);
   try {
+    try {
+      await Promise.all([fs.access(SOURCE_LOCK_PATH), fs.access(FIXTURE_PATH)]);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        const result = baseResult(
+          "NOT_APPLICABLE_LEGACY_R002_QA_NOT_PACKAGED",
+          false,
+          input,
+        );
+        result.note =
+          "Legacy pinned July QA files are optional and are not a runtime dependency. Current-source journal evidence is handled by the generic operation reader.";
+        return result;
+      }
+      throw error;
+    }
     const { lock, fixture } = await readPinnedJson();
     const applicable =
       input.mode === lock.mode &&

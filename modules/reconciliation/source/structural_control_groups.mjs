@@ -136,14 +136,8 @@ export function structuralControlGroupsFromConfig(config = {}, {
     const toleranceCents = exactCentAmount(tolerance);
     if (toleranceCents === null) configError(`TOLERANCE_NOT_EXACT_CENTS:${id}`);
 
-    const ownership = explicitSides
-      ? [
-          ...intalevMembers.map((code) => ({ side: "INTALEV", code })),
-          ...erpMembers.map((code) => ({ side: "ERP", code })),
-        ]
-      : members.map((code) => ({ side: "", code }));
-    for (const { side, code } of ownership) {
-      const scopedCode = `${organizationIdentity}\u0000${side}\u0000${code}`;
+    for (const code of members) {
+      const scopedCode = `${organizationIdentity}\u0000${code}`;
       const prior = ownersByCode.get(scopedCode);
       if (prior) configError(`OVERLAPPING_ROOT:${code}:${prior}:${id}`);
       ownersByCode.set(scopedCode, id);
@@ -163,8 +157,6 @@ export function structuralControlGroupsFromConfig(config = {}, {
       member_codes: Object.freeze(members),
       intalev_member_codes: Object.freeze(intalevMembers),
       erp_member_codes: Object.freeze(erpMembers),
-      intalev_member_bindings: Object.freeze((entry.intalev_member_bindings ?? []).map((binding) => Object.freeze({ ...binding }))),
-      erp_member_bindings: Object.freeze((entry.erp_member_bindings ?? []).map((binding) => Object.freeze({ ...binding }))),
       control_classification: "CONTROL_ONLY",
       posting_classification: "NON_POSTING",
       intalev_value_field: "intalev_amount",

@@ -92,12 +92,13 @@ const ROUTE_STATE = Object.freeze({
   SPORNO: "MATERIALIZED_SPORNO",
   REVIEW_ONLY: "REVIEW_ONLY",
 });
-const READY_PHYSICAL_FIELDS = Object.freeze([
+const CANONICAL_PHYSICAL_FIELDS = Object.freeze([
   "source_organization",
   "source_archive_path",
   "source_archive_sha256",
   "journal_entry",
   "journal_sha256",
+  "source_sheet",
   "source_range",
   "source_row_id",
   "date",
@@ -248,6 +249,19 @@ function normalizeAnalyticalBasis(input = {}) {
   };
 }
 
+function normalizeIntalevSource(input = {}) {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    fail("INVALID_INTALEV_SOURCE", "intalev_source must be an object");
+  }
+  return {
+    reconciliation_row: clean(input.reconciliation_row),
+    block: clean(input.block),
+    path: clean(input.path),
+    source_reference: clean(input.source_reference),
+    amount: optionalNumber(input.amount, "intalev_source.amount"),
+  };
+}
+
 function normalizeEconomicRoute(input = {}) {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     fail("INVALID_ECONOMIC_ROUTE", "economic_route must be an object");
@@ -261,17 +275,6 @@ function normalizeEconomicRoute(input = {}) {
     root_effective_delta: optionalNumber(input.root_effective_delta, "economic_route.root_effective_delta"),
     processing_stage: clean(input.processing_stage),
     stage_order: optionalNumber(input.stage_order, "economic_route.stage_order"),
-  };
-}
-
-function normalizePhysicalProof(input = {}) {
-  if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    fail("INVALID_PHYSICAL_PROOF", "physical_proof must be an object");
-  }
-  return {
-    source_operation_proven: input.source_operation_proven === true,
-    physical_source_unique: input.physical_source_unique === true,
-    target_classification_proven: input.target_classification_proven === true,
   };
 }
 
@@ -299,105 +302,6 @@ function normalizeSourceScope(input = {}) {
   };
 }
 
-const UNKNOWN_BUSINESS_EVIDENCE = new Set([
-  "UNKNOWN",
-  "UNPROVEN",
-  "<UNKNOWN>",
-  "НЕИЗВЕСТНО",
-  "НЕ УКАЗАН",
-  "НЕ УКАЗАНО",
-  "НЕ НАЙДЕН",
-  "НЕ НАЙДЕНО",
-  "ФАЙЛ НЕ УКАЗАН",
-  "ИСТОЧНИК МЕСЯЦА НЕ НАЙДЕН",
-]);
-
-function knownBusinessText(value) {
-  const normalized = clean(value);
-  return normalized && !UNKNOWN_BUSINESS_EVIDENCE.has(normalized.toUpperCase()) ? normalized : "";
-}
-
-function safeEvidenceFile(value) {
-  const normalized = knownBusinessText(value);
-  if (!normalized) return "";
-  return knownBusinessText(normalized.split(/[\\/]/).filter(Boolean).at(-1));
-}
-
-function safeEvidencePath(value) {
-  const normalized = knownBusinessText(value);
-  if (!normalized || /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(normalized)) return "";
-  return normalized;
-}
-
-function normalizeVerifiedReference(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  if (value.verified !== true && value.proven !== true) return null;
-  const reference = {
-    code: knownBusinessText(value.code ?? value.article_code ?? value.row_code),
-    source_file: safeEvidenceFile(value.source_file ?? value.file),
-    sheet: knownBusinessText(value.sheet ?? value.source_sheet),
-    source_cell: knownBusinessText(value.source_cell ?? value.cell),
-    full_path: safeEvidencePath(value.full_path ?? value.hierarchy_path ?? value.path),
-    document: knownBusinessText(value.document ?? value.registrar),
-    verified: true,
-  };
-  return Object.values(reference).some((item) => item !== "" && item !== true) ? reference : null;
-}
-
-function technicalBusinessReferences(value) {
-  const source = clean(value);
-  if (!source) return [];
-  const references = [];
-  let current = null;
-  const flush = () => {
-    if (current && Object.values(current).some((item) => item !== "" && item !== true)) references.push(current);
-    current = null;
-  };
-  for (const segment of source.split(";").map(clean).filter(Boolean)) {
-    const location = segment.match(/^([^:]+):\s*([^!;]+)!([^!;]+)!([^!;]+)$/);
-    if (location) {
-      flush();
-      current = {
-        code: knownBusinessText(location[1]),
-        source_file: safeEvidenceFile(location[2]),
-        sheet: knownBusinessText(location[3]),
-        source_cell: knownBusinessText(location[4]),
-        full_path: "",
-        document: "",
-        verified: true,
-      };
-      continue;
-    }
-    const pathMatch = segment.match(/^путь\s+(.+)$/i);
-    if (pathMatch && current) current.full_path = safeEvidencePath(pathMatch[1]);
-  }
-  flush();
-  return references;
-}
-
-function normalizeBusinessEvidence(input = {}, sourceScope = {}) {
-  if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    fail("INVALID_BUSINESS_EVIDENCE", "business_evidence must be an object");
-  }
-  const structured = Array.isArray(input.intalev_references) ? input.intalev_references : [];
-  const references = [
-    ...structured.map(normalizeVerifiedReference).filter(Boolean),
-    ...technicalBusinessReferences(input.intalev_technical_reference),
-  ];
-  const distinct = [];
-  const seen = new Set();
-  for (const reference of references) {
-    const key = JSON.stringify(reference);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    distinct.push(reference);
-  }
-  return {
-    intalev_references: distinct,
-    intalev_document_absent: sourceScope.relevant_intalev_absence_proven === true,
-  };
-}
-
 function normalizeProvenance(input = {}) {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
     fail("INVALID_PROVENANCE", "provenance must be an object");
@@ -420,8 +324,46 @@ function requireText(value, field) {
   if (!clean(value)) fail("MISSING_REQUIRED_FIELD", `${field} is required`, { field });
 }
 
+function assertCanonicalPhysicalSource(source) {
+  const missing = CANONICAL_PHYSICAL_FIELDS.filter((field) => !clean(source[field]));
+  for (const field of ["debit_analytics", "credit_analytics"]) {
+    if (!Array.isArray(source[field]) || source[field].length !== 3) missing.push(field);
+  }
+  if (missing.length) {
+    fail(
+      "CANONICAL_PHYSICAL_IDENTITY_INCOMPLETE",
+      `A financial A:AA row requires one exact physical ERP source: ${missing.join(", ")}`,
+      { missing },
+    );
+  }
+}
+
+function hasPhysicalSourceClaim(source) {
+  return CANONICAL_PHYSICAL_FIELDS.some((field) => clean(source?.[field]));
+}
+
+function assertSpornoPhysicalSource(source) {
+  // An owner-approved economic route may be emitted as a sparse _СПОРНО
+  // draft.  In that case every unknown physical field must stay blank.  Once
+  // any physical identity is claimed, the complete canonical tuple is still
+  // mandatory so a partial/fabricated source can never enter A:AA.
+  if (hasPhysicalSourceClaim(source)) assertCanonicalPhysicalSource(source);
+}
+
+function hasAccountingClaim(accounting) {
+  return Boolean(
+    clean(accounting?.debit)
+    || clean(accounting?.credit)
+    || clean(accounting?.debit_department)
+    || clean(accounting?.credit_department)
+    || (accounting?.debit_analytics ?? []).some((value) => clean(value))
+    || (accounting?.credit_analytics ?? []).some((value) => clean(value))
+  );
+}
+
 function assertReadyPhysicalSource(source) {
-  const missing = READY_PHYSICAL_FIELDS.filter((field) => !clean(source[field]));
+  assertCanonicalPhysicalSource(source);
+  const missing = [];
   for (const field of ["debit_analytics", "credit_analytics"]) {
     source[field].forEach((value, index) => {
       if (!clean(value)) missing.push(`${field}[${index}]`);
@@ -454,7 +396,6 @@ export function createMaterializationCase(input = {}) {
   const correctionAllowed = optionalBoolean(input.correction_allowed, "correction_allowed");
   const physicalSource = normalizePhysicalSource(input.physical_source);
   const sourceScope = normalizeSourceScope(input.source_scope);
-  const businessEvidence = normalizeBusinessEvidence(input.business_evidence, sourceScope);
   const signedEconomicEffect = finiteNumber(input.signed_economic_effect, "signed_economic_effect");
   const correctionAmount = finiteNumber(input.correction_amount, "correction_amount", { minimum: 0 });
 
@@ -503,11 +444,10 @@ export function createMaterializationCase(input = {}) {
     output_route: outputRoute,
     physical_source: physicalSource,
     target_accounting: normalizeAccounting(input.target_accounting, "target_accounting"),
-    physical_proof: normalizePhysicalProof(input.physical_proof),
     analytical_basis: normalizeAnalyticalBasis(input.analytical_basis),
+    intalev_source: normalizeIntalevSource(input.intalev_source),
     economic_route: normalizeEconomicRoute(input.economic_route),
     source_scope: sourceScope,
-    business_evidence: businessEvidence,
     reason: clean(input.reason),
     blockers: normalizeStringArray(input.blockers),
     provenance: normalizeProvenance(input.provenance),
@@ -646,10 +586,47 @@ export function createCanonicalPostingRow(input = {}) {
   assertLoaderMatchesAccounting(loader, materializationCase.physical_source, resultAccounting, operation, amount);
 
   if (outputRoute === "READY") {
-    assertReadyPhysicalSource(materializationCase.physical_source);
-    for (const field of ["СчетДт", "СчетКт", "ВидОперации", "ИдентификаторФинЗаписи"]) {
-      if (!clean(loader[field])) fail("READY_LOADER_IDENTITY_INCOMPLETE", `READY A:AA field ${field} is required`, { field });
+    assertCanonicalPhysicalSource(materializationCase.physical_source);
+    for (const field of ["debit", "credit"]) {
+      if (!clean(resultAccounting[field])) {
+        fail("CANONICAL_TARGET_ACCOUNTING_INCOMPLETE", `Financial A:AA ${field} is required`, { field, operation, output_route: outputRoute });
+      }
     }
+    for (const field of ["СчетДт", "СчетКт", "ВидОперации", "ИдентификаторФинЗаписи"]) {
+      if (!clean(loader[field])) fail("CANONICAL_LOADER_IDENTITY_INCOMPLETE", `Financial A:AA field ${field} is required`, { field, output_route: outputRoute });
+    }
+  }
+
+  if (outputRoute === "SPORNO") {
+    const source = materializationCase.physical_source;
+    assertSpornoPhysicalSource(source);
+    if (hasPhysicalSourceClaim(source)) {
+      for (const field of ["debit", "credit"]) {
+        if (!clean(resultAccounting[field])) {
+          fail("CANONICAL_TARGET_ACCOUNTING_INCOMPLETE", `Financial A:AA ${field} is required`, { field, operation, output_route: outputRoute });
+        }
+      }
+      for (const field of ["СчетДт", "СчетКт", "ВидОперации", "ИдентификаторФинЗаписи"]) {
+        if (!clean(loader[field])) fail("CANONICAL_LOADER_IDENTITY_INCOMPLETE", `Financial A:AA field ${field} is required`, { field, output_route: outputRoute });
+      }
+    } else {
+      if (hasAccountingClaim(resultAccounting)) {
+        fail(
+          "CANONICAL_PHYSICAL_IDENTITY_INCOMPLETE",
+          "Sparse SPORNO cannot claim accounts, analytics or departments without a complete physical source",
+        );
+      }
+      if (!clean(loader["ВидОперации"])) {
+        fail("CANONICAL_LOADER_IDENTITY_INCOMPLETE", "Sparse SPORNO requires an explicit operation direction", {
+          field: "ВидОперации",
+          output_route: outputRoute,
+        });
+      }
+    }
+  }
+
+  if (outputRoute === "READY") {
+    assertReadyPhysicalSource(materializationCase.physical_source);
   }
 
   const row = {

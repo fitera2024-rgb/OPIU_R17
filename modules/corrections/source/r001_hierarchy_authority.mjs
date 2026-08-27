@@ -1,4 +1,7 @@
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import JSZip from "jszip";
+import { readOperationJournalRows } from "../../reconciliation/source/full_operation_evidence.mjs";
 
 export const HIERARCHY_AUTHORITY_SCHEMA = "opiu-r001-hierarchy-authority.v1";
 
@@ -69,94 +72,6 @@ function analyticsSlots(value) {
 
 function stableId(prefix, payload) {
   return `${prefix}-${crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 24).toUpperCase()}`;
-}
-
-const OVERLAPPING_AUTHORITY_REVIEW_LABELS = Object.freeze([
-  "UNPROVEN",
-  "_СПОРНО",
-  "REVIEW_ONLY",
-  "NO_POSTING",
-  "NOT_RELEASE_AUTHORITY",
-]);
-
-function hierarchyEconomicBasis(decision) {
-  return [
-    text(decision?.period),
-    normalized(decision?.reconciliation_organization || decision?.organization),
-    text(decision?.analytical_basis_id || decision?.reconciliation_row).toUpperCase(),
-    normalized(decision?.intalev_path),
-    normalized(decision?.target_article),
-  ].join("\u0000");
-}
-
-function provenNonOverlappingPartition(decisions) {
-  const atoms = decisions.map((decision) => text(decision?.residual_atom_id)).filter(Boolean);
-  return atoms.length === decisions.length
-    && new Set(atoms).size === atoms.length
-    && decisions.every((decision) => [
-      decision?.allocation_status,
-      decision?.residual_allocation_status,
-    ].some((value) => text(value).toUpperCase() === "PROVEN_ALLOCATION"));
-}
-
-/**
- * Exact-amount and paired-liability discovery are independent physical proof
- * paths.  When both paths close the same analytical residual, neither path is
- * economic authority unless a non-overlapping residual partition is explicit.
- * Both physical traces remain available for review, but the four economic
- * authority flags are fail-closed so downstream materialization emits no
- * canonical financial pair for the duplicated residual.
- */
-function arbitrateOverlappingHierarchyAuthority(decisions) {
-  const byBasis = new Map();
-  for (const decision of decisions) {
-    if (!["HIERARCHY_EXACT_SOURCE", "HIERARCHY_PAIRED_LIABILITY_RECLASS"].includes(text(decision?.role))) continue;
-    const key = hierarchyEconomicBasis(decision);
-    if (!byBasis.has(key)) byBasis.set(key, []);
-    byBasis.get(key).push(decision);
-  }
-  const suppressed = new Map();
-  let overlapCases = 0;
-  for (const [basis, candidates] of byBasis) {
-    const exact = candidates.filter((decision) => text(decision?.role) === "HIERARCHY_EXACT_SOURCE");
-    const paired = candidates.filter((decision) => text(decision?.role) === "HIERARCHY_PAIRED_LIABILITY_RECLASS");
-    if (!exact.length || !paired.length || provenNonOverlappingPartition(candidates)) continue;
-    const exactSourceRowIds = new Set(exact.map((decision) => text(decision?.source_row_id).toUpperCase()).filter(Boolean));
-    const sharedPhysicalLiability = paired.some((decision) =>
-      exactSourceRowIds.has(text(decision?.paired_liability_source_row_id).toUpperCase()));
-    if (!sharedPhysicalLiability) continue;
-    const exactCents = exact.reduce((sum, decision) => sum + Math.abs(cents(decision?.correction_amount) ?? 0), 0);
-    const pairedCents = paired.reduce((sum, decision) => sum + Math.abs(cents(decision?.correction_amount) ?? 0), 0);
-    if (!exactCents || exactCents !== pairedCents) continue;
-    overlapCases += 1;
-    const arbitrationId = stableId("HIERARCHY-AUTHORITY-OVERLAP", [basis, exactCents]);
-    for (const decision of candidates) {
-      suppressed.set(decision, Object.freeze({
-        ...decision,
-        approval_state: "_СПОРНО",
-        proof_status: "UNPROVEN_OVERLAPPING_HIERARCHY_AUTHORITY",
-        classification: "REVIEW_ONLY_OVERLAPPING_HIERARCHY_AUTHORITY",
-        correction_allowed: false,
-        accepted_economic_reclass: false,
-        ECONOMIC_ROUTE_PROVEN: false,
-        ECONOMIC_CORRECTION_PROVEN: false,
-        financial_materialization_forbidden: true,
-        labels: OVERLAPPING_AUTHORITY_REVIEW_LABELS,
-        hierarchy_authority_arbitration_id: arbitrationId,
-        hierarchy_authority_arbitration_status: "OVERLAPPING_PHYSICAL_PROOFS_REVIEW_ONLY",
-        hierarchy_authority_competing_roles: Object.freeze([
-          "HIERARCHY_EXACT_SOURCE",
-          "HIERARCHY_PAIRED_LIABILITY_RECLASS",
-        ]),
-        reason: `${text(decision.reason)} | Два физических пути покрывают один остаток; экономическое распределение не доказано`,
-      }));
-    }
-  }
-  return Object.freeze({
-    decisions: Object.freeze(decisions.map((decision) => suppressed.get(decision) ?? decision)),
-    overlap_cases: overlapCases,
-    review_only_decisions: suppressed.size,
-  });
 }
 
 function targetDelta(row) {
@@ -268,6 +183,112 @@ function physicalTopology(ordered) {
 
 function directChildren(topology, parentCode) {
   return topology.nodes.filter((node) => node.parentCode === parentCode);
+}
+
+function structuralCents(row, label) {
+  return cents(row?.[label]);
+}
+
+function adjustedHierarchyResidualCents(topology, node) {
+  const intalev = structuralCents(node.row, "Инталев");
+  const erp = structuralCents(node.row, "ERP");
+  if (intalev === null || erp === null) return null;
+  const directErpComponents = directChildren(topology, node.code)
+    .map((child) => structuralCents(child.row, "ERP"))
+    .filter((value) => value !== null)
+    .reduce((sum, value) => sum + value, 0);
+  return intalev - erp - directErpComponents;
+}
+
+function settlementEmployeeFromTreeRow(row, operatingSide) {
+  const values = operatingSide === "DEBIT"
+    ? analyticsSlots(row?.["Аналитики Кт"])
+    : operatingSide === "CREDIT"
+      ? analyticsSlots(row?.["Аналитики Дт"])
+      : [];
+  return text(values.find(Boolean));
+}
+
+function rawAnalytics(raw, side) {
+  return [1, 2, 3].map((index) => text(raw?.[`${side}_analytics_${index}`]));
+}
+
+function normalizedDateText(value) {
+  return text(value).match(/^\d{2}\.\d{2}\.\d{4}/)?.[0] ?? text(value);
+}
+
+function rawSourceMatchesIdentity(raw, identity, period) {
+  const expectedDebitAnalytics = [1, 2, 3].map((index) => normalized(identity?.[`source_analytics_dt${index}`]));
+  const expectedCreditAnalytics = [1, 2, 3].map((index) => normalized(identity?.[`source_analytics_kt${index}`]));
+  const actualDebitAnalytics = rawAnalytics(raw, "debit").map(normalized);
+  const actualCreditAnalytics = rawAnalytics(raw, "credit").map(normalized);
+  return text(raw?.source_row_id).toUpperCase() === text(identity?.source_row_id).toUpperCase()
+    && text(raw?.source_range) === text(identity?.source_range)
+    && text(raw?.period) === text(period)
+    && normalizedDateText(raw?.date) === normalizedDateText(identity?.source_date)
+    && text(raw?.document) === text(identity?.registrar)
+    && text(raw?.posting_no) === text(identity?.posting_number)
+    && canonicalAccount(raw?.debit) === canonicalAccount(identity?.source_dt)
+    && canonicalAccount(raw?.credit) === canonicalAccount(identity?.source_kt)
+    && normalized(raw?.organization) === normalized(identity?.source_organization)
+    && cents(raw?.amount) === cents(identity?.source_amount)
+    && normalized(raw?.debit_department) === normalized(identity?.source_department_dt)
+    && normalized(raw?.credit_department) === normalized(identity?.source_department_kt)
+    && actualDebitAnalytics.every((value, index) => value === expectedDebitAnalytics[index])
+    && actualCreditAnalytics.every((value, index) => value === expectedCreditAnalytics[index]);
+}
+
+function cashOrBankAccount(value) {
+  const account = canonicalAccount(value);
+  return /^(50|51|52|55|57)(?:\.|$)/.test(account);
+}
+
+function sha256Buffer(buffer) {
+  return crypto.createHash("sha256").update(buffer).digest("hex").toUpperCase();
+}
+
+async function loadVerifiedJournalFromTrace({ item, sourceArchiveSha256, sourceSheet, cache }) {
+  const comment = text(item?.row?.["Комментарий / доказательство"]);
+  const archivePath = traceField(comment, "JournalInput");
+  const journalEntry = traceField(comment, "JournalEntry");
+  const expectedJournalSha = traceField(comment, "JournalSHA").toUpperCase();
+  const key = `${archivePath}\u0000${journalEntry}\u0000${expectedJournalSha}`;
+  if (cache.has(key)) return cache.get(key);
+  if (!archivePath || !journalEntry || !expectedJournalSha.match(/^[A-F0-9]{64}$/)) {
+    throw new Error("HIERARCHY_RESIDUAL_JOURNAL_TRACE_INCOMPLETE");
+  }
+  const archiveBuffer = await fs.readFile(archivePath);
+  const actualArchiveSha = sha256Buffer(archiveBuffer);
+  if (text(sourceArchiveSha256).match(/^[A-F0-9]{64}$/i)
+    && actualArchiveSha !== text(sourceArchiveSha256).toUpperCase()) {
+    throw new Error("HIERARCHY_RESIDUAL_SOURCE_ARCHIVE_SHA_MISMATCH");
+  }
+  let journalBuffer;
+  if (/\.xlsx$/i.test(archivePath)) journalBuffer = archiveBuffer;
+  else {
+    const archive = await JSZip.loadAsync(archiveBuffer);
+    const entry = archive.file(journalEntry);
+    if (!entry) throw new Error("HIERARCHY_RESIDUAL_JOURNAL_ENTRY_NOT_FOUND");
+    journalBuffer = await entry.async("nodebuffer");
+  }
+  const actualJournalSha = sha256Buffer(journalBuffer);
+  if (actualJournalSha !== expectedJournalSha) throw new Error("HIERARCHY_RESIDUAL_JOURNAL_SHA_MISMATCH");
+  const journal = await readOperationJournalRows({
+    journalBuffer,
+    sheet: text(sourceSheet) || "Лист_1",
+    journalSourceLabel: journalEntry,
+  });
+  const loaded = Object.freeze({
+    rows: Object.freeze(journal.rows),
+    by_source_row_id: new Map(journal.rows.map((row) => [text(row.source_row_id).toUpperCase(), row])),
+    source_archive_path: archivePath,
+    source_archive_sha256: actualArchiveSha,
+    journal_entry: journalEntry,
+    journal_sha256: actualJournalSha,
+    source_sheet: journal.journal_sheet,
+  });
+  cache.set(key, loaded);
+  return loaded;
 }
 
 function physicalSignature(row) {
@@ -503,6 +524,251 @@ function pairedKey({ organization, employee, value, account: accountValue }) {
   return [normalized(organization), normalized(employee), cents(value), canonicalAccount(accountValue)].join("\u0000");
 }
 
+function authoritativeStructuralNode(node) {
+  return Boolean(
+    node?.code
+    && structuralCents(node.row, "Инталев") !== null
+    && structuralCents(node.row, "ERP") !== null
+    && /structural status=HIERARCHY_PROVEN/i.test(text(node.row?.["Комментарий / доказательство"])),
+  );
+}
+
+/**
+ * Resolves a hierarchy reclassification hidden by different report nesting.
+ * The route must close under one zero-delta parent in exact cents. A partial
+ * source is accepted only when the raw journal has one exact settlement
+ * payment for the same employee and that employee is absent from the already
+ * classified target expense rows of the same accounting signature.
+ */
+async function deriveHierarchyResidualSettlementAuthority({
+  ordered,
+  contexts,
+  period,
+  reconciliationOrganization,
+  sourceArchiveSha256,
+  sourceSheet,
+  reconciliationSha256,
+}) {
+  const topology = physicalTopology(ordered);
+  const decisions = [];
+  const blockers = [];
+  const satisfiedStructuralCodes = new Set();
+  const consumedSourceRowIds = new Set();
+  const journalCache = new Map();
+
+  for (const parent of topology.nodes.filter(authoritativeStructuralNode)) {
+    if ((cents(targetDelta(parent.row)) ?? 0) !== 0) continue;
+    const children = directChildren(topology, parent.code)
+      .filter(authoritativeStructuralNode)
+      .map((node) => ({ node, residualCents: adjustedHierarchyResidualCents(topology, node) }))
+      .filter((item) => item.residualCents !== null && item.residualCents !== 0);
+    const positive = children.filter((item) => item.residualCents > 0);
+    const negative = children.filter((item) => item.residualCents < 0);
+    const closedCents = children.reduce((sum, item) => sum + item.residualCents, 0);
+    if (positive.length !== 1 || negative.length !== 1 || closedCents !== 0
+      || positive[0].residualCents !== Math.abs(negative[0].residualCents)) continue;
+
+    const target = positive[0].node;
+    const source = negative[0].node;
+    const routeCents = positive[0].residualCents;
+    const sourceItems = topology.physical.filter((item) => item.owner.code === source.code
+      && nonClosing(item.row) && (signedAmount(item.row) ?? 0) > 0);
+    const targetItems = topology.physical.filter((item) => item.owner.code === target.code
+      && nonClosing(item.row) && (signedAmount(item.row) ?? 0) > 0);
+    const targetBySignature = new Map();
+    for (const item of targetItems) {
+      const identity = sourceIdentity(item.row, {
+        article: target.label,
+        sourceArchiveSha256,
+        sourceSheet,
+      });
+      const signature = physicalSignature(item.row);
+      const employee = settlementEmployeeFromTreeRow(item.row, identity.operating_side);
+      if (!signature || !employee) continue;
+      if (!targetBySignature.has(signature)) targetBySignature.set(signature, new Set());
+      targetBySignature.get(signature).add(normalized(employee));
+    }
+    if (![...targetBySignature.values()].some((employees) => employees.size >= 2)) {
+      blockers.push(Object.freeze({
+        reconciliation_row: target.code,
+        reason: "HIERARCHY_RESIDUAL_TARGET_PATTERN_NOT_RECURRING",
+        route_amount: routeCents / 100,
+      }));
+      continue;
+    }
+
+    const sourceCandidates = sourceItems.flatMap((item) => {
+      const identity = sourceIdentity(item.row, {
+        article: source.label,
+        sourceArchiveSha256,
+        sourceSheet,
+      });
+      const signature = physicalSignature(item.row);
+      const employee = settlementEmployeeFromTreeRow(item.row, identity.operating_side);
+      const targetEmployees = targetBySignature.get(signature);
+      if (!identity.complete || !employee || !targetEmployees?.size
+        || targetEmployees.has(normalized(employee))
+        || Math.abs(cents(identity.source_amount) ?? 0) < routeCents) return [];
+      return [{ item, identity, signature, employee }];
+    });
+    if (!sourceCandidates.length) {
+      blockers.push(Object.freeze({
+        reconciliation_row: target.code,
+        reason: "HIERARCHY_RESIDUAL_PHYSICAL_SOURCE_NOT_FOUND",
+        route_amount: routeCents / 100,
+      }));
+      continue;
+    }
+
+    let journal;
+    try {
+      journal = await loadVerifiedJournalFromTrace({
+        item: sourceCandidates[0].item,
+        sourceArchiveSha256,
+        sourceSheet,
+        cache: journalCache,
+      });
+    } catch (error) {
+      blockers.push(Object.freeze({
+        reconciliation_row: target.code,
+        reason: text(error?.message || "HIERARCHY_RESIDUAL_JOURNAL_UNAVAILABLE"),
+        route_amount: routeCents / 100,
+      }));
+      continue;
+    }
+
+    const verifiedSourceCandidates = sourceCandidates.filter((candidate) => {
+      const sourceRowId = text(candidate.identity.source_row_id).toUpperCase();
+      const rawSource = journal.by_source_row_id.get(sourceRowId);
+      return rawSource && rawSourceMatchesIdentity(rawSource, candidate.identity, period);
+    });
+    if (!verifiedSourceCandidates.length) {
+      blockers.push(Object.freeze({
+        reconciliation_row: target.code,
+        reason: "HIERARCHY_RESIDUAL_EXACT_SOURCE_JOURNAL_MISMATCH",
+        route_amount: routeCents / 100,
+      }));
+      continue;
+    }
+
+    const witnesses = [];
+    for (const candidate of verifiedSourceCandidates) {
+      const settlementAccount = canonicalAccount(candidate.identity.settlement_account);
+      const candidateOrganization = normalized(candidate.identity.source_organization);
+      const candidateEmployee = normalized(candidate.employee);
+      for (const raw of journal.rows) {
+        if (text(raw.period) !== text(period)
+          || Math.abs(cents(raw.amount) ?? 0) !== routeCents
+          || normalized(raw.organization) !== candidateOrganization
+          || (text(raw.activity) && normalized(raw.activity) !== normalized("Да"))
+          || (text(raw.scenario) && normalized(raw.scenario) !== normalized("Факт"))) continue;
+        const debit = canonicalAccount(raw.debit);
+        const credit = canonicalAccount(raw.credit);
+        const settlementSide = debit === settlementAccount ? "debit" : credit === settlementAccount ? "credit" : "";
+        const counterpart = settlementSide === "debit" ? raw.credit : settlementSide === "credit" ? raw.debit : "";
+        if (!settlementSide || !cashOrBankAccount(counterpart)) continue;
+        const witnessEmployee = normalized(rawAnalytics(raw, settlementSide).find(Boolean));
+        if (!witnessEmployee || witnessEmployee !== candidateEmployee) continue;
+        witnesses.push({ candidate, raw });
+      }
+    }
+    const witnessKeys = new Set(witnesses.map(({ candidate, raw }) =>
+      `${candidate.identity.source_row_id}\u0000${text(raw.source_row_id).toUpperCase()}`));
+    if (witnesses.length !== 1 || witnessKeys.size !== 1) {
+      blockers.push(Object.freeze({
+        reconciliation_row: target.code,
+        reason: witnesses.length ? "HIERARCHY_RESIDUAL_SETTLEMENT_WITNESS_AMBIGUOUS" : "HIERARCHY_RESIDUAL_SETTLEMENT_WITNESS_NOT_FOUND",
+        witness_count: witnesses.length,
+        route_amount: routeCents / 100,
+      }));
+      continue;
+    }
+
+    const { candidate, raw } = witnesses[0];
+    if (consumedSourceRowIds.has(candidate.identity.source_row_id)
+      || !text(raw.source_row_id).match(/^[A-F0-9]{64}$/i)) {
+      blockers.push(Object.freeze({
+        reconciliation_row: target.code,
+        reason: consumedSourceRowIds.has(candidate.identity.source_row_id)
+          ? "HIERARCHY_RESIDUAL_SOURCE_ALREADY_CONSUMED"
+          : "HIERARCHY_RESIDUAL_SETTLEMENT_IDENTITY_INCOMPLETE",
+      }));
+      continue;
+    }
+
+    const targetContext = contexts.get(target.code) ?? { block: "", path: target.label };
+    const pairId = stableId("PAIR-HIERARCHY-RESIDUAL", [
+      period, parent.code, source.code, target.code,
+      candidate.identity.source_row_id, raw.source_row_id, routeCents,
+    ]);
+    decisions.push(Object.freeze({
+      case_id: stableId("HIERARCHY-RESIDUAL", [pairId, target.code]),
+      pair_id: pairId,
+      decision_type: "STORNO_REPOST",
+      approval_state: "ДОКАЗАНО_СВЕРКОЙ",
+      period: text(period),
+      reconciliation_row: target.code,
+      group: source.label,
+      role: "HIERARCHY_RESIDUAL_SETTLEMENT_RECLASS",
+      organization: text(reconciliationOrganization),
+      reconciliation_organization: text(reconciliationOrganization),
+      ...candidate.identity,
+      correction_amount: routeCents / 100,
+      analytical_effect: routeCents / 100,
+      effective_delta: routeCents / 100,
+      analytical_basis_id: target.code,
+      source_article: source.label,
+      target_article: target.label,
+      target_dt: candidate.identity.source_dt,
+      target_analytics_dt1: target.label,
+      target_analytics_dt2: candidate.identity.source_analytics_dt2,
+      target_analytics_dt3: candidate.identity.source_analytics_dt3,
+      target_department_dt: candidate.identity.source_department_dt,
+      target_kt: candidate.identity.source_kt,
+      target_analytics_kt1: candidate.identity.source_analytics_kt1,
+      target_analytics_kt2: candidate.identity.source_analytics_kt2,
+      target_analytics_kt3: candidate.identity.source_analytics_kt3,
+      target_department_kt: candidate.identity.source_department_kt,
+      intalev_block: targetContext.block,
+      intalev_path: targetContext.path,
+      erp_source_sha256: candidate.identity.journal_sha256,
+      evidence_state: "HIERARCHY_RESIDUAL_SETTLEMENT_WITNESS_PROVEN",
+      proof_status: "PROVEN",
+      classification: "FINANCIAL_CORRECTION_PROVEN",
+      correction_authority: "HIERARCHY_RESIDUAL_SETTLEMENT_WITNESS_SOURCE",
+      correction_allowed: true,
+      accepted_economic_reclass: true,
+      accepted_amount: routeCents / 100,
+      ECONOMIC_ROUTE_PROVEN: true,
+      SOURCE_OPERATION_PROVEN: true,
+      PHYSICAL_SOURCE_UNIQUE: true,
+      ECONOMIC_CORRECTION_PROVEN: true,
+      partial_source_amount_proven: true,
+      hierarchy_residual_parent_code: parent.code,
+      hierarchy_residual_source_code: source.code,
+      hierarchy_residual_target_code: target.code,
+      settlement_witness_source_row_id: text(raw.source_row_id).toUpperCase(),
+      settlement_witness_source_range: text(raw.source_range),
+      settlement_witness_amount: Math.abs(amount(raw.amount) ?? 0),
+      settlement_witness_employee: candidate.employee,
+      settlement_witness_account: candidate.identity.settlement_account,
+      output_route: "SPORNO",
+      processing_stage: "HIERARCHY_RESIDUAL_SETTLEMENT_RECLASS",
+      stage_order: 1,
+      source_rows: `${candidate.identity.source_range}; ${text(raw.source_range)}`,
+      reason: `Иерархия ${parent.code}: после свёртки вложенных ERP-компонентов остаток ${source.code} → ${target.code} равен ${routeCents / 100}; точная выплата и расходная строка совпали по сотруднику и расчётному счёту`,
+      solution: `Частичное STORNO из ${source.label}; REPOST в ${target.label} внутри блока ${targetContext.block}`,
+      notes: `Источник сверки SHA256=${text(reconciliationSha256)}; source row=${candidate.identity.source_range}; settlement witness=${text(raw.source_range)}; employee=${candidate.employee}`,
+      source_article_missing: false,
+    }));
+    consumedSourceRowIds.add(candidate.identity.source_row_id);
+    satisfiedStructuralCodes.add(source.code);
+    satisfiedStructuralCodes.add(target.code);
+  }
+
+  return { decisions, blockers, satisfiedStructuralCodes, consumedSourceRowIds };
+}
+
 /**
  * Finds a generic missing classification side without relying on a row code or
  * article name.  A target leaf is accepted only when:
@@ -706,7 +972,16 @@ export function hierarchyContextByCode(treeRows = []) {
     while (stack.length && stack.at(-1).level >= level) stack.pop();
     if (/БЛОК/i.test(text(row?.["Уровень"])) || text(row?.["Тип строки"]).toUpperCase() === "БЛОК") currentBlock = label;
     const path = [...stack.map((item) => item.label), label].filter(Boolean).join(" / ");
-    result.set(code, Object.freeze({ block: currentBlock, path, level, label }));
+    const correctionLocation = text(row?.["Где исправить"]);
+    const intalevReference = text(correctionLocation.match(/(?:^|\|)\s*Инталев:\s*(.*?)(?=\s*\|\s*ERP:|$)/i)?.[1]);
+    result.set(code, Object.freeze({
+      block: currentBlock,
+      path,
+      level,
+      label,
+      intalevReference,
+      intalevAmount: amount(row?.["Инталев"]),
+    }));
     stack.push({ level, label, code });
   }
   return result;
@@ -717,7 +992,7 @@ export function hierarchyContextByCode(treeRows = []) {
  * a positive structural delta has exactly one direct, non-closing physical ERP
  * child with the same exact amount and complete immutable source identity.
  */
-export function deriveHierarchyExactAmountAuthority({
+export async function deriveHierarchyExactAmountAuthority({
   treeRows = [],
   period = "",
   reconciliationOrganization = "",
@@ -740,6 +1015,17 @@ export function deriveHierarchyExactAmountAuthority({
   });
   decisions.push(...intergroupAuthority.decisions);
   blockers.push(...intergroupAuthority.blockers);
+  const residualAuthority = await deriveHierarchyResidualSettlementAuthority({
+    ordered,
+    contexts,
+    period,
+    reconciliationOrganization,
+    sourceArchiveSha256,
+    sourceSheet,
+    reconciliationSha256,
+  });
+  decisions.push(...residualAuthority.decisions);
+  blockers.push(...residualAuthority.blockers);
   for (let index = 0; index < ordered.length; index += 1) {
     const parent = ordered[index];
     const code = structuralCode(parent);
@@ -747,7 +1033,8 @@ export function deriveHierarchyExactAmountAuthority({
     const parentLevel = levelOf(parent);
     const parentProof = text(parent?.["Комментарий / доказательство"]);
     if (!code || !(delta > 0) || !/structural status=HIERARCHY_PROVEN/i.test(parentProof)
-      || intergroupAuthority.satisfiedStructuralCodes.has(code)) continue;
+      || intergroupAuthority.satisfiedStructuralCodes.has(code)
+      || residualAuthority.satisfiedStructuralCodes.has(code)) continue;
     const article = text(parent?.["Строка ОПИУ / операция"]);
     const exact = [];
     for (let childIndex = index + 1; childIndex < ordered.length; childIndex += 1) {
@@ -759,7 +1046,9 @@ export function deriveHierarchyExactAmountAuthority({
       if ([child?.["Дт"], child?.["Кт"]].some((value) => canonicalAccount(value) === "99")) continue;
       if (Math.abs(cents(child?.["Физическая сумма"]) ?? 0) !== cents(delta)) continue;
       const identity = sourceIdentity(child, { article, sourceArchiveSha256, sourceSheet });
-      if (identity.complete && !intergroupAuthority.consumedSourceRowIds.has(identity.source_row_id)) exact.push({ row: child, identity });
+      if (identity.complete
+        && !intergroupAuthority.consumedSourceRowIds.has(identity.source_row_id)
+        && !residualAuthority.consumedSourceRowIds.has(identity.source_row_id)) exact.push({ row: child, identity });
     }
     if (exact.length !== 1) {
       blockers.push(Object.freeze({
@@ -825,7 +1114,9 @@ export function deriveHierarchyExactAmountAuthority({
       source_article_missing: false,
     }));
   }
-  const exactAmountDecisionCount = decisions.length - intergroupAuthority.decisions.length;
+  const exactAmountDecisionCount = decisions.length
+    - intergroupAuthority.decisions.length
+    - residualAuthority.decisions.length;
   const pairedAuthority = derivePairedLiabilityClassificationAuthority({
     ordered,
     contexts,
@@ -837,26 +1128,19 @@ export function deriveHierarchyExactAmountAuthority({
   });
   decisions.push(...pairedAuthority.decisions);
   blockers.push(...pairedAuthority.blockers);
-  const arbitration = arbitrateOverlappingHierarchyAuthority(decisions);
-  const actionableAuthorityCount = arbitration.decisions.filter((decision) =>
-    decision?.ECONOMIC_CORRECTION_PROVEN === true && decision?.correction_allowed === true).length;
   return Object.freeze({
     schema_version: HIERARCHY_AUTHORITY_SCHEMA,
-    decisions: arbitration.decisions,
+    decisions: Object.freeze(decisions),
     blockers: Object.freeze(blockers),
     covered_economic_route_case_ids: Object.freeze([...intergroupAuthority.coveredRouteCaseIds]),
     audit: Object.freeze({
       structural_rows_checked: ordered.filter((row) => structuralCode(row)).length,
       intergroup_physical_decisions: intergroupAuthority.decisions.length,
       intergroup_physical_route_cases: intergroupAuthority.coveredRouteCaseIds.size,
+      hierarchy_residual_settlement_decisions: residualAuthority.decisions.length,
       exact_authority_decisions: exactAmountDecisionCount,
       paired_liability_decisions: pairedAuthority.decisions.length,
-      hierarchy_physical_evidence_decisions: decisions.length,
-      actionable_hierarchy_authority_decisions: actionableAuthorityCount,
-      review_only_hierarchy_authority_decisions: decisions.length - actionableAuthorityCount,
-      total_hierarchy_authority_decisions: actionableAuthorityCount,
-      overlapping_authority_cases: arbitration.overlap_cases,
-      overlapping_authority_review_only_decisions: arbitration.review_only_decisions,
+      total_hierarchy_authority_decisions: decisions.length,
       unresolved_positive_deltas: blockers.length,
     }),
   });

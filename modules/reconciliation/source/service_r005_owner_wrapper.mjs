@@ -8,7 +8,6 @@ import { appendOwnerDecisionExplanationSheet } from "./owner_decision_xlsx.mjs";
 import { loadEconomicRouteProofDocument } from "./economic_route_proof_binding.mjs";
 import { materializeStructuralControlSettingsForRun } from "./structural_control_settings_binding.mjs";
 import { materializeStructuralControlInventoryV3 } from "./structural_control_inventory_v3.mjs";
-import { buildAuthoritativeStructuralControlInventoryHierarchyPeriod } from "./structural_control_authoritative_candidates.mjs";
 import {
   OWNER_PRESENTATION_BLOCK_EXEMPT_CLASSIFICATION,
   isOwnerPresentationBlockExempt,
@@ -30,46 +29,6 @@ export function resolveDefaultStructuralControlSettingsCsv(moduleDir = MODULE_DI
 const DEFAULT_STRUCTURAL_CONTROL_SETTINGS_CSV = resolveDefaultStructuralControlSettingsCsv();
 
 function text(value) { return String(value ?? "").trim(); }
-function normalizedText(value) {
-  return String(value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
-}
-
-function uniqueTracePaths(trace) {
-  const seen = new Set();
-  const result = [];
-  for (const item of Array.isArray(trace) ? trace : []) {
-    const fullPath = normalizedText(item?.full_path);
-    if (!fullPath || seen.has(fullPath)) continue;
-    seen.add(fullPath);
-    result.push(fullPath);
-  }
-  return result;
-}
-
-export function authoritativeStructuralInventoryHierarchyPeriodsFromPayload(payload = {}) {
-  const hierarchyPeriods = Array.isArray(payload?.hierarchy_periods)
-    ? payload.hierarchy_periods
-    : [];
-  const periodRows = Array.isArray(payload?.period_rows) ? payload.period_rows : [];
-  return hierarchyPeriods.map((hierarchyPeriod, index) => {
-    const month = periodRows[index];
-    if (!month || normalizedText(month.period) !== normalizedText(hierarchyPeriod?.period)) {
-      throw new Error(
-        `BLOCKED_STRUCTURAL_CONTROL_INVENTORY_PERIOD_BINDING:${normalizedText(hierarchyPeriod?.period)}`,
-      );
-    }
-    return buildAuthoritativeStructuralControlInventoryHierarchyPeriod({
-      ...month,
-      rows: (month.rows ?? []).map((row) => ({
-        ...row,
-        intalev_amount: row?.intalev_amount ?? row?.intalev?.amount,
-        erp_amount: row?.erp_amount ?? row?.erp?.amount,
-        erp_paths: row?.erp_paths ?? uniqueTracePaths(row?.erp?.trace),
-      })),
-    }, hierarchyPeriod);
-  });
-}
-
 function parseArgs(argv) {
   const result = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -185,9 +144,7 @@ export async function coreArgsWithUserStructuralControlSettings(argv, {
   return Object.freeze({ argv: Object.freeze(result), selection });
 }
 function nonzeroRows(payload) {
-  const structuralControlGroups = Array.isArray(payload?.structural_group_control_sets)
-    ? payload.structural_group_control_sets
-    : [];
+  const structuralControlGroups = closedStructuralControlGroups(payload);
   const partitions = Array.isArray(payload?.period_rows) && payload.period_rows.length > 0
     ? payload.period_rows
     : [{ period: text(payload?.period), rows: payload?.rows ?? [] }];
@@ -198,6 +155,19 @@ function nonzeroRows(payload) {
       Number.isFinite(row.delta) &&
       Math.abs(row.delta) > 0.009)
     .map((row) => ({ period: text(partition.period), code: text(row.code) })));
+}
+
+export function closedStructuralControlGroups(payload = {}) {
+  const closedIds = new Set((Array.isArray(payload?.structural_group_control_results)
+    ? payload.structural_group_control_results
+    : [])
+    .filter((result) => text(result?.classification) === "STRUCTURAL_GROUP_SUM_OK")
+    .map((result) => text(result?.group_id ?? result?.control_set_id))
+    .filter(Boolean));
+  return (Array.isArray(payload?.structural_group_control_sets)
+    ? payload.structural_group_control_sets
+    : [])
+    .filter((group) => closedIds.has(text(group?.group_id ?? group?.id)));
 }
 function linkedCaseIds(projection, period, code) {
   return projection?.period_row_links?.[period]?.[code]
@@ -260,12 +230,11 @@ export async function enrichOwnerDecisionOutputs({ reportPath, codexPath, manife
     policy_sha256: crypto.createHash("sha256").update(policyText).digest("hex").toUpperCase(),
     explanation_sheet: worksheet.sheet_name,
   };
+  const closedGroups = closedStructuralControlGroups(payload);
   payload.rows = (payload.rows ?? []).map((row) => {
     const presentationBlockExempt = isOwnerPresentationBlockExempt(
       row,
-      Array.isArray(payload?.structural_group_control_sets)
-        ? payload.structural_group_control_sets
-        : [],
+      closedGroups,
     );
     const caseIds = [...new Set((projection.cases ?? [])
       .filter((decisionCase) => (decisionCase.member_rows ?? []).some((member) => text(member.code) === text(row.code)))
@@ -323,7 +292,7 @@ export async function enrichOwnerDecisionOutputs({ reportPath, codexPath, manife
           organization: structuralPlan.organization,
           reconciliationOrganizationName: payload.organization,
           period: payload.period,
-          hierarchyPeriods: authoritativeStructuralInventoryHierarchyPeriodsFromPayload(payload),
+          hierarchyPeriods: payload.hierarchy_periods,
           generatedAt: payload.generated_at,
           currentRunFiles: {
             reportPath,

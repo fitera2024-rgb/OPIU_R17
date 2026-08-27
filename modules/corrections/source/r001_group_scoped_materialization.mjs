@@ -1,6 +1,5 @@
 import {
   REPORT_ONLY_SAFETY,
-  createCanonicalPostingRow,
   createMaterializationCase,
 } from "./r001_materialization_contract.mjs";
 import { canonicalSpornoRowFromMaterializationCase } from "./r001_canonical_output_contract.mjs";
@@ -62,28 +61,7 @@ function exactFinancialAuthority(decision) {
     && bool(decision?.ECONOMIC_CORRECTION_PROVEN);
 }
 
-function canonicalGroupScopedRow(materializationCase, plan, targetArticle) {
-  const canonical = canonicalSpornoRowFromMaterializationCase(materializationCase);
-  if (canonical.operation !== "REPOST") return canonical;
-  const loader = {
-    ...canonical.loader,
-    "ПравилоДт": plan.operating_side === "DEBIT" ? targetArticle.article_code : null,
-    "ПравилоКт": plan.operating_side === "CREDIT" ? targetArticle.article_code : null,
-  };
-  return createCanonicalPostingRow({
-    materialization_case: canonical.materialization_case,
-    operation: canonical.operation,
-    output_route: canonical.output_route,
-    materialization_state: canonical.materialization_state,
-    audit_identity: canonical.audit_identity,
-    amount: canonical.amount,
-    result_accounting: canonical.result_accounting,
-    loader,
-    safety: REPORT_ONLY_SAFETY,
-  });
-}
-
-function caseFor({ decision, action, role, operation, targetAccounting, targetArticle, amount, reason }) {
+function caseFor({ decision, action, role, operation, targetAccounting, targetArticle, amount, reason, intalevSource }) {
   return createMaterializationCase({
     case_id: `${text(decision.case_id)}-GROUP-${action}`,
     pair_id: text(decision.pair_id || decision.case_id),
@@ -105,16 +83,12 @@ function caseFor({ decision, action, role, operation, targetAccounting, targetAr
     output_route: "SPORNO",
     physical_source: operation,
     target_accounting: targetAccounting,
-    physical_proof: {
-      source_operation_proven: true,
-      physical_source_unique: true,
-      target_classification_proven: true,
-    },
     analytical_basis: {
       reconciliation_row: text(decision.reconciliation_row),
       analytical_basis_id: text(decision.case_id),
       effective_delta: action === "STORNO" ? -amount : amount,
     },
+    intalev_source: intalevSource,
     economic_route: {
       route_id: text(decision.pair_id || decision.case_id),
       proof_status: "PROVEN",
@@ -125,14 +99,6 @@ function caseFor({ decision, action, role, operation, targetAccounting, targetAr
       stage_order: number(decision.stage_order) ?? 1,
     },
     source_scope: {},
-    business_evidence: {
-      intalev_references: [
-        ...(Array.isArray(decision?.intalev_references) ? decision.intalev_references : []),
-        ...(Array.isArray(decision?.intalev_sources) ? decision.intalev_sources : []),
-      ],
-      intalev_technical_reference: text(decision?.intalev_technical_reference),
-      intalev_document_absent: decision?.intalev_document_absent === true,
-    },
     reason,
     blockers: [],
     provenance: { source: "CURRENT_RUN_GROUP_SCOPED_RULE" },
@@ -150,15 +116,32 @@ export function evaluateGroupScopedDecision({
   catalogNodes = [],
   intalevBlock = "",
   intalevPath = "",
+  intalevReference = "",
+  intalevAmount = null,
 } = {}) {
   const articleLabel = text(decision?.target_article || decision?.source_article || decision?.group);
   let targetArticle;
   try {
-    targetArticle = selectGroupScopedErpArticle(catalogNodes, {
-      intalevPath,
-      blockLabel: intalevBlock,
-      articleLabel,
-    });
+    const embeddedTargetCode = text(decision?.target_code);
+    const embeddedTargetAccount = text(decision?.target_operating_account);
+    const embeddedTargetPath = text(decision?.target_catalog_path);
+    targetArticle = exactFinancialAuthority(decision)
+      && embeddedTargetCode && embeddedTargetAccount && embeddedTargetPath && articleLabel
+      ? Object.freeze({
+          schema_version: GROUP_SCOPED_MATERIALIZATION_SCHEMA,
+          status: "PASS_UNIQUE_GROUP_SCOPED_ERP_ARTICLE",
+          block: text(intalevBlock),
+          article: articleLabel,
+          article_code: embeddedTargetCode,
+          operating_account: embeddedTargetAccount,
+          catalog_path: embeddedTargetPath,
+          selection_source: "CURRENT_RECONCILIATION_CROSS_JOURNAL_PROOF",
+        })
+      : selectGroupScopedErpArticle(catalogNodes, {
+          intalevPath,
+          blockLabel: intalevBlock,
+          articleLabel,
+        });
   } catch (error) {
     return Object.freeze({
       schema_version: GROUP_SCOPED_MATERIALIZATION_SCHEMA,
@@ -203,12 +186,19 @@ export function evaluateGroupScopedDecision({
       correctionAmount,
     });
     const reason = [
-      "Одноимённая статья ERP выбрана только внутри блока Инталев",
-      `Блок=${intalevBlock}`,
-      `Каталог=${targetArticle.catalog_path}`,
-      `Сторно=${plan.source_operating_account}`,
-      `Репост=${plan.target_operating_account}`,
-    ].join(" | ");
+      "Статья ERP выбрана внутри одноимённого блока Инталев.",
+      `Блок Инталев: «${intalevBlock}».`,
+      `Целевой путь ERP: «${targetArticle.catalog_path}».`,
+      `Классификационный счёт исходного блока: ${plan.source_operating_account}; целевого блока: ${plan.target_operating_account}.`,
+      `Физический маршрут Дт ${operation.debit} / Кт ${operation.credit} не изменяется; меняется код статьи ОПИУ.`,
+    ].join(" ");
+    const intalevSource = {
+      reconciliation_row: text(decision.reconciliation_row),
+      block: text(intalevBlock),
+      path: text(intalevPath),
+      source_reference: text(intalevReference),
+      amount: number(intalevAmount),
+    };
     const stornoCase = caseFor({
       decision,
       action: "STORNO",
@@ -218,6 +208,7 @@ export function evaluateGroupScopedDecision({
       targetArticle,
       amount: plan.amount,
       reason,
+      intalevSource,
     });
     const repostCase = caseFor({
       decision,
@@ -228,6 +219,7 @@ export function evaluateGroupScopedDecision({
       targetArticle,
       amount: plan.amount,
       reason,
+      intalevSource,
     });
     return Object.freeze({
       schema_version: GROUP_SCOPED_MATERIALIZATION_SCHEMA,
@@ -235,8 +227,8 @@ export function evaluateGroupScopedDecision({
       target_article: targetArticle,
       plan,
       canonical_posting_rows: Object.freeze([
-        canonicalGroupScopedRow(stornoCase, plan, targetArticle),
-        canonicalGroupScopedRow(repostCase, plan, targetArticle),
+        canonicalSpornoRowFromMaterializationCase(stornoCase),
+        canonicalSpornoRowFromMaterializationCase(repostCase),
       ]),
       blockers: Object.freeze([]),
     });

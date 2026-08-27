@@ -11,7 +11,6 @@ import {
 import {
   relevantIntalevAbsenceProof,
 } from "../../reconciliation/source/intalev_source_scope.mjs";
-import { buildR001BusinessContent } from "./r001_business_content.mjs";
 
 export const R001_STANDALONE_STORNO_SCHEMA =
   "opiu-r001-standalone-storno-materialization.v1";
@@ -21,6 +20,13 @@ function text(value) {
 }
 
 function upper(value) { return text(value).toUpperCase(); }
+
+function moneyText(value) {
+  return Number(value ?? 0).toLocaleString("ru-RU", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
 
 function cents(value) {
   const numeric = typeof value === "number" ? value : Number(text(value).replace(/\s/g, "").replace(",", "."));
@@ -263,7 +269,7 @@ function materializationCaseWith(materializationCase, { route, physicalSource, s
   });
 }
 
-function loaderForStorno(materializationCase, decision) {
+function loaderForStorno(materializationCase) {
   const source = materializationCase.physical_source;
   const loader = Object.fromEntries(LOADER_A_AA_FIELDS.map((field) => [field, null]));
   Object.assign(loader, {
@@ -274,29 +280,14 @@ function loaderForStorno(materializationCase, decision) {
     "ПодразделениеКт": source.credit_department || null,
     "СуммаВВалютеУчета": materializationCase.correction_amount,
     "СуммаВВалютеОтчетности": materializationCase.correction_amount,
-    "Содержание": buildR001BusinessContent({
-      operation: "STORNO",
-      erp: {
-        document: source.document,
-        date: source.date,
-        postingNumber: source.posting_number,
-        debit: source.debit,
-        credit: source.credit,
-        amount: materializationCase.correction_amount,
-        organization: source.source_organization,
-        debitDepartment: source.debit_department,
-        creditDepartment: source.credit_department,
-      },
-      economic: {
-        sourceArticle: materializationCase.economic.source_article,
-        targetArticle: materializationCase.economic.target_article,
-      },
-      decision: materializationCase.business_evidence,
-      caseId: materializationCase.case_id,
-      pairId: materializationCase.pair_id,
-      sourceRowId: source.source_row_id,
-      intalevDocumentNotPresented: materializationCase.business_evidence.intalev_document_absent === true,
-    }),
+    "Содержание": [
+      `СТОРНО: снимаем ${moneyText(materializationCase.correction_amount)} со статьи «${text(materializationCase.economic?.source_article) || "исходная статья ERP"}»`,
+      `Причина: ${text(materializationCase.reason) || "сумма присутствует только в ERP и подтверждена сверкой"}`,
+      `Источник Инталев: строка сверки ${text(materializationCase.intalev_source?.reconciliation_row || materializationCase.analytical_basis?.reconciliation_row) || "указана в сверке"}; путь «${text(materializationCase.intalev_source?.path) || "см. доказательную сверку ОПИУ"}»`,
+      text(source.content) ? `Исходное содержание: ${text(source.content)}` : "",
+      `Источник ERP: ${text(source.document) || "документ не указан"}; проводка ${text(source.posting_number || source.posting_no) || "не указана"}; строка ${text(source.source_range) || "не указана"}`,
+      `Техническая ссылка: CaseID=${materializationCase.case_id}; SourceRowID=${source.source_row_id}`,
+    ].filter(Boolean).join(" | "),
     "СчетДтИсточник": source.debit || null,
     "СчетКтИсточник": source.credit || null,
     "ИдентификаторФинЗаписи": source.source_row_id || null,
@@ -310,7 +301,7 @@ function loaderForStorno(materializationCase, decision) {
   return loader;
 }
 
-function canonicalStornoRow(materializationCase, decision) {
+function canonicalStornoRow(materializationCase) {
   const source = materializationCase.physical_source;
   return createCanonicalPostingRow({
     materialization_case: materializationCase,
@@ -336,7 +327,7 @@ function canonicalStornoRow(materializationCase, decision) {
       credit_department: source.credit_department,
       article: materializationCase.economic.source_article,
     },
-    loader: loaderForStorno(materializationCase, decision),
+    loader: loaderForStorno(materializationCase),
     safety: REPORT_ONLY_SAFETY,
   });
 }
@@ -387,18 +378,11 @@ export async function materializeStandaloneStornoCases(decisions = [], { reopenS
 
     if (!canAttemptReady) {
       const blockers = ["EXACT_PHYSICAL_SOURCE_INCOMPLETE_OR_AMBIGUOUS"];
-      const materializationCase = materializationCaseWith(originalCase, {
-        route: "SPORNO",
-        blockers: [...originalCase.blockers, ...blockers],
-      });
-      const canonicalPostingRow = canonicalStornoRow(materializationCase, decision);
-      canonicalPostingRows.push(canonicalPostingRow);
       caseUpdates.push(Object.freeze({
         upstream_decision_index: index,
-        result: "SPORNO",
+        result: "BLOCKED",
         blockers: Object.freeze(blockers),
-        materialization_case: materializationCase,
-        canonical_posting_row: canonicalPostingRow,
+        materialization_case: blockedCase(originalCase, blockers),
       }));
       continue;
     }
@@ -423,7 +407,7 @@ export async function materializeStandaloneStornoCases(decisions = [], { reopenS
         sourceArticle,
         blockers: originalCase.blockers.filter((item) => text(item) !== "EXACT_SOURCE_REOPEN_REQUIRED_FOR_READY"),
       });
-      const canonicalPostingRow = canonicalStornoRow(materializationCase, decision);
+      const canonicalPostingRow = canonicalStornoRow(materializationCase);
       canonicalPostingRows.push(canonicalPostingRow);
       caseUpdates.push(Object.freeze({
         upstream_decision_index: index,

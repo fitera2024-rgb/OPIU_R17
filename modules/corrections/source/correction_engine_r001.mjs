@@ -5,17 +5,14 @@ import { fileURLToPath } from "node:url";
 import { FileBlob, SpreadsheetFile, Workbook } from "@oai/artifact-tool";
 import JSZip from "jszip";
 import { unprovenOneSideReviews } from "./r005_review_routing.mjs";
-import { rulesApplicationsToDisputedDecisions } from "./rules_application_handoff.mjs";
 import { aggregateAnnualMonthlyResults, buildAnalyticalContext } from "./r001_analytical_policy.mjs";
-import { requireVerifiedHandoffForRulesApplications, verifiedR001HandoffInput } from "./r001_handoff_input.mjs";
-import { verifyStructuralControlProofDescriptor } from "../../rules-engine/source/structural_control_proof.mjs";
+import { CORRECTION_SELF_DISCOVERY_POLICY } from "./correction_self_discovery_policy.mjs";
 import {
   materializeOwnerEconomicDrafts,
   materializeSparseEconomicDrafts,
 } from "./r001_sporno_materialization.mjs";
 import { LOADER_A_AA_FIELDS } from "./r001_materialization_contract.mjs";
 import {
-  canonicalSpornoRowFromMaterializationCase,
   collectCanonicalFinancialOutput,
   verifyCanonicalOutputIntegrity,
 } from "./r001_canonical_output_contract.mjs";
@@ -35,7 +32,7 @@ const ENGINE_VERSION = "opiu-correction-engine-r001";
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ENGINE_FILE = path.resolve(MODULE_DIR, "correction_engine_r001.mjs");
 const ANALYTICAL_POLICY_FILE = path.resolve(MODULE_DIR, "r001_analytical_policy.mjs");
-const RULES_FILE = path.resolve(MODULE_DIR, "correction_rules.r001.json");
+const SELF_DISCOVERY_POLICY_FILE = path.resolve(MODULE_DIR, "correction_self_discovery_policy.mjs");
 
 const COLORS = Object.freeze({
   navy: "#1F4E78",
@@ -58,10 +55,10 @@ const DATE_FORMAT = "dd.mm.yyyy";
 
 const LOADER_HEADERS = LOADER_A_AA_FIELDS;
 
-const OWNER_UPLOAD_TEMPLATE = "[ORGANIZATION][DATE]_ОПИУ_ГОТОВО.xlsx";
-const DELETION_WORKBOOK_TEMPLATE = "Удаление_операций_ОПИУ_УК_YEAR_R005.xlsx";
-const CORRECTIONS_REGISTRY_TEMPLATE = "Реестр_корректировок_ОПИУ_УК_YEAR_R005.xlsx";
-const DISCREPANCY_REGISTRY_TEMPLATE = "Реестр_проводок_расхождений_ОПИУ_PERIOD_R005.xlsx";
+const OWNER_UPLOAD_TEMPLATE = "CORR_ORGANIZATION_DATE.xlsx";
+const DELETION_WORKBOOK_TEMPLATE = "Удаление_YEAR.xlsx";
+const CORRECTIONS_REGISTRY_TEMPLATE = "Реестр_YEAR.xlsx";
+const DISCREPANCY_REGISTRY_TEMPLATE = "Расхождения_PERIOD.xlsx";
 
 const DECISION_FIELDS = [
   ["case_id", "CaseID"],
@@ -171,14 +168,6 @@ function clean(value) {
   return String(value ?? "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function scopedManifestRunIdentity(sourceRunId, internalRunId) {
-  const engineRunId = clean(internalRunId);
-  return {
-    run_id: clean(sourceRunId) || engineRunId,
-    engine_run_id: engineRunId,
-  };
-}
-
 function normalizedApproval(value) {
   return clean(value).toUpperCase();
 }
@@ -268,31 +257,6 @@ function stableId(prefix, payload, length = 20) {
   return `${prefix}-${hash.slice(0, length)}`;
 }
 
-function stableDecisionIdentity(decision) {
-  return clean(decision?.embedded_decision_identity)
-    || [clean(decision?.case_id), clean(decision?.pair_id), clean(decision?.reconciliation_row), clean(decision?.role)]
-      .filter(Boolean).join("|")
-    || stableId("CASE", decision);
-}
-
-function mergeProvidedAndAutonomousDecisions(providedDecisions, autonomousDecisions = []) {
-  if (providedDecisions === null || providedDecisions === undefined) return null;
-  const mergedByIdentity = new Map();
-  for (const decision of providedDecisions) {
-    mergedByIdentity.set(stableDecisionIdentity(decision), decision);
-  }
-  for (const decision of autonomousDecisions) {
-    const identity = stableDecisionIdentity(decision);
-    if (!mergedByIdentity.has(identity)) mergedByIdentity.set(identity, decision);
-  }
-  return [...mergedByIdentity.values()];
-}
-
-function excludeHierarchyCoveredEconomicRows(rows, coveredEconomicRouteCaseIds = []) {
-  const covered = new Set(coveredEconomicRouteCaseIds.map((caseId) => clean(caseId)).filter(Boolean));
-  return rows.filter((row) => !covered.has(clean(row.case_id)) && !covered.has(clean(row.pair_id)));
-}
-
 async function sha256(filePath) {
   const bytes = await fs.readFile(filePath);
   return crypto.createHash("sha256").update(bytes).digest("hex").toUpperCase();
@@ -314,17 +278,21 @@ function organizationForFile(value) {
 function ownerUploadOrganizationLabel(value) {
   const text = String(value ?? "").trim();
   if (!text) return "ИСТОЧНИК НЕ ОПРЕДЕЛЕН";
-  return text
+  const safe = text
     .replace(/[«»"„“]/g, " ")
     .replace(/[<>:/\\|?*]/g, "_")
+    .replace(/\s+/g, "_")
     .trim();
+  if (safe.length <= 24) return safe;
+  const suffix = crypto.createHash("sha256").update(safe).digest("hex").slice(0, 6).toUpperCase();
+  return `${safe.slice(0, 17)}_${suffix}`;
 }
 
 function ownerUploadDateLabel(rawPeriod) {
   const text = clean(rawPeriod);
   const monthGroups = text.match(/\d{4}-(0[1-9]|1[0-2])/g);
   const lastMonth = monthGroups && monthGroups.length > 0 ? monthGroups[monthGroups.length - 1] : text;
-  return fileSafe(periodEndDate(lastMonth) || lastMonth);
+  return fileSafe(lastMonth || "ПЕРИОД");
 }
 
 function periodYearLabel(rawPeriod) {
@@ -489,6 +457,7 @@ function embeddedCatalogContext(workbook, treeAllRecords) {
     && row.some((value) => clean(value) === "Путь по справочнику ERP"));
   const catalogRecords = catalogHeader < 0 ? [] : recordsFromMatrix(catalogValues, catalogHeader);
   const erpCatalogNodes = catalogNodesFromReconciliationRows(catalogRecords);
+
   const intalevBlockByCode = hierarchyContextByCode(treeAllRecords);
   return Object.freeze({ erpCatalogNodes: Object.freeze(erpCatalogNodes), intalevBlockByCode });
 }
@@ -726,30 +695,10 @@ async function readDecisionFile(decisionPath, options = {}) {
   if (!decisionPath) return null;
   if (path.extname(decisionPath).toLowerCase() === ".json") {
     const payload = JSON.parse(await fs.readFile(decisionPath, "utf8"));
-    const decisions = Array.isArray(payload?.applications)
-      ? rulesApplicationsToDisputedDecisions(payload, options).map((decision) => {
-          const application = payload.applications.find((item) => clean(item.application_id) === clean(decision.case_id)
-            || clean(item.candidate_id) === clean(decision.pair_id));
-          const candidate = application?.candidate_snapshot ?? {};
-          const signedDelta = numberValue(candidate?.action?.parameters?.delta ?? application?.analytical_effect ?? application?.delta);
-          const applicationProofStatus = clean(application?.proof_status || candidate?.evidence?.proof_status || decision.evidence_state || "UNPROVEN").toUpperCase();
-          return {
-            ...decision,
-            proof_status: applicationProofStatus,
-            original_proof_status: clean(application?.original_proof_status || candidate?.evidence?.original_proof_status || (applicationProofStatus === "USER_ACCEPTED" ? "UNPROVEN" : applicationProofStatus)).toUpperCase(),
-            user_acceptance: applicationProofStatus === "USER_ACCEPTED"
-              ? { accepted: true, source: "rules_application.proof_status" }
-              : undefined,
-            analytical_effect: signedDelta,
-            target_article: clean(candidate?.erp?.article_path || candidate?.erp?.article_name || candidate?.erp?.article_code || decision.target_analytics_dt1),
-            disclosure_group: clean(candidate?.scope?.disclosure_group || candidate?.group || decision.group),
-            target_side: clean(candidate?.action?.parameters?.target_side || candidate?.action?.action_type || decision.change_side),
-            review_state: clean(application?.review_state || candidate?.review_state)
-              || (applicationProofStatus === "USER_ACCEPTED" ? "ACCEPTED" : "NEEDS_REVIEW"),
-            evidence_references: candidate?.evidence?.evidence_rows ?? [],
-          };
-        })
-      : Array.isArray(payload) ? payload : payload.decisions;
+    if (Array.isArray(payload?.applications)) {
+      throw new Error("EXTERNAL_RULE_APPLICATIONS_DISABLED: движок использует только самостоятельный поиск по доказательной сверке");
+    }
+    const decisions = Array.isArray(payload) ? payload : payload.decisions;
     if (Array.isArray(decisions)) {
       Object.defineProperty(decisions, "analyticalContexts", {
         enumerable: false,
@@ -855,14 +804,23 @@ function makeLoaderRow(decision, operation, uploadId, target, disputed = false) 
   const amountText = formatMoneyText(amount);
   const humanSourceRange = clean(decision.loader_source_range) || clean(decision.source_range) || "не определена";
   const sourceEvidence = clean(decision.source_evidence_summary) || `Исходная аналитика ERP: Дт ${clean(decision.source_dt) || "не определён"} [${sourceDtAnalytics}], подразделение ${clean(decision.source_department_dt) || "не определено"}; Кт ${clean(decision.source_kt) || "не определён"} [${sourceKtAnalytics}], подразделение ${clean(decision.source_department_kt) || "не определено"}`;
+  const sourceArticle = clean(decision.source_article) || clean(decision.group) || "исходная статья ERP";
+  const targetArticle = clean(decision.target_article) || clean(target.analyticsDt1) || clean(target.analyticsKt1) || "целевая статья ERP";
+  const userAction = operation === "STORNO"
+    ? `СТОРНО: снимаем ${amountText} со статьи «${sourceArticle}»`
+    : `РЕПОСТ: относим ${amountText} на статью «${targetArticle}»`;
   const humanTrace = [
-    `Причина корректировки: ${reason}`,
-    `Инталев: ${clean(decision.intalev_reference) || "агрегат ОПИУ; регистратор операций не выгружен"}`,
-    `ERP: регистратор ${clean(decision.registrar) || "не определён"}; проводка ${clean(decision.posting_number) || "не определена"}; строка ${humanSourceRange}`,
+    userAction,
+    `Причина: ${reason}`,
+    `Источник Инталев: ${[
+      clean(decision.reconciliation_row) ? `строка сверки ${clean(decision.reconciliation_row)}` : "",
+      clean(decision.intalev_path) ? `путь «${clean(decision.intalev_path)}»` : "",
+      clean(decision.intalev_reference) || "агрегат ОПИУ; регистратор операций не выгружен",
+    ].filter(Boolean).join("; ")}`,
+    `Источник ERP: ${clean(decision.registrar) || "документ не определён"}; проводка ${clean(decision.posting_number) || "не определена"}; строка ${humanSourceRange}`,
     sourceEvidence,
-    `Формируемая строка ${operation}: Дт ${clean(target.dt) || "не определён"} [${targetDtAnalytics}], подразделение ${clean(target.departmentDt) || "не определено"}; Кт ${clean(target.kt) || "не определён"} [${targetKtAnalytics}], подразделение ${clean(target.departmentKt) || "не определено"}`,
-    `Сумма: ${amountText}`,
-    `Почему спорно: ${clean(decision.proof_reason) || (disputed ? "кандидат сверки не подтверждён точной парой регистраторов и полной иерархией" : "ожидаются внешние контрольные процедуры")}`,
+    `Проводка после переноса: Дт ${clean(target.dt) || "не определён"} [${targetDtAnalytics}], подразделение ${clean(target.departmentDt) || "не определено"}; Кт ${clean(target.kt) || "не определён"} [${targetKtAnalytics}], подразделение ${clean(target.departmentKt) || "не определено"}`,
+    `Статус проверки: ${clean(decision.proof_reason) || (disputed ? "требуется подтверждение пользователя" : "доказано сверкой; выгрузка остаётся REPORT_ONLY")}`,
   ].join(" | ");
   const technicalTrace = [
     humanTrace,
@@ -1127,7 +1085,7 @@ function globalDirectReclassificationPlan(operationRows, pair, policy = {}) {
   };
 }
 
-async function sidecarDisputedGroups(sidecarPath, reconciliationSha, requestedPeriod, reportOrganization = "", rules = {}) {
+async function sidecarDisputedGroups(sidecarPath, reconciliationSha, requestedPeriod, reportOrganization = "", discoveryPolicy = {}) {
   if (!clean(sidecarPath)) {
     return { sidecarPath: "", sidecarSha: "", groups: new Map(), unresolvedRows: [], reviewRows: [], analyticalDecisions: [], analyticalContexts: [], pairCount: 0, postingRows: 0, blockers: ["Нет явно переданного companion codex-input.json с pair_candidates"] };
   }
@@ -1146,7 +1104,7 @@ async function sidecarDisputedGroups(sidecarPath, reconciliationSha, requestedPe
     return { sidecarPath, sidecarSha, groups: new Map(), unresolvedRows: [], reviewRows: [], analyticalDecisions: [], analyticalContexts: [], pairCount: 0, postingRows: 0, blockers: ["Период корректировки должен быть месяцем YYYY-MM; годовые строки _СПОРНО не создаются"] };
   }
   const evidence = payload.operation_evidence ?? {};
-  const reclassificationPolicy = rules.zero_sum_internal_reclassification ?? {};
+  const reclassificationPolicy = discoveryPolicy.zero_sum_internal_reclassification ?? {};
   const topLevelOrganization = clean(reportOrganization)
     || clean(payload.organization)
     || clean(reclassificationPolicy.organization_reference?.top_level_name);
@@ -1215,7 +1173,7 @@ async function sidecarDisputedGroups(sidecarPath, reconciliationSha, requestedPe
 
   function reclassificationRuleForPair(pair) {
     if (!reclassificationPolicy.enabled) return null;
-    return (reclassificationPolicy.rules ?? []).find((item) => clean(item.parent_code) === clean(pair.parent_code)) ?? null;
+    return (reclassificationPolicy.article_overrides ?? []).find((item) => clean(item.parent_code) === clean(pair.parent_code)) ?? null;
   }
 
   function intalevReferencesForCodes(codes, period) {
@@ -1344,84 +1302,7 @@ async function sidecarDisputedGroups(sidecarPath, reconciliationSha, requestedPe
       enabled: reclassificationPolicy.enabled && reclassificationPolicy.global_rule?.enabled !== false,
     });
     if (globalPlan.ok) {
-      const sourceLabel = articleLabelForCode(globalPlan.sourceCode);
-      const sourceProfile = globalPlan.profileByCode.get(globalPlan.sourceCode);
-      for (const targetItem of globalPlan.targetItems) {
-        const targetLabel = articleLabelForCode(targetItem.code);
-        const targetProfile = globalPlan.profileByCode.get(targetItem.code);
-        const debitNormal = globalPlan.normalSide === "DEBIT";
-        const target = debitNormal
-          ? {
-              dt: targetProfile.account,
-              kt: sourceProfile.account,
-              analyticsDt1: targetLabel,
-              analyticsDt2: "",
-              analyticsDt3: targetProfile.analytics3 || "",
-              departmentDt: "",
-              analyticsKt1: sourceLabel,
-              analyticsKt2: "",
-              analyticsKt3: sourceProfile.analytics3 || "",
-              departmentKt: "",
-            }
-          : {
-              dt: sourceProfile.account,
-              kt: targetProfile.account,
-              analyticsDt1: sourceLabel,
-              analyticsDt2: "",
-              analyticsDt3: sourceProfile.analytics3 || "",
-              departmentDt: "",
-              analyticsKt1: targetLabel,
-              analyticsKt2: "",
-              analyticsKt3: targetProfile.analytics3 || "",
-              departmentKt: "",
-            };
-        const direction = debitNormal
-          ? `Дт ${targetProfile.account} «${targetLabel}» / Кт ${sourceProfile.account} «${sourceLabel}»`
-          : `Дт ${sourceProfile.account} «${sourceLabel}» / Кт ${targetProfile.account} «${targetLabel}»`;
-        const sourceRanges = [...new Set([
-          ...(sourceProfile.evidenceRows ?? []),
-          ...(targetProfile.evidenceRows ?? []),
-        ].filter(Boolean))];
-        const decision = {
-          case_id: clean(pair.pair_id),
-          decision_type: "ADD_ONE_SIDE",
-          approval_state: "ПРЕДЛОЖЕНО",
-          period: clean(pair.period),
-          source_range: sourceRanges.length ? sourceRanges.join(";") : `PAIR:${clean(pair.pair_id)}`,
-          loader_source_range: `Профили статей ${globalPlan.sourceCode}/${targetItem.code}; точный физический регистратор не определён`,
-          source_date: periodEndDate(clean(pair.period)),
-          registrar: "не определён",
-          posting_number: "не определена",
-          source_dt: sourceProfile.account,
-          source_analytics_dt1: sourceLabel,
-          source_analytics_dt2: "—",
-          source_analytics_dt3: sourceProfile.analytics3 || "—",
-          source_department_dt: "НЕ ОПРЕДЕЛЕНО",
-          source_kt: targetProfile.account,
-          source_analytics_kt1: targetLabel,
-          source_analytics_kt2: "—",
-          source_analytics_kt3: targetProfile.analytics3 || "—",
-          source_department_kt: "НЕ ОПРЕДЕЛЕНО",
-          organization: topLevelOrganization || "НЕ ОПРЕДЕЛЕНА — ВЕРХНИЙ УРОВЕНЬ ОТЧЁТА",
-          correction_amount: targetItem.cents / 100,
-          reason: `Перенос суммы внутри нулевой группы ${clean(pair.parent_code)}: излишек ${globalPlan.sourceCode} «${sourceLabel}» → недостаток ${targetItem.code} «${targetLabel}». ${direction}`,
-          proof_reason: "Пара получена по точным противоположным дельтам. Счета и нормальная сторона подтверждены журналом ERP через Группу раскрытия/Аналитику3; физический регистратор суммы и полная иерархия Инталев не доказаны, поэтому файл СПОРНО",
-          source_evidence_summary: `Исходная строка ERP не найдена. Профиль излишка ${globalPlan.sourceCode}: счёт ${sourceProfile.account}, сторона ${sourceProfile.normalSide}, раскрытие «${sourceProfile.disclosure}», Аналитика3 «${sourceProfile.analytics3}»; профиль недостатка ${targetItem.code}: счёт ${targetProfile.account}, сторона ${targetProfile.normalSide}, раскрытие «${targetProfile.disclosure}», Аналитика3 «${targetProfile.analytics3}». ${direction}`,
-          intalev_reference: pairIntalevReferences.human,
-          intalev_technical_reference: `${pairIntalevReferences.technical}; AccountProfileSource=${sourceProfile.account}/${sourceProfile.normalSide}; AccountProfileTarget=${targetProfile.account}/${targetProfile.normalSide}; Direction=${direction}`,
-          erp_source_sha256: clean(evidence.journal_sha256),
-          pair_id: clean(pair.pair_id),
-        };
-        unresolvedRows.push(makeLoaderRow(
-          decision,
-          "REPOST",
-          stableId("UPL-SPORNO-DIRECT", [pair.pair_id, globalPlan.sourceCode, targetItem.code, targetItem.cents]),
-          target,
-          true,
-        ));
-      }
-      postingRows += globalPlan.targetItems.length;
-      blockers.push(`${clean(pair.pair_id)}: сформировано ${globalPlan.targetItems.length} пустых/неполных строк _СПОРНО с подробной причиной; normal_side=${globalPlan.normalSide}; физический регистратор не доказан`);
+      blockers.push(`${clean(pair.pair_id)}: найден экономический профиль ${globalPlan.targetItems.length} целевых статей, но физический регистратор не доказан; A:AA-строки не созданы`);
       continue;
     }
     if (globalPlan.candidateOnly) {
@@ -1479,52 +1360,10 @@ async function sidecarDisputedGroups(sidecarPath, reconciliationSha, requestedPe
       };
       if (directReclassificationAllowed) {
         const account = clean(reclassificationRule.account);
-        const sourceArticleCode = clean(ruleSource.erp_article_code);
-        commonDecision.source_evidence_summary = `Исходная строка ERP не найдена. Справочник ERP подтверждает прямую переклассификацию внутри группы: счёт ${account}; Кт «${sourceLabel}» (${sourceArticleCode}); целевые статьи по Дт указаны в формируемых строках`;
-        for (const quota of targetQuotas) {
-          const ruleTarget = ruleTargets.get(quota.code);
-          const targetLabel = clean(ruleTarget?.label) || quota.label;
-          const targetArticleCode = clean(ruleTarget?.erp_article_code);
-          const target = {
-            dt: account,
-            kt: account,
-            analyticsDt1: targetLabel,
-            analyticsDt2: "",
-            analyticsDt3: "",
-            departmentDt: "",
-            analyticsKt1: sourceLabel,
-            analyticsKt2: "",
-            analyticsKt3: "",
-            departmentKt: "",
-          };
-          const targetDecision = {
-            ...commonDecision,
-            correction_amount: quota.cents / 100,
-            reason: `${commonDecision.reason}. Прямая переклассификация: Дт ${account} «${targetLabel}» (${targetArticleCode}) / Кт ${account} «${sourceLabel}» (${sourceArticleCode})`,
-          };
-          unresolvedRows.push(makeLoaderRow(targetDecision, "REPOST", stableId("UPL-SPORNO-DIRECT", [pair.pair_id, quota.code, quota.cents]), target, true));
-        }
-        postingRows += targetQuotas.length;
-        blockers.push(`${clean(pair.pair_id)}: точный ERP subset на ${formatMoneyText(sourceAmount)} не найден; ${targetQuotas.length} строк ${account}/${account} сохранены только в _СПОРНО с подробной причиной`);
+        blockers.push(`${clean(pair.pair_id)}: целевые статьи и счёт ${account} определены, но точный ERP subset на ${formatMoneyText(sourceAmount)} не найден; A:AA-строки не созданы`);
         continue;
       }
-      const unresolvedTarget = {
-        dt: "", kt: "",
-        analyticsDt1: sourceLabel, analyticsDt2: "", analyticsDt3: "", departmentDt: "",
-        analyticsKt1: "", analyticsKt2: "", analyticsKt3: "", departmentKt: "",
-      };
-      unresolvedRows.push(makeLoaderRow({ ...commonDecision, correction_amount: sourceAmount }, "STORNO", stableId("UPL-SPORNO-BLOCK-S", [pair.pair_id, sourceAmount]), unresolvedTarget, true));
-      for (const quota of targetQuotas) {
-        const target = { ...unresolvedTarget, analyticsDt1: quota.label };
-        const targetDecision = {
-          ...commonDecision,
-          correction_amount: quota.cents / 100,
-          reason: `${commonDecision.reason}. Целевая статья ${quota.code} «${quota.label}»; счета и исходный регистратор не доказаны, поэтому поля проводки оставлены пустыми`,
-        };
-        unresolvedRows.push(makeLoaderRow(targetDecision, "REPOST", stableId("UPL-SPORNO-BLOCK-P", [pair.pair_id, quota.code, quota.cents]), target, true));
-      }
-      postingRows += 1 + targetQuotas.length;
-      blockers.push(`${clean(pair.pair_id)}: точный subset SOURCE на ${formatMoneyText(sourceAmount)} не найден; пустые строки сохранены только в _СПОРНО, причина и источник расхождения указаны в Содержании`);
+      blockers.push(`${clean(pair.pair_id)}: точный subset SOURCE на ${formatMoneyText(sourceAmount)} не найден; A:AA-строки не созданы`);
       continue;
     }
     let targetIndex = 0;
@@ -1823,7 +1662,7 @@ async function buildDecisionWorkbook(decisions, metadata, outputPath) {
   styleHeader(sources.getRange("A3:F3"));
   writeMatrix(sources, 3, 0, [
     ["Сверка", metadata.reconciliationPath, metadata.reconciliationSha, metadata.sourceSheet ?? "НЕ НАЙДЕН", metadata.sourceCount, metadata.sourceBlocker || "OK"],
-    ["Правила", RULES_FILE, metadata.rulesSha, "JSON", "", "PINNED"],
+    ["Политика автопоиска", SELF_DISCOVERY_POLICY_FILE, metadata.discoveryPolicySha, "BUILT_IN", "", "PINNED"],
     ["Движок", ENGINE_FILE, metadata.engineSha, ENGINE_VERSION, "", "PINNED"],
   ]);
   styleBody(sources.getRange("A4:F6"));
@@ -1901,7 +1740,7 @@ async function buildUploadWorkbook(actions, metadata, outputPath) {
   writeMatrix(sources, 3, 0, [
     ["Сверка", metadata.reconciliationPath, metadata.reconciliationSha, "immutable input", "PINNED"],
     ["Решения", metadata.decisionPath || "Внутренний кандидат", metadata.decisionSha || "", "owner input", metadata.decisionPath ? "PINNED" : "NOT_PROVIDED"],
-    ["Правила", RULES_FILE, metadata.rulesSha, ENGINE_VERSION, "PINNED"],
+    ["Политика автопоиска", SELF_DISCOVERY_POLICY_FILE, metadata.discoveryPolicySha, ENGINE_VERSION, "PINNED"],
     ["Движок", ENGINE_FILE, metadata.engineSha, ENGINE_VERSION, "PINNED"],
   ]);
   styleBody(sources.getRange("A4:E7"));
@@ -2071,7 +1910,7 @@ async function buildDeletionWorkbook(actions, metadata, outputPath) {
   styleTitle(sources, 0, 4, `Источники проекта удаления — ${reportOrganization}`);
   writeMatrix(sources, 2, 0, [["Путь", "SHA256", "Тип", "Статус"]]);
   styleHeader(sources.getRange("A3:D3"));
-  writeMatrix(sources, 3, 0, [[metadata.reconciliationPath, metadata.reconciliationSha, "Сверка", "PINNED"], [RULES_FILE, metadata.rulesSha, "Правила", "PINNED"], [ENGINE_FILE, metadata.engineSha, "Движок", "PINNED"]]);
+  writeMatrix(sources, 3, 0, [[metadata.reconciliationPath, metadata.reconciliationSha, "Сверка", "PINNED"], [SELF_DISCOVERY_POLICY_FILE, metadata.discoveryPolicySha, "Политика автопоиска", "PINNED"], [ENGINE_FILE, metadata.engineSha, "Движок", "PINNED"]]);
   styleBody(sources.getRange("A4:D6"));
   setWidths(sources, { 0: 90, 1: 68, 2: 20, 3: 25 });
   await saveWorkbook(workbook, outputPath);
@@ -2373,42 +2212,6 @@ async function buildEnrichedReconciliation(workbook, materializationRows, output
   await saveWorkbook(workbook, outputPath);
 }
 
-function exactUniqueDecisionRows(rows = []) {
-  const seen = new Set();
-  const unique = [];
-  for (const row of rows) {
-    const identity = JSON.stringify(row);
-    if (seen.has(identity)) continue;
-    seen.add(identity);
-    unique.push(row);
-  }
-  return unique;
-}
-
-function canonicalLoaderContent(audit = {}) {
-  if (Array.isArray(audit.loader_values) && audit.loader_values.length > 15) {
-    return audit.loader_values[15] ?? "";
-  }
-  return audit.loader?.["Содержание"] ?? "";
-}
-
-function disputedTraceRow(audit) {
-  return [
-    audit.pair_id, audit.audit_identity, audit.operation, audit.period, audit.source_organization,
-    audit.source_range, audit.document, audit.posting_number, audit.amount,
-    canonicalLoaderContent(audit), [
-      `AuditIdentity=${audit.audit_identity}`,
-      `CaseID=${audit.case_id}`,
-      `SourceRowID=${audit.source_row_id}`,
-      `SourceArchiveSHA256=${audit.source_archive_sha256}`,
-      `JournalSHA256=${audit.journal_sha256}`,
-      `Route=${audit.output_route}`,
-      `State=${audit.materialization_state}`,
-      `Blockers=${(audit.blockers ?? []).join(",")}`,
-    ].join(" | "),
-  ];
-}
-
 async function buildMasterRegistry(decisions, actions, metadata, outputPath, disputedRows = [], reviewRows = [], analyticalPolicy = null, materializationRows = []) {
   const workbook = Workbook.create();
   const allDecisionRows = [...actions.pairRows, ...reviewRows];
@@ -2422,7 +2225,7 @@ async function buildMasterRegistry(decisions, actions, metadata, outputPath, dis
     ["Engine", ENGINE_VERSION, "RunID", metadata.runId, "SOURCE кандидаты", metadata.sourceCount, "Решения", decisions.length + reviewRows.length],
     ["Canonical financial rows", materializationRows.length, "Удаление операций", actions.deletionOperations.length, "Удаление проводок", actions.deletionPostings.length, "Блокеры", allBlockerRows.length],
     ["execution_allowed", false, "ready_to_upload", false, "release_allowed", false, "1С", "НЕ ЗАГРУЖАТЬ"],
-    ["Сверка SHA256", metadata.reconciliationSha, "Решения SHA256", metadata.decisionSha || "НЕ ПРЕДОСТАВЛЕН", "Правила SHA256", metadata.rulesSha, "Статус", "REPORT_ONLY"],
+    ["Сверка SHA256", metadata.reconciliationSha, "Решения SHA256", metadata.decisionSha || "ВНУТРЕННИЙ АВТОПОИСК", "Автопоиск SHA256", metadata.discoveryPolicySha, "Статус", "REPORT_ONLY"],
     ["Analytical drafts", analyticalPolicy?.counts?.analytical_draft_corrections ?? 0, "Review required", analyticalPolicy?.counts?.review_required ?? 0, "Live rows", 0, "Analytical gate", "REPORT_ONLY"],
   ]);
   styleBody(passport.getRange("A5:H9"));
@@ -2453,8 +2256,7 @@ async function buildMasterRegistry(decisions, actions, metadata, outputPath, dis
     styleTitle(sheet, 0, headers.length, title);
     writeMatrix(sheet, 2, 0, [headers]);
     styleHeader(sheet.getRangeByIndexes(2, 0, 1, headers.length));
-    const matchingRows = allDecisionRows.filter((row) => typeMatcher.has(row[1]));
-    const rows = sheetName === "02_STORNO_REPOST" ? exactUniqueDecisionRows(matchingRows) : matchingRows;
+    const rows = allDecisionRows.filter((row) => typeMatcher.has(row[1]));
     if (rows.length) {
       writeMatrix(sheet, 3, 0, rows);
       styleBody(sheet.getRangeByIndexes(3, 0, rows.length, headers.length));
@@ -2481,9 +2283,20 @@ async function buildMasterRegistry(decisions, actions, metadata, outputPath, dis
   styleTitle(disputedTrace, 0, disputedTraceHeaders.length, "Полная трасса спорных загрузочных строк");
   writeMatrix(disputedTrace, 2, 0, [disputedTraceHeaders]);
   styleHeader(disputedTrace.getRangeByIndexes(2, 0, 1, disputedTraceHeaders.length));
-  const disputedTraceRows = materializationRows
-    .filter((row) => row.output_route === "SPORNO")
-    .map(disputedTraceRow);
+  const disputedTraceRows = materializationRows.filter((row) => row.output_route === "SPORNO").map((audit) => [
+    audit.pair_id, audit.audit_identity, audit.operation, audit.period, audit.source_organization,
+    audit.source_range, audit.document, audit.posting_number, audit.amount,
+    audit.reason, [
+      `AuditIdentity=${audit.audit_identity}`,
+      `CaseID=${audit.case_id}`,
+      `SourceRowID=${audit.source_row_id}`,
+      `SourceArchiveSHA256=${audit.source_archive_sha256}`,
+      `JournalSHA256=${audit.journal_sha256}`,
+      `Route=${audit.output_route}`,
+      `State=${audit.materialization_state}`,
+      `Blockers=${(audit.blockers ?? []).join(",")}`,
+    ].join(" | "),
+  ]);
   if (disputedTraceRows.length) {
     writeMatrix(disputedTrace, 3, 0, disputedTraceRows);
     styleBody(disputedTrace.getRangeByIndexes(3, 0, disputedTraceRows.length, disputedTraceHeaders.length));
@@ -2501,7 +2314,7 @@ async function buildMasterRegistry(decisions, actions, metadata, outputPath, dis
   writeMatrix(sources, 3, 0, [
     ["Сверка", metadata.reconciliationPath, metadata.reconciliationSha, metadata.sourceSheet ?? "", metadata.sourceCount, metadata.sourceBlocker || "OK"],
     ["Решения", metadata.decisionPath || "Внутренние кандидаты", metadata.decisionSha || "", "Решения", decisions.length, metadata.decisionPath ? "PINNED" : "NOT_PROVIDED"],
-    ["Правила", RULES_FILE, metadata.rulesSha, "JSON", "", "PINNED"],
+    ["Политика автопоиска", SELF_DISCOVERY_POLICY_FILE, metadata.discoveryPolicySha, "BUILT_IN", "", "PINNED"],
     ["Движок", ENGINE_FILE, metadata.engineSha, ENGINE_VERSION, "", "PINNED"],
     ["Analytical policy", ANALYTICAL_POLICY_FILE, metadata.analyticalPolicySha, "R001 pure helper", "", "PINNED"],
   ]);
@@ -2552,58 +2365,32 @@ async function buildMasterRegistry(decisions, actions, metadata, outputPath, dis
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const serviceHandoffPath = clean(args.handoff) || clean(process.env.OPIU_R001_HANDOFF_PATH);
-  const serviceRunId = clean(args["run-id"]) || clean(process.env.OPIU_R001_RUN_ID);
-  const serviceOrganizationId = clean(args["organization-id"]) || clean(process.env.OPIU_R001_ORGANIZATION_ID);
-  const serviceOrganizationName = clean(args.organization) || clean(process.env.OPIU_R001_ORGANIZATION_NAME);
-  if (!args.reconciliation && !serviceHandoffPath) {
-    throw new Error("Usage: node correction_engine_r001.mjs --reconciliation <xlsx> [--codex-input <json>] [--handoff <r001_handoff.json>] [--decisions <xlsx|json>] [--output <folder>] [--period YYYY-MM] [--organization name]");
+  const serviceOrganizationName = clean(args.organization);
+  if (!args.reconciliation) {
+    throw new Error("Usage: node correction_engine_r001.mjs --reconciliation <xlsx> [--codex-input <json>] [--output <folder>] [--period YYYY-MM] [--organization name]");
   }
-  const requestedReconciliationPath = args.reconciliation ? path.resolve(args.reconciliation) : "";
-  const requestedCodexInputPath = args["codex-input"] ? path.resolve(args["codex-input"]) : "";
-  const requestedDecisionPath = args.decisions ? path.resolve(args.decisions) : "";
-  await requireVerifiedHandoffForRulesApplications({ applicationsPath: requestedDecisionPath, handoffPath: serviceHandoffPath });
-  const handoffInput = serviceHandoffPath ? await verifiedR001HandoffInput({
-    handoffPath: serviceHandoffPath,
-    requestedRunId: serviceRunId,
-    requestedOrganizationId: serviceOrganizationId,
-    requestedOrganizationName: serviceOrganizationName,
-    requestedPeriod: args.period,
-    reconciliationPath: requestedReconciliationPath,
-    codexInputPath: requestedCodexInputPath,
-    applicationsPath: requestedDecisionPath,
-  }) : null;
-  const reconciliationPath = handoffInput?.reconciliationPath || requestedReconciliationPath;
-  const codexInputPath = handoffInput?.codexInputPath || requestedCodexInputPath;
-  const decisionPath = handoffInput?.applicationsPath || requestedDecisionPath;
-  let structuralControlProof = handoffInput?.structuralControlProof ?? null;
-  if (!structuralControlProof && clean(args["structural-control-proof"])) {
-    const [descriptorText, codexPayloadText] = await Promise.all([
-      fs.readFile(path.resolve(args["structural-control-proof"]), "utf8"),
-      fs.readFile(codexInputPath, "utf8"),
-    ]);
-    structuralControlProof = verifyStructuralControlProofDescriptor(
-      JSON.parse(descriptorText.replace(/^\uFEFF/, "")),
-      JSON.parse(codexPayloadText.replace(/^\uFEFF/, "")),
-    );
+  if (args.handoff || args.decisions) {
+    throw new Error("EXTERNAL_RULES_DISABLED: передайте только доказательную сверку; R001 сам определяет корректировки");
   }
+  const reconciliationPath = path.resolve(args.reconciliation);
+  const codexInputPath = args["codex-input"] ? path.resolve(args["codex-input"]) : "";
+  const decisionPath = "";
   const baseOutput = args.output ? path.resolve(args.output) : path.resolve("./outputs");
   const runId = timestampId();
-  const runDir = path.join(baseOutput, `OPIU_CORRECTIONS_R001_${runId}`);
+  const runDir = path.join(baseOutput, `CORR_${runId}`);
   await fs.mkdir(runDir, { recursive: true });
 
-  const [reconciliationSha, rulesSha, engineSha, analyticalPolicySha, rulesText] = await Promise.all([
+  const [reconciliationSha, discoveryPolicySha, engineSha, analyticalPolicySha] = await Promise.all([
     sha256(reconciliationPath),
-    sha256(RULES_FILE),
+    sha256(SELF_DISCOVERY_POLICY_FILE),
     sha256(ENGINE_FILE),
     sha256(ANALYTICAL_POLICY_FILE),
-    fs.readFile(RULES_FILE, "utf8"),
   ]);
-  const rules = JSON.parse(rulesText);
+  const discoveryPolicy = CORRECTION_SELF_DISCOVERY_POLICY;
   const reconciliation = await readReconciliation(reconciliationPath);
   const requestedPeriod = clean(args.period);
   const requestedAccountingPeriods = new Set(accountingPeriods(requestedPeriod));
-  const hierarchyAuthority = deriveHierarchyExactAmountAuthority({
+  const hierarchyAuthority = await deriveHierarchyExactAmountAuthority({
     treeRows: reconciliation.treeAllRecords ?? [],
     period: requestedPeriod || reconciliation.reconciliationPeriod || "",
     reconciliationOrganization: serviceOrganizationName || reconciliation.reconciliationOrganization || "",
@@ -2612,6 +2399,8 @@ async function main() {
     reconciliationSha256: reconciliationSha,
   });
   const sourceRowsForPeriod = reconciliation.sourceRecords.filter((row) => !requestedPeriod || !isExplicit(row["Дата"]) || requestedAccountingPeriods.has(inferPeriod(row["Дата"])));
+  // A semantic decision sheet owns the economic decisions for this workbook.
+  // Proven ERP rows remain evidence and must not become duplicate decisions.
   const sourceCandidates = reconciliation.embeddedDecisions?.length
     ? []
     : sourceRowsForPeriod.map((row) => candidateFromSource(row, reconciliationSha, reconciliation, requestedPeriod || reconciliation.reconciliationPeriod || "", serviceOrganizationName));
@@ -2626,19 +2415,22 @@ async function main() {
     ...(reconciliation.embeddedDecisions ?? []),
     ...(hierarchyAuthority.decisions ?? []),
   ]) {
-    candidatesById.set(stableDecisionIdentity(decision), decision);
+    // A semantic reconciliation case can contain several member legs and a
+    // control reference.  CaseID alone is therefore not a row identity.
+    const key = clean(decision.embedded_decision_identity)
+      || [clean(decision.case_id), clean(decision.pair_id), clean(decision.reconciliation_row), clean(decision.role)]
+        .filter(Boolean).join("|")
+      || stableId("CASE", decision);
+    candidatesById.set(key, decision);
   }
   const candidates = [...candidatesById.values()];
   const providedDecisions = await readDecisionFile(decisionPath, {
     organization: serviceOrganizationName || reconciliation.reconciliationOrganization,
     period: requestedPeriod || reconciliation.reconciliationPeriod || "",
   });
-  const decisions = mergeProvidedAndAutonomousDecisions(
-    providedDecisions,
-    candidates,
-  ) ?? candidates;
+  const decisions = providedDecisions ?? candidates;
   const decisionSha = decisionPath ? await sha256(decisionPath) : "";
-  const selectedOrganization = serviceOrganizationName || reconciliation.reconciliationOrganization || clean(rules.zero_sum_internal_reclassification?.organization_reference?.top_level_name);
+  const selectedOrganization = serviceOrganizationName || reconciliation.reconciliationOrganization || clean(discoveryPolicy.zero_sum_internal_reclassification?.organization_reference?.top_level_name);
   const selectedPeriod = requestedPeriod || reconciliation.reconciliationPeriod || clean(decisions[0]?.period);
   const selectedAccountingPeriods = new Set(accountingPeriods(selectedPeriod));
   const actionDecisions = decisions.filter((decision) =>
@@ -2666,13 +2458,24 @@ async function main() {
 
   const groupScopedEvaluationByDecision = new Map();
   for (const decision of trustedActionDecisions) {
-    const context = reconciliation.intalevBlockByCode?.get(clean(decision.reconciliation_row));
+    if (clean(decision.role).toUpperCase() !== "RECLASS_SOURCE") continue;
+    const embeddedContext = reconciliation.intalevBlockByCode?.get(clean(decision.reconciliation_row));
+    const context = embeddedContext?.block
+      ? embeddedContext
+      : {
+          block: clean(decision.intalev_block),
+          path: clean(decision.intalev_path),
+          intalevReference: clean(decision.intalev_source_reference),
+          intalevAmount: numberValue(decision.intalev_amount),
+        };
     if (!context?.block || !clean(decision.group || decision.source_article)) continue;
     groupScopedEvaluationByDecision.set(decision, evaluateGroupScopedDecision({
       decision,
       catalogNodes: reconciliation.erpCatalogNodes ?? [],
       intalevBlock: context.block,
       intalevPath: context.path,
+      intalevReference: context.intalevReference,
+      intalevAmount: context.intalevAmount,
     }));
   }
   const groupScopedCanonicalRows = [...groupScopedEvaluationByDecision.values()]
@@ -2697,13 +2500,12 @@ async function main() {
     erpJournalHashState: reconciliation.erpJournalHashState,
     decisionPath,
     decisionSha,
-    rulesSha,
+    discoveryPolicySha,
     engineSha,
     analyticalPolicySha,
-    r001HandoffPath: handoffInput?.handoffPath || "",
-    r001HandoffSha: handoffInput?.handoffSha256 || "",
-    structuralControlProof,
-    sourceRunId: handoffInput?.runId || serviceRunId,
+    r001HandoffPath: "",
+    r001HandoffSha: "",
+    sourceRunId: "",
     currentRunCanonicalAuthority: currentRunAuthority.audit,
     hierarchyAuthority: hierarchyAuthority.audit,
   };
@@ -2726,10 +2528,7 @@ async function main() {
     .filter((item) => Array.isArray(item.blockers) && item.blockers.length > 0)
     .map((item) => clean(item.case_id))
     .filter(Boolean));
-  const exactCanonicalRows = excludeHierarchyCoveredEconomicRows(
-    materialization.canonical_posting_rows ?? [],
-    hierarchyAuthority.covered_economic_route_case_ids ?? [],
-  )
+  const exactCanonicalRows = (materialization.canonical_posting_rows ?? [])
     .filter((row) => !failedExactCaseIds.has(clean(row.case_id)))
     .filter((row) => !groupScopedMaterializedCaseIds.has(clean(row.case_id)));
   const currentRunStandaloneRows = currentRunAuthority.canonical_posting_rows
@@ -2747,33 +2546,11 @@ async function main() {
   });
   const sparseEconomicRows = sparseEconomicMaterialization.canonical_posting_rows ?? [];
   const sparseEconomicCaseIds = new Set(sparseEconomicMaterialization.cases.map((item) => clean(item.case_id)).filter(Boolean));
-  const hierarchyCoveredEconomicRouteIds = new Set(
-    (hierarchyAuthority.covered_economic_route_case_ids ?? []).map((caseId) => clean(caseId)).filter(Boolean),
-  );
-  const handledCanonicalCaseIds = new Set([
-    ...groupScopedMaterializedCaseIds,
-    ...exactCanonicalRows.map((row) => clean(row.case_id)),
-    ...currentRunStandaloneRows.map((row) => clean(row.case_id)),
-    ...sparseEconomicRows.map((row) => clean(row.case_id)),
-    ...(hierarchyAuthority.covered_economic_route_case_ids ?? []),
-  ].filter(Boolean));
-  const fallbackSpornoRows = trustedActionDecisions
-    .filter((decision) => {
-      const materializationCase = decision?.materialization_case;
-      return materializationCase?.schema_version === "opiu-materialization-case.v1"
-        && materializationCase.output_route === "SPORNO"
-        && ["STORNO", "REPOST"].includes(materializationCase.action)
-        && ["RECLASS_SOURCE", "RECLASS_TARGET"].includes(materializationCase.role)
-        && !handledCanonicalCaseIds.has(clean(materializationCase.case_id))
-        && !hierarchyCoveredEconomicRouteIds.has(clean(materializationCase.pair_id));
-    })
-    .map((decision) => canonicalSpornoRowFromMaterializationCase(decision.materialization_case));
   const canonicalOutput = collectCanonicalFinancialOutput([
     ...currentRunStandaloneRows,
     ...exactCanonicalRows,
     ...groupScopedCanonicalRows,
     ...sparseEconomicRows,
-    ...fallbackSpornoRows,
   ], {
     filenameForRow: (row) => row.output_route === "READY"
       ? buildOwnerUploadFileName({ organization: row.source_organization, sourceDate: row.period })
@@ -2795,7 +2572,10 @@ async function main() {
     const canonicalRows = canonicalRowsByCase.get(clean(decision.case_id)) ?? [];
     const groupScoped = groupScopedEvaluationByDecision.get(decision);
     const groupTarget = groupScoped?.target_article;
-    const intalevContext = reconciliation.intalevBlockByCode?.get(clean(decision.reconciliation_row));
+    const embeddedIntalevContext = reconciliation.intalevBlockByCode?.get(clean(decision.reconciliation_row));
+    const intalevContext = embeddedIntalevContext?.block
+      ? embeddedIntalevContext
+      : { block: clean(decision.intalev_block), path: clean(decision.intalev_path) };
     return {
       ...decision,
       target_code: groupTarget?.article_code || clean(decision.target_code),
@@ -2856,11 +2636,11 @@ async function main() {
     ]);
   }
 
-  const decisionFile = path.join(runDir, "Решения_корректировок_ввод_R001.xlsx");
-  const uploadDir = path.join(runDir, "КОРРЕКТИРОВОЧНЫЕ ФАЙЛЫ ДЛЯ ЗАГРУЗКИ В 1С");
-  const disputedDir = path.join(runDir, "КОРРЕКТИРОВОЧНЫЕ ФАЙЛЫ СПОРНО");
+  const decisionFile = path.join(runDir, "Решения.xlsx");
+  const uploadDir = path.join(runDir, "ЗАГРУЗКА");
+  const disputedDir = path.join(runDir, "СПОРНО");
   const disputedOneSideDir = path.join(disputedDir, "Односторонние");
-  const deletionDir = path.join(runDir, "Файлы для удаления операций");
+  const deletionDir = path.join(runDir, "УДАЛЕНИЕ");
   const registryDir = path.join(runDir, "РЕЕСТР");
   const technicalDir = path.join(runDir, "technical");
   const period = selectedPeriod || "ПЕРИОД_НЕ_ОПРЕДЕЛЕН";
@@ -2893,17 +2673,9 @@ async function main() {
     reconciliationSha,
     requestedPeriod || period,
     serviceOrganizationName || reconciliation.reconciliationOrganization,
-    rules,
+    discoveryPolicy,
   );
   const disputedPostingRows = canonicalOutput.counters.sporno_financial_rows;
-  const rulesApplicationDecisions = trustedActionDecisions.filter((decision) => decision.rules_application_review === true);
-  if (rulesApplicationDecisions.length > 0) {
-    const applicationReview = candidateActionRows(rulesApplicationDecisions);
-    actions.deletionOperations.push(...applicationReview.deletionOperations);
-    actions.deletionPostings.push(...applicationReview.deletionPostings);
-    disputedSidecar.reviewRows.push(...applicationReview.pairRows);
-    disputedSidecar.blockers.push(...applicationReview.blockers.map((row) => `${clean(row[0])}: ${clean(row[14])}`));
-  }
   const deletionFiles = [];
   const deletionWorkbookRows = {
     deletionOperations: [],
@@ -2941,7 +2713,7 @@ async function main() {
   analyticalPolicy.counts.structurally_generated_loader_draft_rows = canonicalOutput.counters.canonical_financial_rows_total;
   await buildMasterRegistry(outputDecisions, actions, metadata, correctionsRegistryFile, disputedRowsForRegistry, disputedSidecar.reviewRows, analyticalPolicy, canonicalOutput.registry_rows);
   await buildMasterRegistry(outputDecisions, actions, metadata, discrepancyRegistryFile, disputedRowsForRegistry, disputedSidecar.reviewRows, analyticalPolicy, canonicalOutput.registry_rows);
-  const enrichedReconciliationFile = path.join(runDir, "reconciliation.xlsx");
+  const enrichedReconciliationFile = path.join(runDir, "Сверка.xlsx");
   await buildEnrichedReconciliation(reconciliation.workbook, canonicalOutput.registry_rows, enrichedReconciliationFile);
   const canonicalOutputIntegrity = verifyCanonicalOutputIntegrity(canonicalOutput, {
     workbook_records: canonicalWorkbookRecords,
@@ -2963,16 +2735,15 @@ async function main() {
   const manifest = {
     schema_version: "correction-engine-run-1.0.0",
     engine_version: ENGINE_VERSION,
-    ...scopedManifestRunIdentity(metadata.sourceRunId, runId),
+    run_id: runId,
     inputs: {
       period,
       source_run_id: metadata.sourceRunId || null,
       service_handoff: metadata.r001HandoffPath ? { path: metadata.r001HandoffPath, sha256: metadata.r001HandoffSha } : null,
-      structural_control_proof: metadata.structuralControlProof,
       reconciliation: { path: reconciliationPath, sha256: reconciliationSha, source_sheet: reconciliation.sheetName, proven_source_rows: sourceRowsForPeriod.length, candidate_operation_rows: treeRowsForPeriod.length },
       candidate_sidecar: disputedSidecar.sidecarPath ? { path: disputedSidecar.sidecarPath, sha256: disputedSidecar.sidecarSha, pair_candidates: disputedSidecar.pairCount } : null,
       decisions: decisionPath ? { path: decisionPath, sha256: decisionSha } : null,
-      rules: { path: RULES_FILE, sha256: rulesSha },
+      self_discovery_policy: { path: SELF_DISCOVERY_POLICY_FILE, sha256: discoveryPolicySha, source: "BUILT_IN_NO_RULES_SERVICE" },
       engine: { path: ENGINE_FILE, sha256: engineSha },
       analytical_policy: { path: ANALYTICAL_POLICY_FILE, sha256: analyticalPolicySha },
     },
@@ -3004,12 +2775,8 @@ async function main() {
       hierarchy_exact_authority_decisions: metadata.hierarchyAuthority?.exact_authority_decisions ?? 0,
       hierarchy_intergroup_physical_decisions: metadata.hierarchyAuthority?.intergroup_physical_decisions ?? 0,
       hierarchy_intergroup_physical_route_cases: metadata.hierarchyAuthority?.intergroup_physical_route_cases ?? 0,
+      hierarchy_residual_settlement_decisions: metadata.hierarchyAuthority?.hierarchy_residual_settlement_decisions ?? 0,
       hierarchy_paired_liability_decisions: metadata.hierarchyAuthority?.paired_liability_decisions ?? 0,
-      hierarchy_physical_evidence_decisions: metadata.hierarchyAuthority?.hierarchy_physical_evidence_decisions ?? 0,
-      hierarchy_actionable_authority_decisions: metadata.hierarchyAuthority?.actionable_hierarchy_authority_decisions ?? 0,
-      hierarchy_review_only_authority_decisions: metadata.hierarchyAuthority?.review_only_hierarchy_authority_decisions ?? 0,
-      hierarchy_overlapping_authority_cases: metadata.hierarchyAuthority?.overlapping_authority_cases ?? 0,
-      hierarchy_overlapping_authority_review_only_decisions: metadata.hierarchyAuthority?.overlapping_authority_review_only_decisions ?? 0,
       hierarchy_total_authority_decisions: metadata.hierarchyAuthority?.total_hierarchy_authority_decisions ?? 0,
       hierarchy_unresolved_positive_deltas: metadata.hierarchyAuthority?.unresolved_positive_deltas ?? 0,
       sparse_economic_route_cases: sparseEconomicMaterialization.audit.materialized_case_count,
@@ -3080,19 +2847,12 @@ export {
   buildDeletionWorkbookFileName,
   buildCorrectionsRegistryFileName,
   buildDiscrepancyRegistryFileName,
-  buildMasterRegistry,
   buildStrictUploadWorkbook,
-  canonicalLoaderContent,
   candidateActionRows,
-  disputedTraceRow,
   deletionWorkbookYearLabel,
-  exactUniqueDecisionRows,
   periodYearLabel,
   ownerUploadOrganizationLabel,
   ownerUploadDateLabel,
   isPostingAllowedForDisputedDecision,
-  excludeHierarchyCoveredEconomicRows,
-  mergeProvidedAndAutonomousDecisions,
   sidecarDisputedGroups,
-  scopedManifestRunIdentity,
 };

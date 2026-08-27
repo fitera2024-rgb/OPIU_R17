@@ -46,10 +46,22 @@ const EXACT_LIVE_INTALEV_STRUCTURAL_STATUSES = new Set([
   "ZERO_NO_ACTIVITY_DUPLICATE_PROVEN",
 ]);
 
+function businessLabel(value) {
+  return normalized(value)
+    .replace(/^\d+[_\s.-]*/u, "")
+    .replace(/^_+/u, "")
+    .replace(/^(?:адм|ком|скл|лог)[_\s.-]+/u, "")
+    .trim();
+}
+
 function provenLiveIntalevStructure(row) {
+  const financialStatus = text(row.intalev?.status);
+  const exactBusinessNode =
+    financialStatus === "AMBIGUOUS" &&
+    businessLabel(row.hierarchy_path?.at?.(-1)) === businessLabel(row.intalev_label);
   return row.intalev_hierarchy?.mapped === true &&
     normalized(row.hierarchy_source_system) === "intalev" &&
-    EXACT_LIVE_INTALEV_STRUCTURAL_STATUSES.has(text(row.intalev?.status)) &&
+    (EXACT_LIVE_INTALEV_STRUCTURAL_STATUSES.has(financialStatus) || exactBusinessNode) &&
     text(row.hierarchy_node_id) &&
     Array.isArray(row.hierarchy_path) &&
     row.hierarchy_path.length > 0 &&
@@ -363,9 +375,13 @@ export function buildHierarchyPresentationRows(rows, options = {}) {
     const unproven = structuralReasons.length > 0;
     const proof = structuralProofByCode.get(code);
     const sourceOutlineLevel = sourceLevelByCode.get(code);
+    // The physical workbook contains only the matched R-rows, not every
+    // technical wrapper from the source report.  Use the visible parent graph
+    // for indentation; retain the original source depth in the separate audit
+    // field so nothing is lost.
     const physicalOutlineLevel = unproven && !parentByCode.get(code)
       ? 0
-      : sourceOutlineLevel;
+      : depth;
 
     presentationRows.push({
       ...row,

@@ -428,8 +428,12 @@ export function buildStructuralControlInventoryV3({
       intalev: intalev ? { node_count: intalev.node_count, root_count: intalev.root_count, sources: intalev.sources } : null,
       erp: erp ? { node_count: erp.node_count, root_count: erp.root_count, sources: erp.sources } : null,
     },
-    intalev_members: blockers.length === 0 ? intalev.members : [],
-    erp_members: blockers.length === 0 ? erp.members : [],
+    // Keep the observed source members available for display and diagnosis
+    // even when the tree is blocked.  BLOCKED still prevents a binding and
+    // grants no correction/posting authority; hiding every observed member
+    // made the UI incorrectly report that the source contained no blocks.
+    intalev_members: intalev?.members ?? [],
+    erp_members: erp?.members ?? [],
     blockers: Object.freeze(blockers),
     default_behavior: "PROCESS_ALL_DISCREPANCIES",
     optional_control_only: true,

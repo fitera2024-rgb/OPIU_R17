@@ -166,28 +166,36 @@ function normalizeSafety(value) {
   const safety = object(value, "SAFETY_INVALID");
   exactKeys(safety, [
     "mode",
+    "report_only",
     "classification_only",
     "decision_type",
     "correction_authority",
     "physical_posting_authority",
     "financial_rows",
     "posting_rows",
+    "executed_posting_rows",
+    "live_posting_rows",
     "ready_to_upload",
     "release_allowed",
     "execution_allowed",
     "live_1c_allowed",
+    "live_delete_allowed",
   ], "SAFETY_KEYS_INVALID");
   if (safety.mode !== "REPORT_ONLY" ||
+      safety.report_only !== true ||
       safety.classification_only !== true ||
       safety.decision_type !== DECISION_TYPE ||
       safety.correction_authority !== false ||
       safety.physical_posting_authority !== false ||
       safety.financial_rows !== 0 ||
       safety.posting_rows !== 0 ||
+      safety.executed_posting_rows !== 0 ||
+      safety.live_posting_rows !== 0 ||
       safety.ready_to_upload !== false ||
       safety.release_allowed !== false ||
       safety.execution_allowed !== false ||
-      safety.live_1c_allowed !== false) {
+      safety.live_1c_allowed !== false ||
+      safety.live_delete_allowed !== false) {
     blocked("SAFETY_OPEN_OR_INVALID");
   }
   return Object.freeze({ ...safety });
@@ -316,16 +324,20 @@ function inactive(scope, status) {
       ...scope.organization_scope,
       period: scope.period,
       rule_count: 0,
+      report_only: true,
       classification_only: true,
       decision_type: DECISION_TYPE,
       correction_authority: false,
       physical_posting_authority: false,
       financial_rows: 0,
       posting_rows: 0,
+      executed_posting_rows: 0,
+      live_posting_rows: 0,
       ready_to_upload: false,
       release_allowed: false,
       execution_allowed: false,
       live_1c_allowed: false,
+      live_delete_allowed: false,
     }),
   });
 }
@@ -384,16 +396,20 @@ export function validateEmptyArticleBindingSettingsDocument(document, options = 
       input_size: Number(options?.source?.size ?? 0),
       rule_count: active.length,
       configured_rule_count: bindings.length,
+      report_only: true,
       classification_only: true,
       decision_type: DECISION_TYPE,
       correction_authority: false,
       physical_posting_authority: false,
       financial_rows: 0,
       posting_rows: 0,
+      executed_posting_rows: 0,
+      live_posting_rows: 0,
       ready_to_upload: false,
       release_allowed: false,
       execution_allowed: false,
       live_1c_allowed: false,
+      live_delete_allowed: false,
     }),
   });
 }

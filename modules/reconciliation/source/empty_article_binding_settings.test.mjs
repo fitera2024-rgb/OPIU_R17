@@ -38,16 +38,20 @@ function authority(overrides = {}) {
 function safety(overrides = {}) {
   return {
     mode: "REPORT_ONLY",
+    report_only: true,
     classification_only: true,
     decision_type: "NO_POSTING",
     correction_authority: false,
     physical_posting_authority: false,
     financial_rows: 0,
     posting_rows: 0,
+    executed_posting_rows: 0,
+    live_posting_rows: 0,
     ready_to_upload: false,
     release_allowed: false,
     execution_allowed: false,
     live_1c_allowed: false,
+    live_delete_allowed: false,
     ...overrides,
   };
 }
@@ -107,6 +111,10 @@ test("loader binds exact organization identity and inclusive validity range", as
     assert.equal(result.audit.physical_posting_authority, false);
     assert.equal(result.audit.financial_rows, 0);
     assert.equal(result.audit.posting_rows, 0);
+    assert.equal(result.audit.report_only, true);
+    assert.equal(result.audit.executed_posting_rows, 0);
+    assert.equal(result.audit.live_posting_rows, 0);
+    assert.equal(result.audit.live_delete_allowed, false);
 
     const rule = result.rules[0];
     assert.equal(rule.source.blank_ancestor_required, true);
@@ -168,6 +176,12 @@ test("missing settings and an out-of-range period grant no classification author
   );
   assert.equal(outOfRange.audit.status, "NO_ACTIVE_RULES_EXACT_ORGANIZATION_PERIOD");
   assert.equal(outOfRange.rules.length, 0);
+  for (const audit of [missing.audit, outOfRange.audit]) {
+    assert.equal(audit.report_only, true);
+    assert.equal(audit.executed_posting_rows, 0);
+    assert.equal(audit.live_posting_rows, 0);
+    assert.equal(audit.live_delete_allowed, false);
+  }
 });
 
 test("invalid authority, safety or financial action fails closed", () => {
@@ -177,12 +191,38 @@ test("invalid authority, safety or financial action fails closed", () => {
     }), runScope()),
     /AUTHORITY_TYPE_INVALID/,
   );
-  assert.throws(
-    () => validateEmptyArticleBindingSettingsDocument(document({
-      safety: safety({ posting_rows: 1 }),
-    }), runScope()),
-    /SAFETY_OPEN_OR_INVALID/,
-  );
+  for (const unsafe of [
+    { mode: "LIVE" },
+    { report_only: false },
+    { classification_only: false },
+    { decision_type: "POSTING" },
+    { correction_authority: true },
+    { physical_posting_authority: true },
+    { financial_rows: 1 },
+    { posting_rows: 1 },
+    { executed_posting_rows: 1 },
+    { live_posting_rows: 1 },
+    { ready_to_upload: true },
+    { release_allowed: true },
+    { execution_allowed: true },
+    { live_1c_allowed: true },
+    { live_delete_allowed: true },
+  ]) {
+    assert.throws(
+      () => validateEmptyArticleBindingSettingsDocument(document({
+        safety: safety(unsafe),
+      }), runScope()),
+      /SAFETY_OPEN_OR_INVALID/,
+    );
+  }
+  const { report_only: omittedReportOnly, ...missingSafetyKey } = safety();
+  assert.equal(omittedReportOnly, true);
+  for (const invalidKeys of [missingSafetyKey, safety({ unexpected_safety_key: false })]) {
+    assert.throws(
+      () => validateEmptyArticleBindingSettingsDocument(document({ safety: invalidKeys }), runScope()),
+      /SAFETY_KEYS_INVALID/,
+    );
+  }
   assert.throws(
     () => validateEmptyArticleBindingSettingsDocument(document({
       bindings: [binding({ mode: "FINANCIAL_REPOST" })],

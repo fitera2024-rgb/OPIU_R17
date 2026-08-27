@@ -7,7 +7,10 @@ import { projectOwnerEconomicDecisions } from "./owner_decision_projection.mjs";
 import { appendOwnerDecisionExplanationSheet } from "./owner_decision_xlsx.mjs";
 import { loadEconomicRouteProofDocument } from "./economic_route_proof_binding.mjs";
 import { materializeStructuralControlSettingsForRun } from "./structural_control_settings_binding.mjs";
-import { materializeStructuralControlInventoryV3 } from "./structural_control_inventory_v3.mjs";
+import {
+  materializeStructuralControlInventoryV3,
+  planStructuralControlInventoryV3,
+} from "./structural_control_inventory_v3.mjs";
 import { buildAuthoritativeStructuralControlInventoryHierarchyPeriod } from "./structural_control_authoritative_candidates.mjs";
 import {
   OWNER_PRESENTATION_BLOCK_EXEMPT_CLASSIFICATION,
@@ -85,6 +88,33 @@ export function authoritativeStructuralInventoryHierarchyPeriodsFromPayload(payl
   const extraPeriod = [...rowsByPeriod.keys()].find((period) => !usedPeriods.has(period));
   if (extraPeriod) blockedStructuralInventoryPeriod(extraPeriod);
   return projection;
+}
+
+export function authoritativeStructuralInventoryPlanFromPayload(payload = {}) {
+  const embeddedPlan = payload?.structural_control_inventory;
+  if (text(embeddedPlan?.schema_version) !== "opiu-structural-control-inventory.v3") return null;
+  const input = Object.freeze({
+    runId: embeddedPlan.run_id,
+    contextId: embeddedPlan.context_id,
+    organization: embeddedPlan.organization,
+    reconciliationOrganizationName: payload.organization,
+    period: payload.period,
+    hierarchyPeriods: authoritativeStructuralInventoryHierarchyPeriodsFromPayload(payload),
+    generatedAt: payload.generated_at,
+  });
+  return Object.freeze({
+    input,
+    plan: planStructuralControlInventoryV3(input),
+  });
+}
+
+export function bindAuthoritativeStructuralInventoryPlan(document, preparedPlan) {
+  if (!preparedPlan) return document;
+  if (!document || typeof document !== "object" || Array.isArray(document)) {
+    throw new Error("STRUCTURAL_CONTROL_INVENTORY_PLAN_DOCUMENT_INVALID");
+  }
+  document.structural_control_inventory = preparedPlan.plan.audit;
+  return document;
 }
 
 function parseArgs(argv) {
@@ -268,6 +298,7 @@ export async function enrichOwnerDecisionOutputs({ reportPath, codexPath, manife
   const [payloadText, policyText] = await Promise.all([fs.readFile(codexPath, "utf8"), fs.readFile(policyPath, "utf8")]);
   const payload = JSON.parse(payloadText.replace(/^\uFEFF/, ""));
   const policy = JSON.parse(policyText.replace(/^\uFEFF/, ""));
+  const structuralInventoryPlan = authoritativeStructuralInventoryPlanFromPayload(payload);
   const projection = projectOwnerEconomicDecisions(payload, { ownerAcceptancePolicy: policy?.accepted_classification_gaps ?? [] });
   const missing = nonzeroRows(payload).filter((row) =>
     !linkedCaseIds(projection, row.period, row.code).length
@@ -316,6 +347,7 @@ export async function enrichOwnerDecisionOutputs({ reportPath, codexPath, manife
     };
   });
   payload.report_sha256 = reportSha;
+  bindAuthoritativeStructuralInventoryPlan(payload, structuralInventoryPlan);
   await writeJson(codexPath, payload);
   const codexSha = await sha256(codexPath);
 
@@ -340,18 +372,12 @@ export async function enrichOwnerDecisionOutputs({ reportPath, codexPath, manife
         safety: projection.safety,
         explanation_sheet: worksheet.sheet_name,
       };
+      bindAuthoritativeStructuralInventoryPlan(manifest, structuralInventoryPlan);
       await writeJson(manifestPath, manifest);
-      const structuralPlan = payload?.structural_control_inventory;
-      if (text(structuralPlan?.schema_version) === "opiu-structural-control-inventory.v3") {
+      if (structuralInventoryPlan) {
         structuralInventory = await materializeStructuralControlInventoryV3({
           outputDirectory: path.dirname(reportPath),
-          runId: structuralPlan.run_id,
-          contextId: structuralPlan.context_id,
-          organization: structuralPlan.organization,
-          reconciliationOrganizationName: payload.organization,
-          period: payload.period,
-          hierarchyPeriods: authoritativeStructuralInventoryHierarchyPeriodsFromPayload(payload),
-          generatedAt: payload.generated_at,
+          ...structuralInventoryPlan.input,
           currentRunFiles: {
             reportPath,
             codexInputPath: codexPath,

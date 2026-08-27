@@ -7,6 +7,8 @@ import test from "node:test";
 
 import {
   authoritativeStructuralInventoryHierarchyPeriodsFromPayload,
+  authoritativeStructuralInventoryPlanFromPayload,
+  bindAuthoritativeStructuralInventoryPlan,
 } from "./service_r005_owner_wrapper.mjs";
 import {
   materializeStructuralControlInventoryV3,
@@ -151,14 +153,13 @@ test("wrapper preserves production numeric period_rows as exact selectable inven
   const rawPlan = planStructuralControlInventoryV3(
     inventoryInput(payload, payload.hierarchy_periods),
   );
-  const authoritativePeriods = authoritativeStructuralInventoryHierarchyPeriodsFromPayload(payload);
-  const embeddedPlan = planStructuralControlInventoryV3(
-    inventoryInput(payload, authoritativePeriods),
-  );
-  payload.structural_control_inventory = embeddedPlan.audit;
+  payload.structural_control_inventory = rawPlan.audit;
+  const preparedPlan = authoritativeStructuralInventoryPlanFromPayload(payload);
+  const authoritativePeriods = preparedPlan.input.hierarchyPeriods;
 
-  assert.notDeepEqual(rawPlan.audit.hierarchy_versions, embeddedPlan.audit.hierarchy_versions);
-  assert.notDeepEqual(rawPlan.audit.member_hashes, embeddedPlan.audit.member_hashes);
+  assert.notEqual(rawPlan.inventory_id, preparedPlan.plan.inventory_id);
+  assert.notDeepEqual(rawPlan.audit.hierarchy_versions, preparedPlan.plan.audit.hierarchy_versions);
+  assert.notDeepEqual(rawPlan.audit.member_hashes, preparedPlan.plan.audit.member_hashes);
   const authoritativeProjection = authoritativePeriods[0]
     .structural_control_authoritative_projection;
   const expectedCents = [12345678, -234567, 89012];
@@ -197,7 +198,7 @@ test("wrapper preserves production numeric period_rows as exact selectable inven
     const codexDocument = {
       organization: payload.organization,
       period: payload.period,
-      structural_control_inventory: embeddedPlan.audit,
+      structural_control_inventory: rawPlan.audit,
       report_path: reportPath,
       report_sha256: reportHash,
     };
@@ -206,7 +207,7 @@ test("wrapper preserves production numeric period_rows as exact selectable inven
     const manifestDocument = {
       organization: payload.organization,
       period: payload.period,
-      structural_control_inventory: embeddedPlan.audit,
+      structural_control_inventory: rawPlan.audit,
       output_path: reportPath,
       output_sha256: reportHash,
       codex_input_path: codexInputPath,
@@ -214,14 +215,39 @@ test("wrapper preserves production numeric period_rows as exact selectable inven
     };
     await fs.writeFile(manifestPath, JSON.stringify(manifestDocument), "utf8");
 
+    const blockedRawPlan = await materializeStructuralControlInventoryV3({
+      outputDirectory: directory,
+      ...preparedPlan.input,
+      currentRunFiles: { reportPath, codexInputPath, manifestPath },
+    });
+    assert.equal(blockedRawPlan.status, "BLOCKED");
+    assert.equal(blockedRawPlan.audit.verified_binding_written, false);
+    assert.ok(blockedRawPlan.inventory.current_run_provenance.verification_blockers.includes(
+      "CODEX_INPUT_STRUCTURAL_PLAN_SCOPE_MISMATCH",
+    ));
+    assert.ok(blockedRawPlan.inventory.current_run_provenance.verification_blockers.includes(
+      "MANIFEST_STRUCTURAL_PLAN_SCOPE_MISMATCH",
+    ));
+
+    bindAuthoritativeStructuralInventoryPlan(payload, preparedPlan);
+    bindAuthoritativeStructuralInventoryPlan(codexDocument, preparedPlan);
+    const authoritativeCodexBytes = Buffer.from(JSON.stringify(codexDocument), "utf8");
+    await fs.writeFile(codexInputPath, authoritativeCodexBytes);
+    bindAuthoritativeStructuralInventoryPlan(manifestDocument, preparedPlan);
+    manifestDocument.codex_input_sha256 = sha256(authoritativeCodexBytes);
+    await fs.writeFile(manifestPath, JSON.stringify(manifestDocument), "utf8");
+
     const result = await materializeStructuralControlInventoryV3({
       outputDirectory: directory,
-      ...inventoryInput(payload, authoritativePeriods),
+      ...preparedPlan.input,
       currentRunFiles: { reportPath, codexInputPath, manifestPath },
     });
     assert.equal(result.status, "VERIFIED");
     assert.deepEqual(result.inventory.current_run_provenance.verification_blockers, []);
-    assert.equal(result.inventory.inventory_id, embeddedPlan.inventory_id);
+    assert.equal(result.inventory.inventory_id, preparedPlan.plan.inventory_id);
+    assert.deepEqual(payload.structural_control_inventory, preparedPlan.plan.audit);
+    assert.deepEqual(codexDocument.structural_control_inventory, preparedPlan.plan.audit);
+    assert.deepEqual(manifestDocument.structural_control_inventory, preparedPlan.plan.audit);
     assert.equal(result.inventory.intalev_members.length, 3);
     assert.equal(result.inventory.erp_members.length, 3);
     assert.deepEqual(
@@ -247,6 +273,56 @@ test("wrapper preserves production numeric period_rows as exact selectable inven
   }
 });
 
+test("wrapper keeps foreign reconciliation scope blocked after authoritative plan binding", async () => {
+  const payload = realWrapperPayload();
+  const rawPlan = planStructuralControlInventoryV3(
+    inventoryInput(payload, payload.hierarchy_periods),
+  );
+  payload.structural_control_inventory = rawPlan.audit;
+  const preparedPlan = authoritativeStructuralInventoryPlanFromPayload(payload);
+  bindAuthoritativeStructuralInventoryPlan(payload, preparedPlan);
+
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "opiu-wrapper-v3-foreign-scope-"));
+  try {
+    const reportPath = path.join(directory, "october.xlsx");
+    const codexInputPath = path.join(directory, "october.codex-input.json");
+    const manifestPath = path.join(directory, "october.manifest.json");
+    const reportBytes = Buffer.from("real-format-report-placeholder", "utf8");
+    await fs.writeFile(reportPath, reportBytes);
+    const reportHash = sha256(reportBytes);
+    const codexDocument = bindAuthoritativeStructuralInventoryPlan({
+      organization: payload.organization,
+      period: payload.period,
+      report_path: reportPath,
+      report_sha256: reportHash,
+    }, preparedPlan);
+    const codexBytes = Buffer.from(JSON.stringify(codexDocument), "utf8");
+    await fs.writeFile(codexInputPath, codexBytes);
+    const manifestDocument = bindAuthoritativeStructuralInventoryPlan({
+      organization: "3 Сахалин",
+      period: payload.period,
+      output_path: reportPath,
+      output_sha256: reportHash,
+      codex_input_path: codexInputPath,
+      codex_input_sha256: sha256(codexBytes),
+    }, preparedPlan);
+    await fs.writeFile(manifestPath, JSON.stringify(manifestDocument), "utf8");
+
+    const result = await materializeStructuralControlInventoryV3({
+      outputDirectory: directory,
+      ...preparedPlan.input,
+      currentRunFiles: { reportPath, codexInputPath, manifestPath },
+    });
+    assert.equal(result.status, "BLOCKED");
+    assert.equal(result.audit.verified_binding_written, false);
+    assert.ok(result.inventory.current_run_provenance.verification_blockers.includes(
+      "MANIFEST_RECONCILIATION_SCOPE_MISMATCH",
+    ));
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("wrapper keeps the explicit nested amount compatibility shape", () => {
   const numericProjection = authoritativeStructuralInventoryHierarchyPeriodsFromPayload(
     realWrapperPayload(),
@@ -266,5 +342,21 @@ test("wrapper authoritative projection remains fail-closed on period_rows scope 
   assert.throws(
     () => authoritativeStructuralInventoryHierarchyPeriodsFromPayload(payload),
     /BLOCKED_STRUCTURAL_CONTROL_INVENTORY_PERIOD_BINDING:2025-10/,
+  );
+});
+
+test("wrapper does not turn a NOT_PASS source hierarchy into an authoritative plan", () => {
+  const payload = realWrapperPayload();
+  payload.hierarchy_periods[0].source_hierarchy_status = "BLOCKED";
+  payload.hierarchy_periods[0].intalev_tree.status = "BLOCKED";
+  const rawPlan = planStructuralControlInventoryV3(
+    inventoryInput(payload, payload.hierarchy_periods),
+  );
+  payload.structural_control_inventory = rawPlan.audit;
+
+  assert.equal(rawPlan.status, "BLOCKED");
+  assert.throws(
+    () => authoritativeStructuralInventoryPlanFromPayload(payload),
+    /BLOCKED_STRUCTURAL_CONTROL_AUTHORITATIVE_CANDIDATES_TREE_NOT_PROVEN:2025-10:INTALEV/,
   );
 });

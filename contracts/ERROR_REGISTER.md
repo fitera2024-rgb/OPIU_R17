@@ -290,15 +290,15 @@
 ### STR-001 — wrapper оставляет raw structural plan при authoritative inventory
 
 - Дата: `27.08.2026`
-- Статус: `NEW`
+- Статус: `IMPLEMENTED`
 - Сообщил: авторитетный acceptance и независимый structural review.
 - Наблюдаемое поведение: core plan строится по raw hierarchy, wrapper материализует inventory по другой authoritative projection, но raw plan остаётся в Codex input и manifest; возникают оба `*_STRUCTURAL_PLAN_SCOPE_MISMATCH` и `CURRENT_RUN_SCOPE_NOT_VERIFIED`.
 - Ожидаемое поведение: wrapper один раз строит authoritative hierarchy/plan и записывает один exact inventory ID и hashes в Codex input, manifest и materialized inventory; validators не ослабляются.
 - Затронутые пункты контракта: §§4–6, 10, 13–14; A01, A02, A04, A07, A09.
 - Допустимый scope: `service_r005_owner_wrapper.mjs` и `service_r005_owner_wrapper_inventory.test.mjs`.
 - Обязательный регрессионный тест: production-shape raw plan переписывается authoritative plan; stale/foreign/scope drift остаются BLOCKED; Сахалин NOT_PASS не обходится.
-- Реализация: ожидается.
-- Протокол проверки: ожидается.
+- Реализация: wrapper вычисляет authoritative hierarchy/input/plan один раз, связывает один exact plan с Codex input и manifest и передаёт тот же frozen input materializer; validators не изменены.
+- Протокол проверки: wrapper `5/5 PASS`; wrapper+inventory+settings `17/17 PASS`; полный relevant R005 исполнителя `221/221 PASS`; independent targeted `17/17 PASS`; foreign scope и NOT_PASS остаются BLOCKED.
 
 ### ARCH-001 — production pipeline всё ещё требует Rules stage
 

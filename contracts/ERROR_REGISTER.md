@@ -379,3 +379,29 @@
 - Обязательный регрессионный тест: чистый A/B build включает каталог с exact SHA-256; independent verifier и два relocation-smoke запуска проходят; `/api/health` и `/api/bootstrap` подтверждают `REPORT_ONLY`, `rules_service=false`, posting/live/executed `0`; `/api/organizations` содержит оба контрольных selectable узла.
 - Реализация: ожидается.
 - Протокол проверки: ожидается.
+
+### R005-011 — допустимые уровни Excel и `/` внутри статьи ошибочно блокируют иерархию Сахалина
+
+- Дата: `28.08.2026`
+- Статус: `IMPLEMENTED`
+- Сообщил: packaged-EXE acceptance Сахалина за январь 2025.
+- Наблюдаемое поведение: R005 сохраняет все `357` узлов Инталев и `259` узлов ERP, но Service останавливает цепочку на `R005_INVENTORY` со статусом `BLOCKED_STRUCTURAL_INVENTORY`. В источнике выявлены `16` ложных `BROKEN_PATH` и `15` ложных `ORPHAN_NODE`: часть строк использует допустимый скачок outline-level через отсутствующий промежуточный уровень, а статья `Контур.Edi / тариф Общий (для остальных ТС)` содержит разделитель `/` как часть собственного наименования.
+- Ожидаемое поведение: путь строится по ближайшему предыдущему фактическому родителю меньшего outline-level, пустые уровни не создают пустых сегментов, а наименование с `/` остаётся одним сегментом. Проверенная структура проходит inventory; все фактические блоки и детали сохраняются. Неоднозначная физическая связь Сахалина остаётся `СПОРНО`, не получает READY/posting authority.
+- Затронутые пункты контракта: §§4–6, 9–11, 13–14; A01–A04, A10–A12, A14.1.
+- Допустимый scope: нормализация path segments/parent identity при чтении фактического дерева Инталев, focused regression и повторный packaged acceptance; финансовое сопоставление, Rules Service, approved mappings и safety gates не меняются.
+- Обязательный регрессионный тест: скачок outline-level `0→2` связывается с ближайшим фактическим родителем; label с ` / ` не расщепляется; Сахалин создаёт verified structural inventory, продолжает R005→R001, сохраняет четыре контрольных блока и остаётся `READY=0` без утверждённого реестра.
+- Реализация: outline хранится массивом атомарных сегментов и связывается точным identity ближайшего предшествующего фактического родителя меньшего уровня; допустимый gap помечается `outline_gap_collapsed` и входит в compact hierarchy/inventory SHA. Наименование с `/` не разбирается как путь. Реальный ведущий неродительский уровень без предшественника остаётся `ORPHAN_NODE`.
+- Протокол проверки: focused outline/compact/wrapper `9/9 PASS`; полный R005 `231 PASS`, `0 FAIL`, `1` штатный skip. Реальный Сахалин `2025-01`: structural inventory v3 `VERIFIED`, blocker codes `0`, четыре расходных блока сохранены, финансовые строки `0`, статус по-прежнему безопасный `BLOCKED_PROFILE_REVIEW_REQUIRED` до пользовательского утверждения.
+
+### R005-012 — Codex input не содержит обязательную связь с итоговым XLSX
+
+- Дата: `28.08.2026`
+- Статус: `IMPLEMENTED`
+- Сообщил: packaged-EXE acceptance 9 УК за октябрь 2025.
+- Наблюдаемое поведение: R005 формирует `VERIFIED` structural inventory v3 без blocker-кодов, но Service останавливает цепочку на `R005_INVENTORY`. Первый отказ `validateStructuralPlanCrossLinks`: в `reconciliation.codex-input.json` отсутствуют верхнеуровневые `output_path` и `output_sha256`, хотя manifest содержит корректную пару и все предыдущие проверки scope/SHA/provenance проходят.
+- Ожидаемое поведение: Codex input и manifest оба связывают один и тот же итоговый XLSX точным каноническим путём и SHA-256 после финального изменения книги owner-wrapper; Service принимает current-run anchor и продолжает прямой R005→R001.
+- Затронутые пункты контракта: §§3.1, 4–7, 10–14; A01–A04, A07, A10–A14.
+- Допустимый scope: `opiu_reconcile.mjs`, `service_r005_owner_wrapper.mjs`, focused current-run cross-link tests; structural validator, финансовая логика, Rules Service и safety gates не ослабляются.
+- Обязательный регрессионный тест: Codex input и manifest содержат одинаковые `output_path`/`output_sha256`; SHA соответствует финальной книге; Codex SHA в manifest соответствует финальному Codex input; UK и Сахалин проходят current-run anchor, а stale/missing/wrong path/SHA блокируются.
+- Реализация: core создаёт обе пары `report_*`/`output_*`; owner-wrapper после финального изменения XLSX повторно вычисляет SHA и атомарно перепривязывает Codex input, затем вычисляет SHA Codex input и перепривязывает manifest. Только после этого материализуются inventory/binding; строгий Go-validator не изменён.
+- Протокол проверки: helper/inventory regression `6/6 PASS`; полный R005 `231 PASS`, `0 FAIL`, `1` штатный skip; полный R001 `256/256 PASS`; полный Go service `PASS`. На реальном Сахалине Codex/manifest paths совпали с финальными файлами, обе report/output SHA совпали с фактическим XLSX, manifest Codex SHA совпал с фактическим Codex input; inventory v3 `VERIFIED` и `verification_blockers=[]`.

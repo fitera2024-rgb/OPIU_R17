@@ -30,6 +30,7 @@ import {
   gateResolvedResultBySourceTree,
   serializeSourceTreeProof,
 } from "./source_tree_proof.mjs";
+import { advanceIntalevOutlinePath } from "./intalev_outline_path.mjs";
 import {
   bindTemplateRowsToTrees,
   buildErpOutlineTree,
@@ -2451,15 +2452,20 @@ async function parseIntalevWorkbook(sourcePath, period, workDir, expectedHash) {
       ? "<пустое значение>"
       : sourceLabelRaw;
     const level = outline.get(excelRow) ?? 0;
-    stack[level] = label;
-    stack.length = level + 1;
-    const fullPath = stack.join(" / ");
-    const parentPath = level > 0 ? stack.slice(0, level).join(" / ") : "";
+    const sourceIdentity = `${expectedHash}|${sheet.name}|${excelRow}`;
+    const outlinePath = advanceIntalevOutlinePath(stack, {
+      level,
+      label,
+      identity: sourceIdentity,
+    });
+    const fullPath = outlinePath.pathParts.join(" / ");
+    const parentPath = outlinePath.parentPathParts.join(" / ");
     nodes.push({
       period,
       month: period,
-      source_identity: `${expectedHash}|${sheet.name}|${excelRow}`,
+      source_identity: sourceIdentity,
       source_identity_scope: `${expectedHash}|${sheet.name}|${period}`,
+      parent_identity: outlinePath.parentIdentity,
       level,
       label,
       source_label_raw: sourceLabelRaw,
@@ -2469,8 +2475,11 @@ async function parseIntalevWorkbook(sourcePath, period, workDir, expectedHash) {
       article_classification: articleClassification,
       normalized_label: normalizeLabel(label),
       full_path: fullPath,
+      path_parts: [...outlinePath.pathParts],
       normalized_path: normalizeLabel(fullPath),
       parent_path: parentPath,
+      parent_path_parts: [...outlinePath.parentPathParts],
+      outline_gap_collapsed: outlinePath.outlineGapCollapsed,
       value: sourceAmount,
       amount: sourceAmount,
       source_cell_present: true,
@@ -2492,10 +2501,12 @@ async function parseIntalevWorkbook(sourcePath, period, workDir, expectedHash) {
   const hierarchyTree = buildIntalevParentTree(
     nodes.map((node) => ({
       identity: `${expectedHash}|${sheet.name}|${node.row}`,
+      parent_identity: node.parent_identity,
       source_identity_scope: `${expectedHash}|${sheet.name}|${period}`,
       label: node.label,
-      full_path: node.full_path,
-      parent_path: node.parent_path,
+      path_parts: node.path_parts,
+      parent_path_parts: node.parent_path_parts,
+      outline_gap_collapsed: node.outline_gap_collapsed,
       source_row_role: "OUTLINE_ROW",
       aggregation_contract: "UNPROVEN",
       amount: node.value,
@@ -6709,6 +6720,7 @@ const CODEX_HIERARCHY_NODE_FIELDS = Object.freeze([
   "level",
   "hierarchy_level",
   "source_outline_level",
+  "outline_gap_collapsed",
   "is_group",
   "immediate_children",
   "direct_total",
@@ -7483,6 +7495,8 @@ export function buildCodexInputPayload({
     generated_at: generatedAt,
     report_path: outputPath,
     report_sha256: outputSha256,
+    output_path: outputPath,
+    output_sha256: outputSha256,
     organization,
     organization_code: profile.organizationCode,
     profile_id: profile.id,

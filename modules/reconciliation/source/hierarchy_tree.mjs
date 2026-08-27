@@ -597,7 +597,7 @@ export function buildIntalevParentTree(rows, options = {}) {
       }
       continue;
     }
-    let parts = pathParts(row.full_path ?? row.path);
+    let parts = pathParts(row.path_parts ?? row.full_path ?? row.path);
     const pathWasSupplied = parts.length > 0;
     const group = firstText(row.group_path, row.group);
     const parentIdentityRef = parentReference(firstText(
@@ -607,7 +607,8 @@ export function buildIntalevParentTree(rows, options = {}) {
       row.parent_code,
       row.parent,
     ));
-    const parentPathRef = firstText(row.parent_path);
+    const parentPathParts = pathParts(row.parent_path_parts ?? row.parent_path);
+    const parentPathRef = parentPathParts.length > 0 ? parentPathParts.join(" / ") : "";
     const parentRef = parentIdentityRef || parentPathRef;
     if (parts.length === 0 && !parentRef) {
       parts = group && normalized(group) !== normalized(label) ? [group, label] : [label];
@@ -626,6 +627,7 @@ export function buildIntalevParentTree(rows, options = {}) {
       aggregation_contract: firstText(row.aggregation_contract),
       semantic_type: firstText(row.semantic_type),
       semantic_type_status: firstText(row.semantic_type_status),
+      outline_gap_collapsed: bool(row.outline_gap_collapsed),
       uuid: sourceIdentity,
       parent_uuid: parentRef,
       path_parts: parts,
@@ -634,6 +636,7 @@ export function buildIntalevParentTree(rows, options = {}) {
       path_was_supplied: pathWasSupplied,
       parent_input_index: null,
       parent_ref: parentRef,
+      parent_path_parts: parentPathParts,
       parent_ref_kind: parentIdentityRef ? "IDENTITY" : parentPathRef ? "PATH" : "",
       explicit_group: bool(row.is_group ?? row.group_flag),
       direct_total: money(row.amount ?? row.value ?? row.direct_total),
@@ -707,7 +710,7 @@ export function buildIntalevParentTree(rows, options = {}) {
       }
       candidates = identities.get(normalized(draft.parent_ref)) ?? [];
     } else if (draft.parent_ref_kind === "PATH") {
-      candidates = pathIndexes.get(pathKey(pathParts(draft.parent_ref))) ?? [];
+      candidates = pathIndexes.get(pathKey(draft.parent_path_parts)) ?? [];
     } else if (expectedParentKey && options.parentIdentityOnly !== true) {
       candidates = pathIndexes.get(expectedParentKey) ?? [];
     }
@@ -810,6 +813,7 @@ export function buildIntalevParentTree(rows, options = {}) {
 
   for (const draft of drafts) {
     delete draft.parent_ref;
+    delete draft.parent_path_parts;
     delete draft.path_was_supplied;
   }
   const tree = finalizeTree(system, drafts, blockers, options);

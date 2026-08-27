@@ -9,6 +9,8 @@ import {
   authoritativeStructuralInventoryHierarchyPeriodsFromPayload,
   authoritativeStructuralInventoryPlanFromPayload,
   bindAuthoritativeStructuralInventoryPlan,
+  bindFinalManifestCrossLinks,
+  bindFinalReportCrossLinks,
 } from "./service_r005_owner_wrapper.mjs";
 import {
   materializeStructuralControlInventoryV3,
@@ -140,6 +142,45 @@ function inventoryInput(payload, hierarchyPeriods) {
 function sha256(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex").toUpperCase();
 }
+
+test("wrapper binds Codex input to the final owner-enriched report", () => {
+  const reportPath = path.resolve("final-owner-report.xlsx");
+  const reportSha256 = "c".repeat(64);
+  const document = bindFinalReportCrossLinks({ organization: "9 Управляющая компания" }, {
+    reportPath,
+    reportSha256,
+  });
+  assert.equal(document.report_path, reportPath);
+  assert.equal(document.output_path, reportPath);
+  assert.equal(document.report_sha256, reportSha256.toUpperCase());
+  assert.equal(document.output_sha256, reportSha256.toUpperCase());
+  assert.throws(
+    () => bindFinalReportCrossLinks({}, { reportPath, reportSha256: "NOT-A-SHA" }),
+    /R005_CURRENT_RUN_REPORT_BINDING_INVALID/,
+  );
+
+  const codexInputPath = path.resolve("final-owner-report.codex-input.json");
+  const codexInputSha256 = "d".repeat(64);
+  const manifest = bindFinalManifestCrossLinks({}, {
+    reportPath,
+    reportSha256,
+    codexInputPath,
+    codexInputSha256,
+  });
+  assert.equal(manifest.output_path, reportPath);
+  assert.equal(manifest.output_sha256, reportSha256.toUpperCase());
+  assert.equal(manifest.codex_input_path, codexInputPath);
+  assert.equal(manifest.codex_input_sha256, codexInputSha256.toUpperCase());
+  assert.throws(
+    () => bindFinalManifestCrossLinks({}, {
+      reportPath,
+      reportSha256,
+      codexInputPath,
+      codexInputSha256: "NOT-A-SHA",
+    }),
+    /R005_CURRENT_RUN_CODEX_BINDING_INVALID/,
+  );
+});
 
 test("wrapper preserves production numeric period_rows as exact selectable inventory groups", async () => {
   const payload = realWrapperPayload();

@@ -117,6 +117,39 @@ export function bindAuthoritativeStructuralInventoryPlan(document, preparedPlan)
   return document;
 }
 
+export function bindFinalReportCrossLinks(document, { reportPath, reportSha256 } = {}) {
+  if (!document || typeof document !== "object" || Array.isArray(document)) {
+    throw new Error("R005_CURRENT_RUN_DOCUMENT_INVALID");
+  }
+  const exactPath = path.resolve(text(reportPath));
+  const exactSha256 = text(reportSha256).toUpperCase();
+  if (!text(reportPath) || !/^[A-F0-9]{64}$/.test(exactSha256)) {
+    throw new Error("R005_CURRENT_RUN_REPORT_BINDING_INVALID");
+  }
+  document.report_path = exactPath;
+  document.report_sha256 = exactSha256;
+  document.output_path = exactPath;
+  document.output_sha256 = exactSha256;
+  return document;
+}
+
+export function bindFinalManifestCrossLinks(document, {
+  reportPath,
+  reportSha256,
+  codexInputPath,
+  codexInputSha256,
+} = {}) {
+  bindFinalReportCrossLinks(document, { reportPath, reportSha256 });
+  const exactCodexPath = path.resolve(text(codexInputPath));
+  const exactCodexSha256 = text(codexInputSha256).toUpperCase();
+  if (!text(codexInputPath) || !/^[A-F0-9]{64}$/.test(exactCodexSha256)) {
+    throw new Error("R005_CURRENT_RUN_CODEX_BINDING_INVALID");
+  }
+  document.codex_input_path = exactCodexPath;
+  document.codex_input_sha256 = exactCodexSha256;
+  return document;
+}
+
 function parseArgs(argv) {
   const result = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -346,7 +379,7 @@ export async function enrichOwnerDecisionOutputs({ reportPath, codexPath, manife
       owner_projection_causal_blocker: coverage?.causal_blocker ?? "",
     };
   });
-  payload.report_sha256 = reportSha;
+  bindFinalReportCrossLinks(payload, { reportPath, reportSha256: reportSha });
   bindAuthoritativeStructuralInventoryPlan(payload, structuralInventoryPlan);
   await writeJson(codexPath, payload);
   const codexSha = await sha256(codexPath);
@@ -355,8 +388,12 @@ export async function enrichOwnerDecisionOutputs({ reportPath, codexPath, manife
   if (manifestPath) {
     try {
       const manifest = JSON.parse((await fs.readFile(manifestPath, "utf8")).replace(/^\uFEFF/, ""));
-      manifest.output_sha256 = reportSha;
-      manifest.codex_input_sha256 = codexSha;
+      bindFinalManifestCrossLinks(manifest, {
+        reportPath,
+        reportSha256: reportSha,
+        codexInputPath: codexPath,
+        codexInputSha256: codexSha,
+      });
       manifest.owner_decisions = {
         schema: projection.schema,
         case_count: projection.cases.length,

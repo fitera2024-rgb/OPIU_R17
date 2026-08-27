@@ -37,6 +37,7 @@ test("codex hierarchy keeps decision fields and removes repeated heavy trace", (
         hierarchy_status: "LEAF",
         article_classification: "EMPTY",
         source_outline_level: 2,
+        outline_gap_collapsed: true,
         raw_trace: heavy,
       },
     ],
@@ -49,6 +50,7 @@ test("codex hierarchy keeps decision fields and removes repeated heavy trace", (
   assert.deepEqual(compact.nodes[0].immediate_children, ["N2"]);
   assert.equal(compact.nodes[0].source.sheet, "ОПИУ");
   assert.equal(compact.nodes[1].article_classification, "EMPTY");
+  assert.equal(compact.nodes[1].outline_gap_collapsed, true);
   assert.equal(compact.codex_compaction.physical_operation_evidence_location, "operation_evidence");
   assert.equal(Object.hasOwn(compact.nodes[0], "operation_rows"), false);
   assert.equal(Object.hasOwn(compact.nodes[1], "raw_trace"), false);

@@ -421,9 +421,19 @@ def _resolve_relative_dependency(source: str, specifier: str) -> list[str]:
 
 def verify_runtime_dependency_closure(root: Path) -> dict[str, Any]:
     files = {item.relative_to(root).as_posix(): item for item in safe_files(root)}
+    scan_files = {
+        relative: item for relative, item in files.items()
+        if not relative.startswith("node_modules/")
+    }
+    directories = {
+        parent.as_posix()
+        for relative in files
+        for parent in PurePosixPath(relative).parents
+        if parent.as_posix() not in {"", "."}
+    }
     checked = 0
     edges: list[dict[str, str]] = []
-    for relative, item in sorted(files.items()):
+    for relative, item in sorted(scan_files.items()):
         if PurePosixPath(relative).suffix.lower() not in {".mjs", ".js", ".cjs"}:
             continue
         try:
@@ -437,12 +447,17 @@ def verify_runtime_dependency_closure(root: Path) -> dict[str, Any]:
             checked += 1
             candidates = _resolve_relative_dependency(relative, specifier)
             matched = next((candidate for candidate in candidates if candidate in files), None)
+            if matched is None and specifier.split("?", 1)[0].split("#", 1)[0].endswith("/"):
+                directory = next((candidate for candidate in candidates[:1] if candidate in directories), None)
+                if directory is not None:
+                    matched = directory + "/"
             if matched is None:
                 raise BuildError(f"RUNTIME_RELATIVE_IMPORT_MISSING:{relative}:{specifier}")
             edges.append({"source": relative, "specifier": specifier, "target": matched})
     return {
         "status": "PASS", "logical_root": RUNTIME_LOGICAL_ROOT,
         "edge_paths": RUNTIME_EDGE_PATH_FORMAT,
+        "excluded_exact_inventory_roots": ["node_modules"],
         "relative_dependency_count": checked, "edges": edges,
     }
 

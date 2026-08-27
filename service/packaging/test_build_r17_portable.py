@@ -174,6 +174,33 @@ def test_runtime_dependency_closure_rejects_missing_relative_import() -> None:
             BUILDER.verify_runtime_dependency_closure(runtime)
 
 
+def test_runtime_dependency_closure_accepts_existing_directory_url() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime = Path(raw)
+        source = runtime / "modules/pkg/wasm/native.js"
+        source.parent.mkdir(parents=True)
+        source.write_text('const base = new URL("./", import.meta.url);\n', encoding="utf-8")
+        result = BUILDER.verify_runtime_dependency_closure(runtime)
+        assert result["relative_dependency_count"] == 1
+        assert result["edges"] == [{
+            "source": "modules/pkg/wasm/native.js",
+            "specifier": "./",
+            "target": "modules/pkg/wasm/",
+        }]
+
+
+def test_runtime_dependency_closure_excludes_exact_inventory_node_modules_sources() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime = Path(raw)
+        bundled = runtime / "node_modules/jszip/dist/jszip.js"
+        bundled.parent.mkdir(parents=True)
+        bundled.write_text('const internal = require("../base64");\n', encoding="utf-8")
+        result = BUILDER.verify_runtime_dependency_closure(runtime)
+        assert result["excluded_exact_inventory_roots"] == ["node_modules"]
+        assert result["relative_dependency_count"] == 0
+        assert result["edges"] == []
+
+
 def test_two_independent_zip_producers_are_byte_identical_atomic_and_no_overwrite() -> None:
     policy = BUILDER.load_policy()
     with tempfile.TemporaryDirectory() as raw:

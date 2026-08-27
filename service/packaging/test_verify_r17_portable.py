@@ -294,6 +294,7 @@ def test_builder_closure_round_trips_through_independent_verifier_with_real_impo
         assert builder_closure == verifier_closure == {
             "status": "PASS", "logical_root": "runtime",
             "edge_paths": "POSIX_RELATIVE_TO_LOGICAL_ROOT",
+            "excluded_exact_inventory_roots": ["node_modules"],
             "relative_dependency_count": 1,
             "edges": [{
                 "source": "modules/corrections/source/safe.mjs",
@@ -327,6 +328,18 @@ def test_builder_closure_round_trips_through_independent_verifier_with_real_impo
             BUILDER.verify_with_independent_verifier(
                 rejected, policy, POLICY_SHA, SOURCE_HEAD, rejected_binding_sha,
             )
+
+
+def test_builder_and_verifier_accept_existing_directory_url() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime = Path(raw) / "runtime"
+        source = runtime / "modules/pkg/wasm/native.js"
+        source.parent.mkdir(parents=True)
+        source.write_text('const base = new URL("./", import.meta.url);\n', encoding="utf-8")
+        payloads = {
+            "runtime/modules/pkg/wasm/native.js": source.read_bytes(),
+        }
+        assert BUILDER.verify_runtime_dependency_closure(runtime) == VERIFIER.verify_runtime_dependency_closure(payloads)
 
 
 @pytest.mark.parametrize("mutation", ["contract", "unicode", "safety", "privacy", "toolchain"])

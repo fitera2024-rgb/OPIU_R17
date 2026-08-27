@@ -5,6 +5,7 @@ modules/reconciliation/source/work/
 build/
 dist/
 tmp/
+.qa/
 _baseline.tar
 
 # Release artifacts are generated, not source-controlled
@@ -13,10 +14,8 @@ release/*
 *.zip
 *.7z
 
-# Local runtime state
-data/*
-!data/defaults/
-!data/defaults/**
+# Local runtime state. Legacy data/defaults belongs to the removed Rules Service.
+data/
 *.db
 *.sqlite
 
@@ -34,4 +33,3 @@ node_modules/
 ~$*
 .DS_Store
 Thumbs.db
-

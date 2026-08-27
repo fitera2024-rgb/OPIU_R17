@@ -1,0 +1,29 @@
+{
+  "schema": "opiu-common-erp-references.v1",
+  "version": "1.9.4",
+  "generated_at": "2026-08-11T00:00:00Z",
+  "paths_relative_to": "package_root",
+  "references": [
+    {
+      "role": "organizations",
+      "path": "resources/reference/ОрганизациииерархияЕРП.xlsx",
+      "sha256": "3342603C0782FE12871AD55E7E19E778A97651E8CFF2E00F0CE6774295C57522",
+      "items_count": 357,
+      "catalog_type": "ORGANIZATIONS_CFO"
+    },
+    {
+      "role": "chart_of_accounts",
+      "path": "resources/reference/ПланСчетов_ERP.mxl",
+      "sha256": "867E493B4458975D2EF798452F4AD5C249DB9DD378454E5332188D200755A1CD",
+      "items_count": 102,
+      "catalog_type": "CHART_OF_ACCOUNTS"
+    },
+    {
+      "role": "opiu_articles",
+      "path": "modules/reconciliation/source/resources/СтатьиДоходовИРасходовЕРП.xlsx",
+      "sha256": "8C7CA0E3884BB78F610A95E01A935DEBF55871312D3193728B248E7C4A197BBF",
+      "items_count": 271,
+      "catalog_type": "OPIU_ARTICLES"
+    }
+  ]
+}

@@ -19,7 +19,7 @@
   "ready_to_upload": false,
   "reference_catalog_manifest_path": "reference_catalog_manifest.current.json",
   "reference_catalog_manifest_version": "1.9.4-relative",
-  "reference_catalog_manifest_sha256": "E6A215301DC68761680DBBF94600E22201AC48014D5136CBC8168ABB73C833F6",
+  "reference_catalog_manifest_sha256": "D331CDE0B403A00634FB984659865C3ABF06A6BE2E4CF80197D2D4B985910A7A",
   "reference_catalog_allowed_missing_roles": [
     "intalev_uid"
   ],

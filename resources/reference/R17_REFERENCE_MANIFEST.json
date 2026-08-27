@@ -1,0 +1,146 @@
+{
+  "schema": "opiu-r17-reference-inventory-v1",
+  "version": "2026-08-27",
+  "contract_version": "0.2",
+  "contract_sha256": "4C64998B675B6D0F910DA557CE1CBE20C5E15A023C75830CC145FC95DA6B540A",
+  "source_package_manifest_sha256": "EE7128280F90207CE3EBA10DBF9FF61A8C33230817A807F10B250EF4731A5EC4",
+  "files": [
+    {
+      "path": "modules/reconciliation/source/config.json",
+      "role": "configuration",
+      "size": 1636,
+      "sha256": "CE48D7720A61545BA936E41984483E483078DD07F58B4E0756062DE8CF4D0536"
+    },
+    {
+      "path": "modules/reconciliation/source/r005_intalev_template_graph.current.json",
+      "role": "intalev_template_graph",
+      "size": 34439,
+      "sha256": "6013C269E395F09230B078A17ECDFA808F6F53F1B7603001B5FCCAD1D54B7F7C"
+    },
+    {
+      "path": "modules/reconciliation/source/reference_catalog_manifest.current.json",
+      "role": "reference_catalog_manifest",
+      "size": 3364,
+      "sha256": "D331CDE0B403A00634FB984659865C3ABF06A6BE2E4CF80197D2D4B985910A7A"
+    },
+    {
+      "path": "modules/reconciliation/source/external_reference/erp/ERP_Аналитики_ОПИУ.xlsx",
+      "role": "erp_diagnostic_analytics",
+      "size": 26001,
+      "sha256": "9B887E42EEDE2E37939A0B3E4AC10FD1F64F360A2724BE03CF0562FC6220DD35"
+    },
+    {
+      "path": "modules/reconciliation/source/external_reference/erp/ERP_Показатели_ОПИУ.xlsx",
+      "role": "erp_structure",
+      "size": 132286,
+      "sha256": "914BF4EED2A636FB6EF5006BC688457A93577BD318625C239C8CF19B218E109B"
+    },
+    {
+      "path": "modules/reconciliation/source/external_reference/erp/ERP_Формулы_ОПИУ.xlsx",
+      "role": "erp_formula",
+      "size": 23551,
+      "sha256": "E8644766E8E46F9978F64EA88BB119A4A6125A00A3711B21942D035DA1F1D1CE"
+    },
+    {
+      "path": "modules/reconciliation/source/external_reference/erp/README_FULL_STRUCTURE_R21.md",
+      "role": "erp_structure_provenance",
+      "size": 1538,
+      "sha256": "DCB54881DEA9D8B7CA549B27D7C2809A93BC20679023613FE09212FB6B9D0B4E"
+    },
+    {
+      "path": "modules/reconciliation/source/external_reference/erp/ИстчникиОтчетовЕРП.xlsx",
+      "role": "erp_source",
+      "size": 881007,
+      "sha256": "CCBDA86E5770E094EBA869FC1FB4A506856376D9BBC76FF76D9D94B0D69A1CE2"
+    },
+    {
+      "path": "modules/reconciliation/source/external_reference/erp/ОПИУ_Структура_ерп.xlsx",
+      "role": "legacy_packaging_compatibility",
+      "size": 12906,
+      "sha256": "707BD796E4774A3DCE2995D423C7D3665A406FFE4ACBCB7BA468D8AF0167ADD5"
+    },
+    {
+      "path": "modules/reconciliation/source/external_reference/erp/ОПИУ_ФОРМУЛЫ_ерп.xlsx",
+      "role": "legacy_packaging_compatibility",
+      "size": 22074,
+      "sha256": "EE729E13305DAFC34EA3AE45EF7EF6C6817301E4F64F7461AD3FFB93509DAE49"
+    },
+    {
+      "path": "modules/reconciliation/source/external_reference/erp/StatD_R.xlsx",
+      "role": "erp_uid",
+      "size": 22693,
+      "sha256": "95CE3A53F1FAC502B29CCCB30BF329A9EFBB6A1D034F0820FDF735BE76D39124"
+    },
+    {
+      "path": "modules/reconciliation/source/external_reference/intalev/ОтчетПоСтруктуреОтчетов2.mxl",
+      "role": "intalev_structure",
+      "size": 5634274,
+      "sha256": "E2A4BD322D80D07F8C8E4EAB4629149EB3697F6FF47717DE2B79B328B594C96B"
+    },
+    {
+      "path": "modules/reconciliation/source/external_reference/intalev/отчетПоФильтрам2.mxl",
+      "role": "intalev_source",
+      "size": 1300605,
+      "sha256": "F187AD4FA40149B6E8872EFF96C5998183C8702CAB9E9322ECF75CE15BF2FDDD"
+    },
+    {
+      "path": "modules/reconciliation/source/external_reference/intalev/Z_J_X.mxl",
+      "role": "intalev_formula",
+      "size": 1134223,
+      "sha256": "BE230E807B208ABB68B99E61D3AF161EB345420DBE95768BB480E94589E98329"
+    },
+    {
+      "path": "modules/reconciliation/source/resources/ОПИУ_по_образцу_ШАБЛОН.xlsx",
+      "role": "output_template",
+      "size": 207035,
+      "sha256": "796DE3D261F879ADDDA7C542595C58311C2895A27878D257E2D8EA214E5FE915"
+    },
+    {
+      "path": "modules/reconciliation/source/resources/СтатьиДоходовИРасходовЕРП.xlsx",
+      "role": "erp_article_catalog",
+      "size": 43563,
+      "sha256": "8C7CA0E3884BB78F610A95E01A935DEBF55871312D3193728B248E7C4A197BBF"
+    },
+    {
+      "path": "modules/reconciliation/source/resources/khabarovsk_project.json",
+      "role": "project_binding",
+      "size": 3915,
+      "sha256": "D69CFF3CD0F00FA879BAA1E8862490690937202866218635043A2FE2460DD073"
+    },
+    {
+      "path": "modules/reconciliation/source/resources/UK_Актуальные_правила_сверки_2026-07-30_R005_CONSOLIDATED.xlsx",
+      "role": "static_project_mapping_not_rules_service",
+      "size": 32468,
+      "sha256": "AB1A59E9358B6EE93F2A437A7027CCF0F753D09C6E49182AB4076DF6B9E807E7"
+    },
+    {
+      "path": "resources/reference/ОрганизациииерархияЕРП.xlsx",
+      "role": "erp_organization_hierarchy",
+      "size": 106560,
+      "sha256": "3342603C0782FE12871AD55E7E19E778A97651E8CFF2E00F0CE6774295C57522"
+    },
+    {
+      "path": "resources/reference/ПланСчетов_ERP.mxl",
+      "role": "erp_chart_of_accounts",
+      "size": 61223,
+      "sha256": "867E493B4458975D2EF798452F4AD5C249DB9DD378454E5332188D200755A1CD"
+    },
+    {
+      "path": "resources/reference/COMMON_ERP_REFERENCES.json",
+      "role": "common_erp_reference_index",
+      "size": 1027,
+      "sha256": "21A556150531994D993B72CD2BCA36857D02FED12D56BE38FDDF43AED2124037"
+    }
+  ],
+  "optional_missing": [
+    {
+      "path": "modules/reconciliation/source/external_reference/intalev_articles.xlsx",
+      "reason": "optional fallback; the classifier is resolved from the selected Intalev archive"
+    },
+    {
+      "path": "modules/reconciliation/source/external_reference/intalev/01_Показатели.csv",
+      "reason": "intalev_uid is explicitly MISSING and allowed by reference_catalog_allowed_missing_roles"
+    }
+  ],
+  "removed_legacy_service_state": "data/defaults"
+}

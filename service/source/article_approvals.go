@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +23,39 @@ import (
 )
 
 const articleApprovalSchema = "opiu-article-approval.v1"
+const articleApprovalQueueSchema = "opiu-article-approval-queue.v1"
+
+var articleApprovalDecisionList = []string{
+	"УТВЕРЖДАЮ",
+	"ИЗМЕНИТЬ",
+	"ЗАПРЕТИТЬ",
+	"НУЖНА ПРОВЕРКА",
+	"ПРЕДЛОЖЕНО ДВИЖКОМ",
+}
+
+var articleApprovalRuleColumns = []string{
+	"КлючОбласти",
+	"КодОрганизацииERP",
+	"ОрганизацияERP",
+	"ПериодС",
+	"БлокИнталев",
+	"ПутьИнталев",
+	"СтатьяИнталев",
+	"СчетДоходовРасходов",
+	"СчетРасчетов",
+	"ПредлагаемыйБлокERP",
+	"ПредлагаемаяСтатьяERP",
+	"КодСтатьиERP",
+	"Действие",
+	"ОснованиеВыбора",
+	"Уверенность",
+	"ПримерыПроводок",
+	"РешениеПользователя",
+	"ПравильныйБлокERP",
+	"ПравильнаяСтатьяERP",
+	"ПравильныйКодСтатьиERP",
+	"КомментарийПользователя",
+}
 
 var (
 	articleApprovalMonth     = regexp.MustCompile(`^\d{4}-(0[1-9]|1[0-2])$`)
@@ -123,6 +157,59 @@ type articleApprovalRequest struct {
 	Rows                      []articleApprovalRow         `json:"rows"`
 	Decisions                 []articleApprovalRow         `json:"decisions"`
 	ERPCatalog                []articleApprovalCatalogItem `json:"erp_catalog"`
+}
+
+type articleApprovalQueueDecision struct {
+	RowID             string `json:"row_id"`
+	UserDecision      string `json:"user_decision"`
+	CorrectBlockERP   string `json:"correct_block_erp"`
+	CorrectArticleERP string `json:"correct_article_erp"`
+	CorrectCodeERP    string `json:"correct_code_erp"`
+	UserComment       string `json:"user_comment"`
+}
+
+type articleApprovalQueueRequest struct {
+	RunID       string                         `json:"run_id"`
+	Revision    string                         `json:"revision"`
+	BulkApprove bool                           `json:"bulk_approve"`
+	Decisions   []articleApprovalQueueDecision `json:"decisions"`
+}
+
+type articleApprovalQueueRow struct {
+	RowID                string   `json:"row_id"`
+	BlockIntalev         string   `json:"block_intalev"`
+	PathIntalev          string   `json:"path_intalev"`
+	ArticleIntalev       string   `json:"article_intalev"`
+	IncomeExpenseAccount string   `json:"income_expense_account"`
+	SettlementAccount    string   `json:"settlement_account"`
+	ProposedBlockERP     string   `json:"proposed_block_erp"`
+	ProposedArticleERP   string   `json:"proposed_article_erp"`
+	ProposedCodeERP      string   `json:"proposed_code_erp"`
+	Action               string   `json:"action"`
+	SelectionReason      string   `json:"selection_reason"`
+	Confidence           string   `json:"confidence"`
+	PhysicalExamples     string   `json:"physical_examples"`
+	UserDecision         string   `json:"user_decision"`
+	CorrectBlockERP      string   `json:"correct_block_erp"`
+	CorrectArticleERP    string   `json:"correct_article_erp"`
+	CorrectCodeERP       string   `json:"correct_code_erp"`
+	UserComment          string   `json:"user_comment"`
+	BulkApprovable       bool     `json:"bulk_approvable"`
+	BulkApprovalBlockers []string `json:"bulk_approval_blockers"`
+}
+
+type articleApprovalQueue struct {
+	Status            string                    `json:"status"`
+	SchemaVersion     string                    `json:"schema_version"`
+	RunID             string                    `json:"run_id"`
+	QueueRevision     string                    `json:"queue_revision"`
+	OrganizationScope articleApprovalScope      `json:"organization_scope"`
+	Actor             string                    `json:"actor"`
+	AllowedDecisions  []string                  `json:"allowed_decisions"`
+	Rows              []articleApprovalQueueRow `json:"rows"`
+	BulkApprovable    int                       `json:"bulk_approvable"`
+	Safety            SafetyState               `json:"safety"`
+	prepared          articleApprovalPrepared
 }
 
 type articleApprovalIssue struct {
@@ -301,14 +388,21 @@ func articleApprovalResolveSource(store *Store, requestedPath, declaredSHA strin
 	return articleApprovalSource{XLSX: filepath.ToSlash(relative), SHA256: actualSHA}, resolved, nil
 }
 
-func articleApprovalZIPRead(archive *zip.ReadCloser, name string) ([]byte, error) {
+func articleApprovalZIPRead(archive *zip.Reader, name string) ([]byte, error) {
 	name = filepath.ToSlash(filepath.Clean(name))
 	name = strings.TrimPrefix(name, "/")
+	var matched *zip.File
 	for _, item := range archive.File {
 		if filepath.ToSlash(item.Name) != name {
 			continue
 		}
-		reader, err := item.Open()
+		if matched != nil {
+			return nil, errors.New("source XLSX contains duplicate package entry")
+		}
+		matched = item
+	}
+	if matched != nil {
+		reader, err := matched.Open()
 		if err != nil {
 			return nil, err
 		}
@@ -322,7 +416,7 @@ func articleApprovalZIPRead(archive *zip.ReadCloser, name string) ([]byte, error
 	return nil, os.ErrNotExist
 }
 
-func articleApprovalXLSXStrings(archive *zip.ReadCloser) ([]string, error) {
+func articleApprovalXLSXStrings(archive *zip.Reader) ([]string, error) {
 	data, err := articleApprovalZIPRead(archive, "xl/sharedStrings.xml")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -357,11 +451,18 @@ func articleApprovalXLSXColumn(reference string) int {
 }
 
 func articleApprovalXLSXRows(path, sheetName string) ([]map[int]string, error) {
-	archive, err := zip.OpenReader(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return articleApprovalXLSXRowsData(data, sheetName)
+}
+
+func articleApprovalXLSXRowsData(data []byte, sheetName string) ([]map[int]string, error) {
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, fmt.Errorf("source is not a readable XLSX: %w", err)
 	}
-	defer archive.Close()
 	workbookData, err := articleApprovalZIPRead(archive, "xl/workbook.xml")
 	if err != nil {
 		return nil, err
@@ -430,7 +531,15 @@ func articleApprovalXLSXRows(path, sheetName string) ([]map[int]string, error) {
 }
 
 func articleApprovalCatalogFromSource(path string) ([]articleApprovalCatalogItem, error) {
-	erpRows, err := articleApprovalXLSXRows(path, "04_ERP_статьи")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return articleApprovalCatalogFromData(data)
+}
+
+func articleApprovalCatalogFromData(data []byte) ([]articleApprovalCatalogItem, error) {
+	erpRows, err := articleApprovalXLSXRowsData(data, "04_ERP_статьи")
 	if err != nil {
 		return nil, fmt.Errorf("ARTICLE_APPROVAL_SOURCE_ERP_CATALOG_INVALID: %w", err)
 	}
@@ -449,68 +558,341 @@ func articleApprovalCatalogFromSource(path string) ([]articleApprovalCatalogItem
 	if erpHeaderIndex < 0 {
 		return nil, errors.New("ARTICLE_APPROVAL_SOURCE_ERP_CATALOG_HEADERS_INVALID")
 	}
-	authoritativeTargets := map[string]struct{}{}
+	result := []articleApprovalCatalogItem{}
+	seen := map[string]struct{}{}
 	for _, row := range erpRows[erpHeaderIndex+1:] {
 		if !strings.HasPrefix(strings.ToUpper(cleanBusinessText(row[erpHeaders["Статус справочника"]], 100)), "MATCHED") {
 			continue
 		}
 		article := cleanBusinessText(row[erpHeaders["Статья ERP"]], 300)
+		catalogPath := cleanBusinessText(row[erpHeaders["Путь по справочнику ERP"]], 700)
+		if catalogPath == "" {
+			catalogPath = cleanBusinessText(row[erpHeaders["Полный путь ERP"]], 700)
+		}
+		parts := strings.Split(catalogPath, "/")
+		cleanParts := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if part = cleanBusinessText(part, 300); part != "" {
+				cleanParts = append(cleanParts, part)
+			}
+		}
+		block := ""
+		if len(cleanParts) >= 2 && strings.EqualFold(cleanParts[len(cleanParts)-1], article) {
+			block = cleanParts[len(cleanParts)-2]
+		} else if len(cleanParts) >= 1 {
+			block = cleanParts[len(cleanParts)-1]
+		}
 		codes := strings.FieldsFunc(row[erpHeaders["Код статьи"]], func(character rune) bool {
-			return character == ',' || character == ';' || character == '\n' || character == '\r'
+			return character == ',' || character == ';' || character == '|' || character == '\n' || character == '\r'
 		})
 		for _, code := range codes {
 			code = cleanBusinessText(code, 200)
-			if code != "" && article != "" {
-				authoritativeTargets[strings.ToLower(code+"|"+article)] = struct{}{}
+			if code == "" || block == "" || article == "" {
+				continue
 			}
-		}
-	}
-	if len(authoritativeTargets) == 0 {
-		return nil, errors.New("ARTICLE_APPROVAL_SOURCE_ERP_CATALOG_EMPTY")
-	}
-	rows, err := articleApprovalXLSXRows(path, "01_Правила")
-	if err != nil {
-		return nil, fmt.Errorf("ARTICLE_APPROVAL_SOURCE_RULES_INVALID: %w", err)
-	}
-	headers := map[string]int{}
-	headerIndex := -1
-	for index, row := range rows {
-		for column, value := range row {
-			headers[value] = column
-		}
-		if headers["ПредлагаемыйБлокERP"] > 0 && headers["ПредлагаемаяСтатьяERP"] > 0 && headers["КодСтатьиERP"] > 0 {
-			headerIndex = index
-			break
-		}
-		headers = map[string]int{}
-	}
-	if headerIndex < 0 {
-		return nil, errors.New("ARTICLE_APPROVAL_SOURCE_RULES_HEADERS_INVALID")
-	}
-	result := []articleApprovalCatalogItem{}
-	seen := map[string]struct{}{}
-	for _, row := range rows[headerIndex+1:] {
-		item := articleApprovalCatalogItem{
-			Code:    cleanBusinessText(row[headers["КодСтатьиERP"]], 200),
-			Block:   cleanBusinessText(row[headers["ПредлагаемыйБлокERP"]], 300),
-			Article: cleanBusinessText(row[headers["ПредлагаемаяСтатьяERP"]], 300),
-		}
-		if item.Code == "" || item.Block == "" || item.Article == "" {
-			continue
-		}
-		if _, exists := authoritativeTargets[strings.ToLower(item.Code+"|"+item.Article)]; !exists {
-			continue
-		}
-		key := strings.ToLower(item.Code + "|" + item.Block + "|" + item.Article)
-		if _, exists := seen[key]; !exists {
-			seen[key] = struct{}{}
-			result = append(result, item)
+			key := strings.ToLower(code + "|" + block + "|" + article)
+			if _, exists := seen[key]; !exists {
+				seen[key] = struct{}{}
+				result = append(result, articleApprovalCatalogItem{Code: code, Block: block, Article: article})
+			}
 		}
 	}
 	if len(result) == 0 {
 		return nil, errors.New("ARTICLE_APPROVAL_SOURCE_ERP_CATALOG_EMPTY")
 	}
 	return result, nil
+}
+
+func articleApprovalRulesFromData(data []byte, scope articleApprovalScope) ([]articleApprovalRow, error) {
+	values, err := articleApprovalXLSXRowsData(data, "01_Правила")
+	if err != nil {
+		return nil, fmt.Errorf("ARTICLE_APPROVAL_SOURCE_RULES_INVALID: %w", err)
+	}
+	headerIndex := -1
+	for index, row := range values {
+		exact := true
+		for column, expected := range articleApprovalRuleColumns {
+			if cleanBusinessText(row[column+1], 300) != expected {
+				exact = false
+				break
+			}
+		}
+		if exact {
+			for column, value := range row {
+				if column < 1 || column > len(articleApprovalRuleColumns) {
+					if cleanBusinessText(value, 300) != "" {
+						exact = false
+						break
+					}
+				}
+			}
+		}
+		if exact {
+			headerIndex = index
+			break
+		}
+	}
+	if headerIndex < 0 {
+		return nil, errors.New("ARTICLE_APPROVAL_SOURCE_RULES_21_COLUMNS_INVALID")
+	}
+	rows := []articleApprovalRow{}
+	for _, valuesByColumn := range values[headerIndex+1:] {
+		nonempty := false
+		for column, value := range valuesByColumn {
+			if cleanBusinessText(value, 1000) == "" {
+				continue
+			}
+			nonempty = true
+			if column < 1 || column > len(articleApprovalRuleColumns) {
+				return nil, errors.New("ARTICLE_APPROVAL_SOURCE_RULES_21_COLUMNS_INVALID")
+			}
+		}
+		if !nonempty {
+			continue
+		}
+		row := articleApprovalRow{
+			ScopeKey: valuesByColumn[1], OrganizationID: valuesByColumn[2], OrganizationName: valuesByColumn[3], Period: valuesByColumn[4],
+			BlockIntalev: valuesByColumn[5], PathIntalev: valuesByColumn[6], ArticleIntalev: valuesByColumn[7],
+			IncomeExpenseAccount: valuesByColumn[8], SettlementAccount: valuesByColumn[9],
+			ProposedBlockERP: valuesByColumn[10], ProposedArticleERP: valuesByColumn[11], ProposedCodeERP: valuesByColumn[12],
+			Action: valuesByColumn[13], SelectionReason: valuesByColumn[14], Confidence: valuesByColumn[15], PhysicalExamples: valuesByColumn[16],
+			UserDecision: valuesByColumn[17], CorrectBlockERP: valuesByColumn[18], CorrectArticleERP: valuesByColumn[19],
+			CorrectCodeERP: valuesByColumn[20], UserComment: valuesByColumn[21],
+		}
+		expectedKey := articleApprovalScopeKey(scope, row)
+		if row.ScopeKey != expectedKey || row.OrganizationID != scope.OrganizationID || row.OrganizationName != scope.OrganizationName || row.Period != scope.Period {
+			return nil, errors.New("ARTICLE_APPROVAL_SOURCE_RULE_SCOPE_MISMATCH")
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		return nil, errors.New("ARTICLE_APPROVAL_SOURCE_RULES_EMPTY")
+	}
+	return articleApprovalCanonicalRows(rows, scope), nil
+}
+
+func articleApprovalReadBoundWorkbook(path string, allowance verifiedResultArtifact) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != allowance.Size || allowance.Size <= 0 || allowance.Size > allowance.Limit {
+		return nil, errors.New("ARTICLE_APPROVAL_SOURCE_SIZE_MISMATCH")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("ARTICLE_APPROVAL_SOURCE_XLSX_UNREADABLE")
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, allowance.Size+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || int64(len(data)) != allowance.Size {
+		return nil, errors.New("ARTICLE_APPROVAL_SOURCE_SIZE_MISMATCH")
+	}
+	digest := sha256.Sum256(data)
+	if !strings.EqualFold(hex.EncodeToString(digest[:]), allowance.SHA256) {
+		return nil, errors.New("ARTICLE_APPROVAL_SOURCE_SHA256_MISMATCH")
+	}
+	return data, nil
+}
+
+func articleApprovalQueueRowID(runID, sourceSHA string, index int, row articleApprovalRow) string {
+	data, _ := json.Marshal(struct {
+		RunID     string
+		SourceSHA string
+		Index     int
+		Row       articleApprovalRow
+	}{runID, sourceSHA, index, row})
+	digest := sha256.Sum256(data)
+	return "row_" + hex.EncodeToString(digest[:16])
+}
+
+func articleApprovalBulkBlockers(rows []articleApprovalRow, index int, catalog []articleApprovalCatalogItem) []string {
+	row := rows[index]
+	blockers := []string{}
+	if row.UserDecision != "ПРЕДЛОЖЕНО ДВИЖКОМ" {
+		blockers = append(blockers, "INITIAL_DECISION_NOT_ENGINE_PROPOSAL")
+	}
+	matches := 0
+	codeMatches := 0
+	for _, item := range catalog {
+		if item.Code == row.ProposedCodeERP {
+			codeMatches++
+			if strings.EqualFold(item.Block, row.ProposedBlockERP) && strings.EqualFold(item.Article, row.ProposedArticleERP) {
+				matches++
+			}
+		}
+	}
+	if matches != 1 || codeMatches != 1 {
+		blockers = append(blockers, "ERP_TARGET_NOT_UNIQUE")
+	}
+	targets := map[string]struct{}{}
+	for _, candidate := range rows {
+		if articleApprovalScopeKey(articleApprovalScope{OrganizationID: row.OrganizationID, Period: row.Period}, candidate) != articleApprovalScopeKey(articleApprovalScope{OrganizationID: row.OrganizationID, Period: row.Period}, row) {
+			continue
+		}
+		targets[strings.ToLower(candidate.ProposedBlockERP+"|"+candidate.ProposedArticleERP+"|"+candidate.ProposedCodeERP)] = struct{}{}
+	}
+	if len(targets) != 1 {
+		blockers = append(blockers, "SCOPE_TARGET_CONFLICT")
+	}
+	return blockers
+}
+
+func (s *Server) prepareArticleApprovalQueue(runID string) (articleApprovalQueue, error) {
+	runID = cleanBusinessText(runID, 180)
+	base, err := secureBaseName(runID)
+	if err != nil || base != runID {
+		return articleApprovalQueue{}, errors.New("ARTICLE_APPROVAL_RUN_ID_INVALID")
+	}
+	run, ok := s.store.Run(runID)
+	if !ok {
+		return articleApprovalQueue{}, errors.New("ARTICLE_APPROVAL_RUN_NOT_FOUND")
+	}
+	if run.Status != RunCompletedReportOnly || run.FinishedAt == nil || (run.Stage != "DONE" && run.Stage != "R005_COMPLETED") {
+		return articleApprovalQueue{}, errors.New("ARTICLE_APPROVAL_RUN_NOT_COMPLETED")
+	}
+	contextValue, ok := s.store.Context(run.ContextID)
+	if !ok || contextValue.Archived {
+		return articleApprovalQueue{}, errors.New("ARTICLE_APPROVAL_RUN_SCOPE_INVALID")
+	}
+	requestedScope := articleApprovalScopeFromContext(contextValue)
+	scope, err := articleApprovalResolveScope(s.store, articleApprovalRequest{
+		OrganizationID: requestedScope.OrganizationID, OrganizationName: requestedScope.OrganizationName,
+		OrganizationPath: requestedScope.OrganizationPath, Period: requestedScope.Period,
+	})
+	if err != nil || !articleApprovalScopeEqual(scope, requestedScope) {
+		return articleApprovalQueue{}, errors.New("ARTICLE_APPROVAL_RUN_SCOPE_INVALID")
+	}
+	root := filepath.Join(s.store.RunsDir(), run.ID, "r005")
+	allowances, err := s.validatedR005ResultAllowances(root, run)
+	if err != nil {
+		return articleApprovalQueue{}, errors.New("ARTICLE_APPROVAL_R005_ANCHOR_INVALID")
+	}
+	allowance, ok := allowances["reconciliation.xlsx"]
+	if !ok || allowance.Name != "reconciliation.xlsx" {
+		return articleApprovalQueue{}, errors.New("ARTICLE_APPROVAL_R005_REPORT_INVALID")
+	}
+	reportPath := filepath.Join(root, "reconciliation.xlsx")
+	workbook, err := articleApprovalReadBoundWorkbook(reportPath, allowance)
+	if err != nil {
+		return articleApprovalQueue{}, err
+	}
+	catalog, err := articleApprovalCatalogFromData(workbook)
+	if err != nil {
+		return articleApprovalQueue{}, err
+	}
+	rows, err := articleApprovalRulesFromData(workbook, scope)
+	if err != nil {
+		return articleApprovalQueue{}, err
+	}
+	if issues := articleApprovalValidateRows(rows, scope, catalog, true); len(issues) > 0 {
+		return articleApprovalQueue{}, fmt.Errorf("ARTICLE_APPROVAL_SOURCE_RULES_INVALID: %s", issues[0].Code)
+	}
+	actor, err := articleApprovalHostActor()
+	if err != nil || !articleApprovalActor.MatchString(actor) {
+		return articleApprovalQueue{}, errors.New("ARTICLE_APPROVAL_HOST_ACTOR_UNAVAILABLE")
+	}
+	sourceRelative := filepath.ToSlash(filepath.Join("runs", run.ID, "r005", "reconciliation.xlsx"))
+	prepared := articleApprovalPrepared{Scope: scope, Source: articleApprovalSource{XLSX: sourceRelative, SHA256: allowance.SHA256}, Rows: rows, Catalog: catalog}
+	queueRows := make([]articleApprovalQueueRow, len(rows))
+	bulkCount := 0
+	for index, row := range rows {
+		blockers := articleApprovalBulkBlockers(rows, index, catalog)
+		approvable := len(blockers) == 0
+		if approvable {
+			bulkCount++
+		}
+		queueRows[index] = articleApprovalQueueRow{
+			RowID:        articleApprovalQueueRowID(run.ID, allowance.SHA256, index, row),
+			BlockIntalev: row.BlockIntalev, PathIntalev: row.PathIntalev, ArticleIntalev: row.ArticleIntalev,
+			IncomeExpenseAccount: row.IncomeExpenseAccount, SettlementAccount: row.SettlementAccount,
+			ProposedBlockERP: row.ProposedBlockERP, ProposedArticleERP: row.ProposedArticleERP, ProposedCodeERP: row.ProposedCodeERP,
+			Action: row.Action, SelectionReason: row.SelectionReason, Confidence: row.Confidence, PhysicalExamples: row.PhysicalExamples,
+			UserDecision: row.UserDecision, CorrectBlockERP: row.CorrectBlockERP, CorrectArticleERP: row.CorrectArticleERP,
+			CorrectCodeERP: row.CorrectCodeERP, UserComment: row.UserComment,
+			BulkApprovable: approvable, BulkApprovalBlockers: blockers,
+		}
+	}
+	revisionPayload := struct {
+		Schema  string
+		RunID   string
+		Size    int64
+		SHA256  string
+		Scope   articleApprovalScope
+		Actor   string
+		Rows    []articleApprovalQueueRow
+		Catalog []articleApprovalCatalogItem
+	}{articleApprovalQueueSchema, run.ID, allowance.Size, allowance.SHA256, scope, actor, queueRows, catalog}
+	revisionData, err := json.Marshal(revisionPayload)
+	if err != nil {
+		return articleApprovalQueue{}, err
+	}
+	revisionDigest := sha256.Sum256(revisionData)
+	return articleApprovalQueue{
+		Status: "PASS", SchemaVersion: articleApprovalQueueSchema, RunID: run.ID,
+		QueueRevision: strings.ToUpper(hex.EncodeToString(revisionDigest[:])), OrganizationScope: scope, Actor: actor,
+		AllowedDecisions: append([]string{}, articleApprovalDecisionList...), Rows: queueRows, BulkApprovable: bulkCount,
+		Safety: reportOnlySafety(), prepared: prepared,
+	}, nil
+}
+
+func articleApprovalApplyQueueRequest(queue articleApprovalQueue, request articleApprovalQueueRequest) (articleApprovalPrepared, []articleApprovalIssue, error) {
+	if request.RunID != queue.RunID || request.Revision != queue.QueueRevision {
+		return articleApprovalPrepared{}, nil, errors.New("ARTICLE_APPROVAL_QUEUE_REVISION_STALE")
+	}
+	if len(request.Decisions) != len(queue.Rows) {
+		return articleApprovalPrepared{}, nil, errors.New("ARTICLE_APPROVAL_DECISION_SET_INCOMPLETE")
+	}
+	byID := make(map[string]articleApprovalQueueDecision, len(request.Decisions))
+	allowedIDs := make(map[string]struct{}, len(queue.Rows))
+	for _, row := range queue.Rows {
+		allowedIDs[row.RowID] = struct{}{}
+	}
+	for _, decision := range request.Decisions {
+		decision.RowID = cleanBusinessText(decision.RowID, 100)
+		if decision.RowID == "" {
+			return articleApprovalPrepared{}, nil, errors.New("ARTICLE_APPROVAL_ROW_ID_INVALID")
+		}
+		if _, exists := byID[decision.RowID]; exists {
+			return articleApprovalPrepared{}, nil, errors.New("ARTICLE_APPROVAL_ROW_ID_DUPLICATE")
+		}
+		if _, exists := allowedIDs[decision.RowID]; !exists {
+			return articleApprovalPrepared{}, nil, errors.New("ARTICLE_APPROVAL_ROW_ID_EXTRA")
+		}
+		byID[decision.RowID] = decision
+	}
+	hydrated := make([]articleApprovalRow, len(queue.Rows))
+	for index, queueRow := range queue.Rows {
+		decision, exists := byID[queueRow.RowID]
+		if !exists {
+			return articleApprovalPrepared{}, nil, errors.New("ARTICLE_APPROVAL_DECISION_SET_INCOMPLETE")
+		}
+		delete(byID, queueRow.RowID)
+		row := queue.prepared.Rows[index]
+		decision.UserDecision = cleanBusinessText(decision.UserDecision, 80)
+		decision.CorrectBlockERP = cleanBusinessText(decision.CorrectBlockERP, 300)
+		decision.CorrectArticleERP = cleanBusinessText(decision.CorrectArticleERP, 300)
+		decision.CorrectCodeERP = cleanBusinessText(decision.CorrectCodeERP, 200)
+		decision.UserComment = cleanBusinessText(decision.UserComment, 1000)
+		if request.BulkApprove {
+			if queueRow.BulkApprovable {
+				decision.UserDecision = "УТВЕРЖДАЮ"
+				decision.CorrectBlockERP, decision.CorrectArticleERP, decision.CorrectCodeERP, decision.UserComment = "", "", "", ""
+			} else if decision.UserDecision != row.UserDecision || decision.CorrectBlockERP != row.CorrectBlockERP || decision.CorrectArticleERP != row.CorrectArticleERP || decision.CorrectCodeERP != row.CorrectCodeERP || decision.UserComment != row.UserComment {
+				return articleApprovalPrepared{}, nil, errors.New("ARTICLE_APPROVAL_BULK_ROW_NOT_ELIGIBLE")
+			}
+		}
+		row.UserDecision = decision.UserDecision
+		row.CorrectBlockERP = decision.CorrectBlockERP
+		row.CorrectArticleERP = decision.CorrectArticleERP
+		row.CorrectCodeERP = decision.CorrectCodeERP
+		row.UserComment = decision.UserComment
+		hydrated[index] = row
+	}
+	if len(byID) != 0 {
+		return articleApprovalPrepared{}, nil, errors.New("ARTICLE_APPROVAL_ROW_ID_EXTRA")
+	}
+	issues := articleApprovalValidateRows(hydrated, queue.prepared.Scope, queue.prepared.Catalog, true)
+	prepared := queue.prepared
+	prepared.Rows = articleApprovalCanonicalRows(hydrated, prepared.Scope)
+	return prepared, issues, nil
 }
 
 func (s *Server) prepareArticleApproval(request articleApprovalRequest) (articleApprovalPrepared, []articleApprovalIssue, error) {
@@ -617,7 +999,8 @@ func articleApprovalValidateRows(rows []articleApprovalRow, scope articleApprova
 			issues = append(issues, articleApprovalIssue{Row: rowNumber, Code: "CHANGE_FIELDS_REQUIRED", Message: "Для ИЗМЕНИТЬ обязательны блок, статья, код и комментарий"})
 		}
 		block, article, code := articleApprovalTarget(row)
-		if code != "" {
+		requireKnownTarget := row.UserDecision == "УТВЕРЖДАЮ" || row.UserDecision == "ИЗМЕНИТЬ" || row.UserDecision == "ПРЕДЛОЖЕНО ДВИЖКОМ"
+		if code != "" && requireKnownTarget {
 			if requireCatalog && len(catalogByCode) == 0 {
 				issues = append(issues, articleApprovalIssue{Row: rowNumber, Code: "ERP_CATALOG_REQUIRED", Message: "Для проверки ERP-кода нужен каталог выбранного блока"})
 			} else if items, ok := catalogByCode[code]; requireCatalog && !ok {
@@ -666,6 +1049,10 @@ func articleApprovalDirectory(store *Store) string {
 
 func articleApprovalVersionPattern(slug string) *regexp.Regexp {
 	return regexp.MustCompile(`^article_registry_` + regexp.QuoteMeta(slug) + `_v([0-9]+)\.approved\.json$`)
+}
+
+func articleApprovalPublicationVersionPattern(slug string) *regexp.Regexp {
+	return regexp.MustCompile(`^article_registry_` + regexp.QuoteMeta(slug) + `_v([0-9]+)\.approved\.json(?:\.sha256)?$`)
 }
 
 func articleApprovalReadFile(path string) (articleApprovalDocument, string, error) {
@@ -910,7 +1297,7 @@ func (s *Server) createArticleApproval(request articleApprovalRequest) (map[stri
 		return nil, http.StatusInternalServerError, err
 	}
 	slug := articleApprovalOrganizationSlug(scope)
-	pattern := articleApprovalVersionPattern(slug)
+	pattern := articleApprovalPublicationVersionPattern(slug)
 	version := 1
 	for _, entry := range entries {
 		if match := pattern.FindStringSubmatch(entry.Name()); len(match) == 2 {
@@ -950,9 +1337,103 @@ func (s *Server) createArticleApproval(request articleApprovalRequest) (map[stri
 	}}, http.StatusCreated, nil
 }
 
+func articleApprovalQueueErrorStatus(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	switch err.Error() {
+	case "ARTICLE_APPROVAL_RUN_NOT_FOUND":
+		return http.StatusNotFound
+	case "ARTICLE_APPROVAL_QUEUE_REVISION_STALE", "ARTICLE_APPROVAL_R005_ANCHOR_INVALID", "ARTICLE_APPROVAL_SOURCE_SHA256_MISMATCH", "ARTICLE_APPROVAL_SOURCE_SIZE_MISMATCH":
+		return http.StatusConflict
+	case "ARTICLE_APPROVAL_HOST_ACTOR_UNAVAILABLE":
+		return http.StatusInternalServerError
+	default:
+		return http.StatusBadRequest
+	}
+}
+
+func (s *Server) publishArticleApprovalPreparedLocked(prepared articleApprovalPrepared, actor string) (map[string]any, int, error) {
+	entries, err := os.ReadDir(articleApprovalDirectory(s.store))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, http.StatusInternalServerError, err
+	}
+	scope := prepared.Scope
+	slug := articleApprovalOrganizationSlug(scope)
+	pattern := articleApprovalPublicationVersionPattern(slug)
+	version := 1
+	for _, entry := range entries {
+		if match := pattern.FindStringSubmatch(entry.Name()); len(match) == 2 {
+			if candidate, parseErr := strconv.Atoi(match[1]); parseErr == nil && candidate >= version {
+				version = candidate + 1
+			}
+		}
+	}
+	approvalID, err := newOpaqueID("article_approval")
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	document := articleApprovalDocument{
+		SchemaVersion: articleApprovalSchema, Version: version, ApprovalID: approvalID,
+		OrganizationScope: scope, Validity: articleApprovalValidity{From: scope.Period, To: scope.Period},
+		Source: prepared.Source, Actor: actor, FixedAt: time.Now().UTC(), Decisions: prepared.Rows,
+		Safety: articleApprovalSafety{Mode: "REPORT_ONLY", DecisionType: "CLASSIFICATION_ONLY"},
+	}
+	data, digest, err := articleApprovalDocumentBytes(document)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	directory := articleApprovalDirectory(s.store)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	fileName := fmt.Sprintf("article_registry_%s_v%03d.approved.json", slug, version)
+	filePath := filepath.Join(directory, fileName)
+	if err := createArticleApprovalImmutablePair(filePath, data, []byte(digest+"  "+fileName+"\n")); err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	return map[string]any{"status": "PASS", "approved": map[string]any{
+		"schema_version": articleApprovalSchema, "version": version, "approval_id": approvalID,
+		"file_name": fileName, "integrity_file_name": fileName + ".sha256", "organization_scope": scope,
+		"period": scope.Period, "safety": reportOnlySafety(), "posting_rows": 0,
+	}}, http.StatusCreated, nil
+}
+
+func (s *Server) createArticleApprovalFromQueue(request articleApprovalQueueRequest) (map[string]any, int, error) {
+	articleApprovalMu.Lock()
+	defer articleApprovalMu.Unlock()
+	queue, err := s.prepareArticleApprovalQueue(request.RunID)
+	if err != nil {
+		return nil, articleApprovalQueueErrorStatus(err), err
+	}
+	prepared, issues, err := articleApprovalApplyQueueRequest(queue, request)
+	if err != nil {
+		return nil, articleApprovalQueueErrorStatus(err), err
+	}
+	if len(issues) > 0 {
+		return map[string]any{"status": "FAIL", "errors": issues}, http.StatusBadRequest, errors.New("ARTICLE_APPROVAL_VALIDATION_FAILED")
+	}
+	return s.publishArticleApprovalPreparedLocked(prepared, queue.Actor)
+}
+
 func (s *Server) handleArticleApprovals(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		query := r.URL.Query()
+		if runIDs, queueMode := query["run_id"]; queueMode {
+			if len(query) != 1 || len(runIDs) != 1 {
+				writeJSON(w, http.StatusBadRequest, apiError{Error: "ARTICLE_APPROVAL_RUN_ID_INVALID"})
+				return
+			}
+			runID := runIDs[0]
+			queue, err := s.prepareArticleApprovalQueue(runID)
+			if err != nil {
+				writeJSON(w, articleApprovalQueueErrorStatus(err), apiError{Error: err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, queue)
+			return
+		}
 		request := articleApprovalRequest{OrganizationID: r.URL.Query().Get("organization_id"), OrganizationName: r.URL.Query().Get("organization_name"), OrganizationPath: r.URL.Query().Get("organization_path"), Period: r.URL.Query().Get("period")}
 		scope, scopeErr := articleApprovalResolveScope(s.store, request)
 		if scopeErr != nil {
@@ -970,12 +1451,12 @@ func (s *Server) handleArticleApprovals(w http.ResponseWriter, r *http.Request) 
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "PASS", "path": filePath, "document": document, "safety": reportOnlySafety()})
 	case http.MethodPost:
-		var request articleApprovalRequest
+		var request articleApprovalQueueRequest
 		if err := readJSON(r, &request); err != nil {
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "ARTICLE_APPROVAL_REQUEST_INVALID"})
 			return
 		}
-		payload, status, err := s.createArticleApproval(request)
+		payload, status, err := s.createArticleApprovalFromQueue(request)
 		if err != nil {
 			if payload != nil {
 				writeJSON(w, status, payload)
@@ -997,14 +1478,20 @@ func (s *Server) handleArticleApprovalValidate(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "Метод не поддерживается"})
 		return
 	}
-	var request articleApprovalRequest
+	var request articleApprovalQueueRequest
 	if err := readJSON(r, &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "ARTICLE_APPROVAL_REQUEST_INVALID"})
 		return
 	}
-	_, issues, err := s.prepareArticleApproval(request)
+	queue, err := s.prepareArticleApprovalQueue(request.RunID)
 	if err != nil {
-		issues = append(issues, articleApprovalIssue{Code: err.Error(), Message: "Серверная проверка scope, XLSX или каталога не пройдена"})
+		writeJSON(w, articleApprovalQueueErrorStatus(err), map[string]any{"status": "FAIL", "errors": []articleApprovalIssue{{Code: err.Error(), Message: "Серверная очередь текущего R005 не прошла проверку"}}})
+		return
+	}
+	_, issues, err := articleApprovalApplyQueueRequest(queue, request)
+	if err != nil {
+		writeJSON(w, articleApprovalQueueErrorStatus(err), map[string]any{"status": "FAIL", "errors": []articleApprovalIssue{{Code: err.Error(), Message: "Полный набор решений не соответствует серверной очереди"}}})
+		return
 	}
 	if len(issues) > 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"status": "FAIL", "errors": issues})
@@ -1019,12 +1506,12 @@ func (s *Server) handleArticleApprovalFix(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "Метод не поддерживается"})
 		return
 	}
-	var request articleApprovalRequest
+	var request articleApprovalQueueRequest
 	if err := readJSON(r, &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, apiError{Error: "ARTICLE_APPROVAL_REQUEST_INVALID"})
 		return
 	}
-	payload, status, err := s.createArticleApproval(request)
+	payload, status, err := s.createArticleApprovalFromQueue(request)
 	if err != nil {
 		if payload != nil {
 			writeJSON(w, status, payload)

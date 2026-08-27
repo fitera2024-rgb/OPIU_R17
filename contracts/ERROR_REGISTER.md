@@ -264,15 +264,15 @@
 ### APPROVAL-002 — API не отдаёт authoritative очередь `01_Правила` текущего запуска
 
 - Дата: `27.08.2026`
-- Статус: `NEW`
+- Статус: `IMPLEMENTED`
 - Сообщил: независимый review S04/S05.
 - Наблюдаемое поведение: GET возвращает только последнюю approved-версию, а POST требует от браузера server path, SHA и полные исходные строки; server-bound `row_id`, `queue_revision` и `bulk_approvable` отсутствуют.
 - Ожидаемое поведение: queue-mode по `run_id` сам привязывает exact R005 XLSX, scope, actor, 21 колонку и ERP-каталог; браузер передаёт только opaque row/revision и редактируемые решения.
 - Затронутые пункты контракта: §§9.5–9.6, 11, 13–14; A17–A24.
 - Допустимый scope: `service/source/article_approvals.go`, `article_approvals_test.go`; UI — отдельная S05-задача.
 - Обязательный регрессионный тест: stale SHA/revision, чужой scope и client authority блокируются; bulk только для server-proven однозначных строк; fix публикует атомарную immutable JSON+SHA пару.
-- Реализация: ожидается.
-- Протокол проверки: ожидается.
+- Реализация: queue-mode GET по `run_id` повторно проверяет completed anchored R005 и его SHA/size, сам извлекает точные 21 колонку `01_Правила`, scope, actor и ERP-каталог; выдаёт opaque `row_id`, `queue_revision` и server-owned `bulk_approvable`. POST принимает только exact полный набор строк и revision, повторно гидратирует immutable source rows, отклоняет stale/missing/extra/duplicate/client-authority, проверяет конфликты и публикует новую version без перезаписи под общим publication lock; JSON публикуется последним как commit marker.
+- Протокол проверки: targeted APPROVAL-002/A18–A22 `count=3` — PASS (`44.456s`); полный `go test ./...` — PASS (`207.667s`); `go vet .` — PASS; `git diff --check` — PASS; независимый peer review и targeted Go — PASS (`9.611s`). Неблокирующий test-gap: filesystem failure-injection между sidecar и JSON не добавлен, атомарный инвариант подтверждён статическим review.
 
 ### APPROVAL-003 — approved-решение не применяется production mapping и A22 gate
 

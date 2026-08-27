@@ -5,147 +5,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestBusinessBlockedR005ProceedsThroughDirectServiceHandoff(t *testing.T) {
 	// The canonical direct-path integration test owns this legacy scenario now.
 	TestRuntimePipelineIsDirectR005ServiceHandoffR001(t)
-	return
-	store, err := OpenStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	run := Run{
-		ID: "run_fail_soft_hierarchy", ContextID: "ctx_fail_soft_hierarchy",
-		Status: RunRunning, Stage: "R005", StartedAt: time.Now().UTC(), Safety: reportOnlySafety(),
-	}
-	contextValue := Context{
-		ID: run.ContextID, Organization: "9 Управляющая компания",
-		OrganizationID: structuralSourceOrganizationID, OrganizationName: "9 Управляющая компания",
-		OrganizationPath: "Холдинг / 9 Управляющая компания", Period: "2025-10",
-	}
-	store.state.Runs[run.ID] = run
-	store.state.Contexts[contextValue.ID] = contextValue
-	if err := store.saveLocked(); err != nil {
-		t.Fatal(err)
-	}
-	rulesRegistry, rulesSeed := newTestRulesRegistry(t, store)
-	runDir := filepath.Join(store.RunsDir(), run.ID)
-	if err := os.MkdirAll(runDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	runtimeRoot := makeRuntimeFixture(t)
-	ownerWrapper := filepath.Join(runtimeRoot, "modules", "corrections", "source", "service_r001_owner_wrapper.mjs")
-	if err := os.WriteFile(ownerWrapper, []byte("fixture owner wrapper"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("OPIU_NODE_PATH", filepath.Join(runtimeRoot, "runtime", "node", "node-test"))
-	adapter, err := runtimeAdapterAt(runtimeRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	adapter.RulesRegistry = rulesSeed
-	pipeline := &Pipeline{store: store, rulesRegistry: rulesRegistry, runtime: adapter, active: map[string]struct{}{}}
-
-	stages := []string{}
-	pipeline.runner = func(stage string, command []string, values map[string]string, currentRunDir, runtimeRoot string) error {
-		stages = append(stages, stage)
-		switch stage {
-		case "R005":
-			writePipelineStructuralInventoryV3(t, store, run, contextValue)
-			inventoryPath := filepath.Join(runDir, "r005", "structural-control-inventory.json")
-			writeFailSoftR005Fixture(t, filepath.Join(runDir, "r005"), contextValue, "BLOCKED_HIERARCHY_METADATA_MISSING")
-			refreshFailSoftInventoryProvenance(t, inventoryPath, filepath.Join(runDir, "r005"))
-			if err := validateR005ReportOnlyPackage(filepath.Join(runDir, "r005"), contextValue, true); err != nil {
-				t.Fatalf("synthetic safe R005 package rejected: %v", err)
-			}
-			return errors.New("exit status 1")
-		case "RULES":
-			contextPath := filepath.Join(runDir, "rules_engine_context.json")
-			writeOrchestrationJSON(t, filepath.Join(runDir, "rules", "workflow_decision.json"), map[string]any{
-				"schema_version": "opiu-rules-workflow-decision.v1", "run_id": run.ID,
-				"phase": "AFTER_R005", "next_action": "WAIT_USER_RULES", "handoff": nil,
-			})
-			writeNoopRulesEngineArtifacts(t, contextPath, filepath.Join(runDir, "rules"), run.ID)
-		case "R001_DIAGNOSTIC":
-			if filepath.Base(adapter.R001Script) != "service_r001_owner_wrapper.mjs" || command[1] != adapter.R001DiagnosticScript || filepath.Base(command[1]) != "correction_engine_r001.mjs" {
-				t.Fatalf("diagnostic path did not bypass the handoff-only owner wrapper: adapter=%#v command=%#v", adapter, command)
-			}
-			joined := "\x00" + strings.Join(command, "\x00") + "\x00"
-			if strings.Contains(joined, "\x00--handoff\x00") {
-				t.Fatal("diagnostic R001 must not fabricate a Rules handoff")
-			}
-			if !strings.Contains(joined, "\x00--reconciliation\x00") || !strings.Contains(joined, "\x00--codex-input\x00") {
-				t.Fatalf("diagnostic R001 did not receive report-only R005 sources: %#v", command)
-			}
-			writeFailSoftR001PackageFixtureForRun(t, filepath.Join(runDir, "r001"), run, contextValue)
-		default:
-			t.Fatalf("unexpected stage %s", stage)
-		}
-		return nil
-	}
-
-	var status RunStatus
-	var terminalStage, message string
-	writeStructuralControlInitialRunManifest(t, runDir, run, contextValue)
-	pipeline.executeRuntime(run, contextValue, "erp.xlsx", strings.Repeat("A", 64), "intalev.xlsx", runDir,
-		func(gotStatus RunStatus, gotStage, gotMessage string) {
-			status, terminalStage, message = gotStatus, gotStage, gotMessage
-		})
-
-	if strings.Join(stages, ",") != "R005,RULES,R001_DIAGNOSTIC" {
-		t.Fatalf("stages=%v status=%s terminal_stage=%s message=%q; business blocker aborted report generation", stages, status, terminalStage, message)
-	}
-	if status != RunWaitingUserRules || terminalStage != "RULES_REVIEW" || !strings.Contains(message, "диагностический комплект") {
-		t.Fatalf("status=%s stage=%s message=%q", status, terminalStage, message)
-	}
-	assertNoLoaderWorkbook(t, filepath.Join(runDir, "r001"))
-	files, err := collectStageResultFiles(filepath.Join(runDir, "r001"), run.ID, "r001")
-	if err != nil {
-		t.Fatal(err)
-	}
-	visibleKinds := map[string]bool{}
-	for _, file := range files {
-		if file.URL == "" {
-			t.Fatalf("visible output lacks direct download URL: %#v", file)
-		}
-		visibleKinds[file.Kind] = true
-	}
-	for _, kind := range []string{"registry", "journal", "diagnostics", "manifest"} {
-		if !visibleKinds[kind] {
-			t.Fatalf("separate visible %s artifact is missing: %#v", kind, files)
-		}
-	}
-	visibleManifestPath := filepath.Join(runDir, "r001", "service-report-package", "technical", "report-package.manifest.json")
-	var visibleManifest map[string]any
-	if err := readJSONFile(visibleManifestPath, &visibleManifest); err != nil {
-		t.Fatal(err)
-	}
-	if visibleManifest["route_rows"] != float64(0) || visibleManifest["loader_workbook_count"] != float64(0) {
-		t.Fatalf("zero-route package declared a loader result: %#v", visibleManifest)
-	}
-	if len(visibleManifest["correction_registries"].([]any)) == 0 {
-		t.Fatalf("visible manifest did not declare the correction registry: %#v", visibleManifest)
-	}
-	for _, declared := range []string{"diagnostics", "journal", "artifact_registry"} {
-		artifact, ok := visibleManifest[declared].(map[string]any)
-		if !ok || strings.TrimSpace(artifact["name"].(string)) == "" || !validSHA256(artifact["sha256"].(string)) {
-			t.Fatalf("visible manifest did not declare exact %s artifact: %#v", declared, visibleManifest)
-		}
-	}
-	safety := visibleManifest["safety"].(map[string]any)
-	if safety["mode"] != "REPORT_ONLY" || safety["posting_rows"] != float64(0) || safety["ready_to_upload"] != false ||
-		safety["release_allowed"] != false || safety["live_1c_allowed"] != false {
-		t.Fatalf("visible package safety gates opened: %#v", safety)
-	}
 }
 
 func TestBusinessBlockedR001AcceptsOnlyCompleteReportOnlyPackage(t *testing.T) {
@@ -167,103 +37,6 @@ func TestBusinessBlockedR001AcceptsOnlyCompleteReportOnlyPackage(t *testing.T) {
 	writeOrchestrationJSON(t, manifestPath, manifest)
 	if err := validateR001ReportOnlyPackageForRun(r001Dir, run, contextValue); err == nil {
 		t.Fatal("unsafe direct-path package was accepted")
-	}
-	return
-	for _, test := range []struct {
-		name          string
-		makeUnsafe    bool
-		expectVisible bool
-		status        RunStatus
-		stage         string
-	}{
-		{name: "unclassified nonzero keeps visible package but fails closed", expectVisible: true, status: RunFailed, stage: "R001"},
-		{name: "unsafe package remains failed", makeUnsafe: true, status: RunFailed, stage: "R001"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			store, err := OpenStore(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			run := Run{ID: "run_r001_fail_soft", ContextID: "ctx_r001_fail_soft", Status: RunRunning, Stage: "R005", StartedAt: time.Now().UTC(), Safety: reportOnlySafety()}
-			contextValue := Context{ID: run.ContextID, Organization: "9 Управляющая компания", OrganizationID: structuralSourceOrganizationID, OrganizationName: "9 Управляющая компания", OrganizationPath: "Холдинг / 9 Управляющая компания", Period: "2025-10"}
-			store.state.Runs[run.ID] = run
-			store.state.Contexts[contextValue.ID] = contextValue
-			if err := store.saveLocked(); err != nil {
-				t.Fatal(err)
-			}
-			rulesRegistry, rulesSeed := newTestRulesRegistry(t, store)
-			runDir := filepath.Join(store.RunsDir(), run.ID)
-			if err := os.MkdirAll(runDir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			pipeline := &Pipeline{store: store, rulesRegistry: rulesRegistry, runtime: &RuntimeAdapter{
-				Root: t.TempDir(), Node: "node", R005Script: "opiu_reconcile.mjs", RulesScript: "cli.mjs",
-				R001Script: "correction_engine_r001.mjs", RulesRegistry: rulesSeed,
-			}, active: map[string]struct{}{}}
-
-			stages := []string{}
-			pipeline.runner = func(stage string, command []string, values map[string]string, currentRunDir, runtimeRoot string) error {
-				stages = append(stages, stage)
-				switch stage {
-				case "R005":
-					writePipelineStructuralInventoryV3(t, store, run, contextValue)
-					writeFailSoftR005Fixture(t, filepath.Join(runDir, "r005"), contextValue, "BLOCKED_R005_REPASS_REQUIRED")
-					refreshFailSoftInventoryProvenance(t, filepath.Join(runDir, "r005", "structural-control-inventory.json"), filepath.Join(runDir, "r005"))
-				case "RULES":
-					handoffPath := filepath.Join(runDir, "handoff", "r001_handoff.json")
-					if err := writeStructuralControlHandoffFixture(handoffPath, run, contextValue,
-						filepath.Join(runDir, "r005", "reconciliation.codex-input.json"),
-						filepath.Join(runDir, "r005", structuralControlProofFilename)); err != nil {
-						t.Fatal(err)
-					}
-					contextPath := filepath.Join(runDir, "rules_engine_context.json")
-					writeOrchestrationJSON(t, filepath.Join(runDir, "rules", "workflow_decision.json"), map[string]any{
-						"schema_version": "opiu-rules-workflow-decision.v1", "run_id": run.ID, "phase": "AFTER_R005",
-						"next_action": "PASS_TO_R001", "handoff": map[string]any{"target": "R001", "handoff_path": handoffPath},
-					})
-					writeNoopRulesEngineArtifacts(t, contextPath, filepath.Join(runDir, "rules"), run.ID)
-				case "R001":
-					joined := "\x00" + strings.Join(command, "\x00") + "\x00"
-					if !strings.Contains(joined, "\x00--handoff\x00") {
-						t.Fatal("final R001 lost the verified Rules handoff")
-					}
-					writeFailSoftR001PackageFixtureForRun(t, filepath.Join(runDir, "r001"), run, contextValue)
-					if test.makeUnsafe {
-						manifestPath, err := findR001Manifest(filepath.Join(runDir, "r001"))
-						if err != nil {
-							t.Fatal(err)
-						}
-						var manifest map[string]any
-						if err := readJSONFile(manifestPath, &manifest); err != nil {
-							t.Fatal(err)
-						}
-						manifest["results"].(map[string]any)["live_1c_allowed"] = true
-						writeOrchestrationJSON(t, manifestPath, manifest)
-					}
-					return errors.New("exit status 1")
-				default:
-					t.Fatalf("unexpected stage %s", stage)
-				}
-				return nil
-			}
-
-			var status RunStatus
-			var terminalStage string
-			writeStructuralControlInitialRunManifest(t, runDir, run, contextValue)
-			pipeline.executeRuntime(run, contextValue, "erp.xlsx", strings.Repeat("A", 64), "intalev.xlsx", runDir,
-				func(gotStatus RunStatus, gotStage, _ string) { status, terminalStage = gotStatus, gotStage })
-			if strings.Join(stages, ",") != "R005,RULES,R001" || status != test.status || terminalStage != test.stage {
-				t.Fatalf("stages=%v status=%s stage=%s", stages, status, terminalStage)
-			}
-			assertNoLoaderWorkbook(t, filepath.Join(runDir, "r001"))
-			visibleErr := validateVisibleReportPackage(filepath.Join(runDir, "r001"), run, contextValue)
-			if test.expectVisible && visibleErr != nil {
-				t.Fatalf("safe diagnostic package was not retained after unclassified nonzero: %v", visibleErr)
-			}
-			if !test.expectVisible && visibleErr == nil {
-				t.Fatal("unsafe R001 package became visible")
-			}
-		})
 	}
 }
 
@@ -313,50 +86,6 @@ func TestVisibleReportPackageIsDeterministicAndImmutable(t *testing.T) {
 	if err != nil || before != after {
 		t.Fatalf("direct visible package is not deterministic: before=%s after=%s err=%v", before, after, err)
 	}
-	return
-	for _, test := range []struct {
-		name   string
-		tamper bool
-	}{
-		{name: "same run produces identical package"},
-		{name: "existing package is not overwritten", tamper: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			runDir := t.TempDir()
-			run := Run{ID: "run_deterministic", ContextID: "ctx_deterministic", StartedAt: time.Date(2025, 10, 31, 12, 0, 0, 0, time.UTC), Safety: reportOnlySafety()}
-			contextValue := Context{ID: run.ContextID, Organization: "9 Управляющая компания", OrganizationID: structuralSourceOrganizationID, OrganizationName: "9 Управляющая компания", OrganizationPath: "Холдинг / 9 Управляющая компания", Period: "2025-10"}
-			writeFailSoftR005Fixture(t, filepath.Join(runDir, "r005"), contextValue, "BLOCKED_HIERARCHY_METADATA_MISSING")
-			writeFailSoftR001PackageFixtureForRun(t, filepath.Join(runDir, "r001"), run, contextValue)
-			if err := materializeVisibleReportPackage(run, contextValue, runDir, filepath.Join(runDir, "r001"), "RULES", "WAIT_USER_RULES", "Требуется решение пользователя"); err != nil {
-				t.Fatal(err)
-			}
-			manifestPath := filepath.Join(runDir, "r001", "service-report-package", "technical", "report-package.manifest.json")
-			before, err := sha256File(manifestPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if test.tamper {
-				diagnosticsPath := filepath.Join(runDir, "r001", "service-report-package", "technical", "diagnostics.json")
-				if err := os.WriteFile(diagnosticsPath, []byte("tampered"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				if err := materializeVisibleReportPackage(run, contextValue, runDir, filepath.Join(runDir, "r001"), "RULES", "WAIT_USER_RULES", "Требуется решение пользователя"); err == nil {
-					t.Fatal("materialization overwrote or accepted an existing mutated package")
-				}
-				return
-			}
-			if err := materializeVisibleReportPackage(run, contextValue, runDir, filepath.Join(runDir, "r001"), "RULES", "WAIT_USER_RULES", "Требуется решение пользователя"); err != nil {
-				t.Fatal(err)
-			}
-			after, err := sha256File(manifestPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if before != after {
-				t.Fatalf("same run changed visible package bytes: before=%s after=%s", before, after)
-			}
-		})
-	}
 }
 
 func TestR001PackageRejectsReadyWithoutExactPhysicalProof(t *testing.T) {
@@ -390,32 +119,6 @@ func TestVisibleReportPackageRejectsEngineManifestMutation(t *testing.T) {
 		if err := validateVisibleReportPackage(r001Dir, run, contextValue); err == nil {
 			t.Fatal("post-validation engine manifest mutation was accepted")
 		}
-	}
-	return
-	runDir := t.TempDir()
-	run := Run{ID: "run_engine_manifest_mutation", ContextID: "ctx_engine_manifest_mutation", StartedAt: time.Date(2025, 10, 31, 12, 0, 0, 0, time.UTC), Safety: reportOnlySafety()}
-	contextValue := Context{ID: run.ContextID, Organization: "9 Управляющая компания", OrganizationID: structuralSourceOrganizationID, OrganizationName: "9 Управляющая компания", OrganizationPath: "Холдинг / 9 Управляющая компания", Period: "2025-10"}
-	writeFailSoftR005Fixture(t, filepath.Join(runDir, "r005"), contextValue, "BLOCKED_HIERARCHY_METADATA_MISSING")
-	r001Dir := filepath.Join(runDir, "r001")
-	writeFailSoftR001PackageFixtureForRun(t, r001Dir, run, contextValue)
-	if err := materializeVisibleReportPackage(run, contextValue, runDir, r001Dir, "RULES", "WAIT_USER_RULES", "Требуется решение пользователя"); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateVisibleReportPackage(r001Dir, run, contextValue); err != nil {
-		t.Fatalf("fresh visible package rejected: %v", err)
-	}
-	engineManifestPath, err := findR001Manifest(r001Dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var manifest map[string]any
-	if err := readJSONFile(engineManifestPath, &manifest); err != nil {
-		t.Fatal(err)
-	}
-	manifest["mutation"] = "after-visible-validation"
-	writeOrchestrationJSON(t, engineManifestPath, manifest)
-	if err := validateVisibleReportPackage(r001Dir, run, contextValue); err == nil {
-		t.Fatal("post-validation engine manifest mutation was accepted")
 	}
 }
 

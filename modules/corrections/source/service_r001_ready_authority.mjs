@@ -7,6 +7,7 @@ const BLOCKER_LEG_COUNT = "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID";
 const BLOCKER_MIXED_ROUTE = "SERVICE_HANDOFF_PAIR_MIXED_OUTPUT_ROUTE";
 const BLOCKER_OPERATIONS = "SERVICE_HANDOFF_PAIR_OPERATIONS_INVALID";
 const BLOCKER_MULTIPLE_IDS = "SERVICE_HANDOFF_PAIR_MULTIPLE_SOURCE_ROW_IDS";
+const BLOCKER_UNBALANCED = "SERVICE_HANDOFF_PAIR_UNBALANCED_NON_FINANCIAL";
 
 function clean(value) {
   return String(value ?? "").replace(/\u00A0/g, " ").trim();
@@ -73,6 +74,7 @@ export function enforceServiceHandoffReadyAuthority(rows = [], sourceRowIDs = []
   }
 
   const blockersByPair = new Map();
+  const nonFinancialPairIDs = new Set();
   for (const [pairID, pairRows] of rowsByPair) {
     if (!pairRows.some((row) => clean(row?.output_route).toUpperCase() === "READY")) continue;
     const blockers = [];
@@ -91,14 +93,32 @@ export function enforceServiceHandoffReadyAuthority(rows = [], sourceRowIDs = []
     if (sourceRowIDsForPair.some((sourceRowID) => (pairsBySourceRowID.get(sourceRowID)?.size ?? 0) !== 1)) {
       blockers.push(BLOCKER_REUSED);
     }
-    if (blockers.length) blockersByPair.set(pairID, blockers);
+    if (blockers.length) {
+      const stornoCents = pairRows
+        .filter((row) => clean(row?.operation).toUpperCase() === "STORNO")
+        .reduce((sum, row) => sum + Math.round(Number(row?.amount ?? 0) * 100), 0);
+      const repostCents = pairRows
+        .filter((row) => clean(row?.operation).toUpperCase() === "REPOST")
+        .reduce((sum, row) => sum + Math.round(Number(row?.amount ?? 0) * 100), 0);
+      if (stornoCents <= 0 || repostCents <= 0 || stornoCents !== repostCents) {
+        blockers.push(BLOCKER_UNBALANCED);
+        nonFinancialPairIDs.add(pairID);
+      }
+      blockersByPair.set(pairID, unique(blockers));
+    }
   }
 
-  const gatedRows = rows.map((row) => {
+  const gatedRows = rows.flatMap((row) => {
     const pairID = clean(row?.pair_id) || `AUDIT:${clean(row?.audit_identity)}`;
     const blockers = blockersByPair.get(pairID);
-    return blockers ? quarantinePairRow(row, blockers) : row;
+    if (nonFinancialPairIDs.has(pairID)) return [];
+    return [blockers ? quarantinePairRow(row, blockers) : row];
   });
+  const nonFinancialReviews = [...nonFinancialPairIDs].map((pairID) => Object.freeze({
+    pair_id: pairID,
+    blocker_codes: Object.freeze([...(blockersByPair.get(pairID) ?? [])]),
+    canonical_financial_rows: 0,
+  }));
   return Object.freeze({
     rows: Object.freeze(gatedRows),
     audit: Object.freeze({
@@ -106,6 +126,8 @@ export function enforceServiceHandoffReadyAuthority(rows = [], sourceRowIDs = []
       ready_rows_before_gate: rows.filter((row) => clean(row?.output_route).toUpperCase() === "READY").length,
       ready_rows_after_gate: gatedRows.filter((row) => row.output_route === "READY").length,
       blocked_pair_count: blockersByPair.size,
+      non_financial_pair_count: nonFinancialReviews.length,
+      non_financial_reviews: Object.freeze(nonFinancialReviews),
       blocker_codes: Object.freeze(unique([...blockersByPair.values()].flat())),
     }),
   });

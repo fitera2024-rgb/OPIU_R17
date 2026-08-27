@@ -261,49 +261,6 @@ func TestExternalPipelineAnchorsVerifiedInventoryBeforeDirectR001(t *testing.T) 
 			t.Fatalf("external direct result: stages=%v status=%s stage=%s", stages, finalStatus, finalStage)
 		}
 	}
-	return
-	store, contextValue, run, runDir := newPipelineStructuralContext(t)
-	var finalStatus RunStatus
-	var finalStage string
-	rulesStarted := false
-	pipeline := &Pipeline{
-		store: store,
-		commands: map[string][]string{
-			"R005":  {"r005", "--run-id", "{run_id}", "--context-id", "{context_id}", "--organization-id", "{organization_id}", "--organization-name", "{organization_name}", "--organization-path", "{organization_path}"},
-			"RULES": {"rules"}, "R001": {"r001"},
-		},
-	}
-	pipeline.runner = func(stage string, command []string, values map[string]string, _, _ string) error {
-		switch stage {
-		case "R005":
-			expanded := expandCommand(command, values)
-			joined := ""
-			for _, value := range expanded {
-				joined += "\x00" + value
-			}
-			for _, expected := range []string{run.ID, contextValue.ID, contextValue.OrganizationID, contextValue.OrganizationName, contextValue.OrganizationPath} {
-				if !containsNULTerm(joined, expected) {
-					t.Errorf("exact R005 argv value missing: %q in %#v", expected, expanded)
-				}
-			}
-			writePipelineStructuralInventoryV3(t, store, run, contextValue)
-		case "RULES":
-			rulesStarted = true
-			if _, ok := store.StructuralControlInventoryAnchor(run.ID); !ok {
-				t.Error("Rules started before immutable structural inventory anchor")
-			}
-		}
-		return nil
-	}
-	pipeline.executeExternal(run, contextValue, "erp.xlsx", "intalev.xlsx", runDir, func(status RunStatus, stage, _ string) {
-		finalStatus, finalStage = status, stage
-	})
-	if !rulesStarted || finalStatus != RunCompletedReportOnly || finalStage != "DONE" {
-		t.Fatalf("unexpected result: rules=%v status=%s stage=%s", rulesStarted, finalStatus, finalStage)
-	}
-	if _, ok := store.StructuralControlInventoryAnchor(run.ID); !ok {
-		t.Fatal("verified structural inventory was not anchored")
-	}
 }
 
 func TestExternalPipelineBlocksBeforeRulesWithoutVerifiedInventory(t *testing.T) {
@@ -328,30 +285,6 @@ func TestExternalPipelineBlocksBeforeRulesWithoutVerifiedInventory(t *testing.T)
 		if finalStatus != RunBlockedStructuralInventory || finalStage != "R005_INVENTORY" {
 			t.Fatalf("missing inventory status=%s stage=%s", finalStatus, finalStage)
 		}
-	}
-	return
-	store, contextValue, run, runDir := newPipelineStructuralContext(t)
-	rulesStarted := false
-	var finalStatus RunStatus
-	var finalStage string
-	pipeline := &Pipeline{store: store, commands: map[string][]string{"R005": {"r005"}, "RULES": {"rules"}, "R001": {"r001"}}}
-	pipeline.runner = func(stage string, _ []string, _ map[string]string, _, _ string) error {
-		if stage == "RULES" {
-			rulesStarted = true
-		}
-		return nil
-	}
-	pipeline.executeExternal(run, contextValue, "erp.xlsx", "intalev.xlsx", runDir, func(status RunStatus, stage, _ string) {
-		finalStatus, finalStage = status, stage
-	})
-	if rulesStarted {
-		t.Fatal("Rules started without verified structural inventory")
-	}
-	if finalStatus != RunStatus("BLOCKED_STRUCTURAL_INVENTORY") || finalStage != "R005_INVENTORY" {
-		t.Fatalf("status=%s stage=%s", finalStatus, finalStage)
-	}
-	if _, ok := store.StructuralControlInventoryAnchor(run.ID); ok {
-		t.Fatal("missing inventory created an anchor")
 	}
 }
 

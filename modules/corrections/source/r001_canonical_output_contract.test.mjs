@@ -553,8 +553,8 @@ test("invalid full-pair shapes and SourceRowID bindings demote every READY leg",
       allowed: ["ROW-12"],
       blocker: "SERVICE_HANDOFF_PAIR_MIXED_OUTPUT_ROUTE",
     },
-    { name: "one leg", rows: readyPair("PAIR-ONE", "ONE").slice(0, 1), allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID" },
-    { name: "three legs", rows: [...readyPair("PAIR-THREE", "THREE"), canonicalRow({ auditIdentity: "THREE-X", caseOverrides: { pair_id: "PAIR-THREE" } })], allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID" },
+    { name: "one leg", rows: readyPair("PAIR-ONE", "ONE").slice(0, 1), allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID", expectedRows: 0 },
+    { name: "three legs", rows: [...readyPair("PAIR-THREE", "THREE"), canonicalRow({ auditIdentity: "THREE-X", caseOverrides: { pair_id: "PAIR-THREE" } })], allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID", expectedRows: 0 },
     { name: "four legs", rows: [...readyPair("PAIR-FOUR", "FOUR-A"), ...readyPair("PAIR-FOUR", "FOUR-B")], allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID" },
     {
       name: "duplicate operation",
@@ -564,6 +564,7 @@ test("invalid full-pair shapes and SourceRowID bindings demote every READY leg",
       ],
       allowed: ["ROW-12"],
       blocker: "SERVICE_HANDOFF_PAIR_OPERATIONS_INVALID",
+      expectedRows: 0,
     },
     {
       name: "two allowed IDs",
@@ -599,14 +600,15 @@ test("invalid full-pair shapes and SourceRowID bindings demote every READY leg",
   for (const scenario of cases) {
     const gate = enforceServiceHandoffReadyAuthority(scenario.rows, scenario.allowed);
     const output = collectCanonicalFinancialOutput(gate.rows);
+    const expectedRows = scenario.expectedRows ?? scenario.rows.length;
     assert.equal(output.counters.ready_financial_rows, 0, scenario.name);
-    assert.equal(output.counters.sporno_financial_rows, scenario.rows.length, scenario.name);
+    assert.equal(output.counters.sporno_financial_rows, expectedRows, scenario.name);
     assert.ok(gate.audit.blocker_codes.includes(scenario.blocker), scenario.name);
     assert.ok(output.rows.every((row) => row.output_route === "SPORNO"), scenario.name);
   }
 });
 
-test("paired correction rejects unequal STORNO and REPOST amounts", () => {
+test("universal zero-sum rejects unequal pairs and authority quarantine emits zero financial rows", () => {
   assert.throws(() => collectCanonicalFinancialOutput([
     canonicalRow({
       auditIdentity: "UNBALANCED-STORNO",
@@ -623,6 +625,29 @@ test("paired correction rejects unequal STORNO and REPOST amounts", () => {
     && error.details.storno_cents === 10000
     && error.details.repost_cents === 8000
     && error.details.signed_total_cents === -2000);
+  const gate = enforceServiceHandoffReadyAuthority([
+    canonicalRow({
+      auditIdentity: "QUARANTINE-STORNO", amount: 100,
+      sourceOverrides: { source_row_id: "ROW-OUTSIDE" },
+      caseOverrides: { pair_id: "PAIR-QUARANTINE" },
+    }),
+    canonicalRow({
+      auditIdentity: "QUARANTINE-REPOST", operation: "REPOST", amount: 80,
+      sourceOverrides: { source_row_id: "ROW-OUTSIDE" },
+      caseOverrides: { pair_id: "PAIR-QUARANTINE" },
+    }),
+  ], ["ROW-12"]);
+  const output = collectCanonicalFinancialOutput(gate.rows);
+  assert.equal(output.counters.canonical_financial_rows_total, 0);
+  assert.equal(gate.audit.non_financial_pair_count, 1);
+  assert.deepEqual(gate.audit.non_financial_reviews[0], {
+    pair_id: "PAIR-QUARANTINE",
+    blocker_codes: [
+      "SERVICE_HANDOFF_SOURCE_ROW_ID_OUTSIDE_EXACT_SET",
+      "SERVICE_HANDOFF_PAIR_UNBALANCED_NON_FINANCIAL",
+    ],
+    canonical_financial_rows: 0,
+  });
 });
 
 test("column P excludes technical audit data while registry keeps it separately", () => {

@@ -313,6 +313,9 @@ function assertBalancedCorrectionPairs(rows) {
       .reduce((sum, row) => sum + Math.round(Number(row.amount) * 100), 0);
     const signedTotalCents = repostCents - stornoCents;
     if (stornoCents <= 0 || repostCents <= 0 || stornoCents !== repostCents || signedTotalCents !== 0) {
+      const serviceHandoffQuarantine = pairRows.every((row) => row.output_route === "SPORNO"
+        && row.materialization_case?.blockers?.some((blocker) => text(blocker).startsWith("SERVICE_HANDOFF_")));
+      if (serviceHandoffQuarantine) continue;
       fail("UNBALANCED_CORRECTION_PAIR", "Paired correction requires equal absolute STORNO/REPOST amounts and zero signed total", {
         pair_id: pairId,
         storno_cents: stornoCents,

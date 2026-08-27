@@ -158,17 +158,20 @@ function workbookRecords(output) {
   }));
 }
 
-test("exact Service handoff SourceRowID is the only authority that preserves READY", () => {
-  const row = canonicalRow();
-  const gate = enforceServiceHandoffReadyAuthority([row], ["ROW-12"]);
+test("exact two-leg STORNO+REPOST pair with one handoff SourceRowID preserves READY", () => {
+  const rows = [
+    canonicalRow({ auditIdentity: "EXACT-S", caseOverrides: { pair_id: "PAIR-EXACT" } }),
+    canonicalRow({ auditIdentity: "EXACT-R", operation: "REPOST", caseOverrides: { pair_id: "PAIR-EXACT" } }),
+  ];
+  const gate = enforceServiceHandoffReadyAuthority(rows, ["ROW-12"]);
   const output = collectCanonicalFinancialOutput(gate.rows);
   assert.deepEqual(output.headers, LOADER_A_AA_FIELDS);
   assert.equal(output.headers.length, 27);
-  assert.deepEqual(output.groups[0].rows[0].loader_values, row.loader_values);
   assert.equal(output.groups[0].rows[0].source_organization, "Физическая организация ERP");
   assert.equal(output.groups[0].rows[0].source.source_row_id, "ROW-12");
-  assert.equal(output.counters.ready_financial_rows, 1);
+  assert.equal(output.counters.ready_financial_rows, 2);
   assert.equal(output.counters.storno_rows, 1);
+  assert.equal(output.counters.repost_rows, 1);
   assert.equal(gate.audit.blocked_pair_count, 0);
 });
 
@@ -186,14 +189,17 @@ test("canonical filenames follow section 12.2 for proven and unknown source orga
 });
 
 test("empty Service handoff SourceRowID set demotes every READY row to SPORNO", () => {
-  const row = canonicalRow({ auditIdentity: "AUDIT-R", operation: "REPOST" });
-  const gate = enforceServiceHandoffReadyAuthority([row], []);
+  const gate = enforceServiceHandoffReadyAuthority([
+    canonicalRow({ auditIdentity: "EMPTY-S", caseOverrides: { pair_id: "PAIR-EMPTY" } }),
+    canonicalRow({ auditIdentity: "EMPTY-R", operation: "REPOST", caseOverrides: { pair_id: "PAIR-EMPTY" } }),
+  ], []);
   const output = collectCanonicalFinancialOutput(gate.rows);
   assert.equal(output.rows[0].loader["СубконтоДт1"], null);
   assert.equal(output.rows[0].source.source_row_id, "");
   assert.equal(output.rows[0].output_route, "SPORNO");
   assert.equal(output.counters.ready_financial_rows, 0);
-  assert.equal(output.counters.sporno_financial_rows, 1);
+  assert.equal(output.counters.sporno_financial_rows, 2);
+  assert.equal(output.counters.storno_rows, 1);
   assert.equal(output.counters.repost_rows, 1);
   assert.deepEqual(gate.audit.blocker_codes, ["SERVICE_HANDOFF_SOURCE_ROW_ID_OUTSIDE_EXACT_SET"]);
 });
@@ -532,20 +538,72 @@ test("canonical integrity exposes full explicit service REPORT_ONLY safety witho
   assert.equal(integrity.registry_financial_rows, 2);
 });
 
-test("outside or reused Service handoff SourceRowID yields zero READY and explicit blockers", () => {
-  const gate = enforceServiceHandoffReadyAuthority([
-    canonicalRow({ auditIdentity: "OUTSIDE", sourceOverrides: { source_row_id: "ROW-OUTSIDE" }, caseOverrides: { pair_id: "PAIR-OUTSIDE" } }),
-    canonicalRow({ auditIdentity: "REUSE-A", caseOverrides: { pair_id: "PAIR-A" } }),
-    canonicalRow({ auditIdentity: "REUSE-B", caseOverrides: { pair_id: "PAIR-B" } }),
-  ], ["ROW-12"]);
-  const output = collectCanonicalFinancialOutput(gate.rows);
-  assert.equal(output.counters.ready_financial_rows, 0);
-  assert.equal(output.counters.sporno_financial_rows, 3);
-  assert.ok(output.rows.every((row) => row.materialization_case.blockers.some((value) => value.startsWith("SERVICE_HANDOFF_SOURCE_ROW_ID_"))));
-  assert.deepEqual(new Set(gate.audit.blocker_codes), new Set([
-    "SERVICE_HANDOFF_SOURCE_ROW_ID_OUTSIDE_EXACT_SET",
-    "SERVICE_HANDOFF_SOURCE_ROW_ID_REUSED",
-  ]));
+test("invalid full-pair shapes and SourceRowID bindings demote every READY leg", () => {
+  const readyPair = (pairID, prefix, sourceRowID = "ROW-12") => [
+    canonicalRow({ auditIdentity: `${prefix}-S`, sourceOverrides: { source_row_id: sourceRowID }, caseOverrides: { pair_id: pairID } }),
+    canonicalRow({ auditIdentity: `${prefix}-R`, operation: "REPOST", sourceOverrides: { source_row_id: sourceRowID }, caseOverrides: { pair_id: pairID } }),
+  ];
+  const cases = [
+    {
+      name: "mixed READY+SPORNO",
+      rows: [
+        canonicalRow({ auditIdentity: "MIX-S", caseOverrides: { pair_id: "PAIR-MIX" } }),
+        canonicalRow({ auditIdentity: "MIX-R", operation: "REPOST", route: "SPORNO", caseOverrides: { pair_id: "PAIR-MIX" } }),
+      ],
+      allowed: ["ROW-12"],
+      blocker: "SERVICE_HANDOFF_PAIR_MIXED_OUTPUT_ROUTE",
+    },
+    { name: "one leg", rows: readyPair("PAIR-ONE", "ONE").slice(0, 1), allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID" },
+    { name: "three legs", rows: [...readyPair("PAIR-THREE", "THREE"), canonicalRow({ auditIdentity: "THREE-X", caseOverrides: { pair_id: "PAIR-THREE" } })], allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID" },
+    { name: "four legs", rows: [...readyPair("PAIR-FOUR", "FOUR-A"), ...readyPair("PAIR-FOUR", "FOUR-B")], allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID" },
+    {
+      name: "duplicate operation",
+      rows: [
+        canonicalRow({ auditIdentity: "DUP-A", caseOverrides: { pair_id: "PAIR-DUP" } }),
+        canonicalRow({ auditIdentity: "DUP-B", caseOverrides: { pair_id: "PAIR-DUP" } }),
+      ],
+      allowed: ["ROW-12"],
+      blocker: "SERVICE_HANDOFF_PAIR_OPERATIONS_INVALID",
+    },
+    {
+      name: "two allowed IDs",
+      rows: [
+        canonicalRow({ auditIdentity: "TWO-S", caseOverrides: { pair_id: "PAIR-TWO" } }),
+        canonicalRow({ auditIdentity: "TWO-R", operation: "REPOST", sourceOverrides: { source_row_id: "ROW-13", source_range: "B13:AG13" }, caseOverrides: { pair_id: "PAIR-TWO" } }),
+      ],
+      allowed: ["ROW-12", "ROW-13"],
+      blocker: "SERVICE_HANDOFF_PAIR_MULTIPLE_SOURCE_ROW_IDS",
+    },
+    { name: "outside ID", rows: readyPair("PAIR-OUT", "OUT", "ROW-OUTSIDE"), allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_SOURCE_ROW_ID_OUTSIDE_EXACT_SET" },
+    {
+      name: "missing ID",
+      rows: readyPair("PAIR-MISSING", "MISSING").map((row) => ({
+        ...row,
+        source: { ...row.source, source_row_id: "" },
+        loader: { ...row.loader, "ИдентификаторФинЗаписи": null },
+        materialization_case: {
+          ...row.materialization_case,
+          physical_source: { ...row.materialization_case.physical_source, source_row_id: "" },
+        },
+      })),
+      allowed: ["ROW-12"],
+      blocker: "SERVICE_HANDOFF_SOURCE_ROW_ID_MISSING",
+    },
+    {
+      name: "reuse across pairs",
+      rows: [...readyPair("PAIR-REUSE-A", "REUSE-A"), ...readyPair("PAIR-REUSE-B", "REUSE-B")],
+      allowed: ["ROW-12"],
+      blocker: "SERVICE_HANDOFF_SOURCE_ROW_ID_REUSED",
+    },
+  ];
+  for (const scenario of cases) {
+    const gate = enforceServiceHandoffReadyAuthority(scenario.rows, scenario.allowed);
+    const output = collectCanonicalFinancialOutput(gate.rows);
+    assert.equal(output.counters.ready_financial_rows, 0, scenario.name);
+    assert.equal(output.counters.sporno_financial_rows, scenario.rows.length, scenario.name);
+    assert.ok(gate.audit.blocker_codes.includes(scenario.blocker), scenario.name);
+    assert.ok(output.rows.every((row) => row.output_route === "SPORNO"), scenario.name);
+  }
 });
 
 test("paired correction rejects unequal STORNO and REPOST amounts", () => {

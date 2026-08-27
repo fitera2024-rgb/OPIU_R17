@@ -80,7 +80,17 @@
       "sha256": "81154D1EFEDA3736BD2AEADED540FF8573412348D66F1E2317A80ADAAEB55494"
     }
   ],
+  "runtime_exact_files": [
+    {
+      "role": "organizations",
+      "source_path": "data/defaults/organizations.json",
+      "package_path": "runtime/data/defaults/organizations.json",
+      "size": 653773,
+      "sha256": "FA28B10504520A8EF5BD47ADED85401F2B521938479E4E895BCE37861AA6DE1B"
+    }
+  ],
   "runtime_source_roots": [
+    "data/defaults",
     "modules/corrections/source",
     "modules/reconciliation/source",
     "resources/reference"

@@ -14,8 +14,12 @@ release/*
 *.zip
 *.7z
 
-# Local runtime state. Legacy data/defaults belongs to the removed Rules Service.
-data/
+# Local runtime state. Only the authoritative organization catalog is source-controlled;
+# legacy Rules defaults and all other runtime data remain excluded.
+data/*
+!data/defaults/
+data/defaults/*
+!data/defaults/organizations.json
 *.db
 *.sqlite
 

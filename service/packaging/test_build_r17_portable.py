@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 import os
 import subprocess
 import tempfile
@@ -25,6 +26,7 @@ def make_git_source_fixture(root: Path) -> tuple[dict[str, object], str]:
         "modules/corrections/source/safe.mjs": b"export const safe = true;\n",
         "modules/reconciliation/source/safe.mjs": b"export const safe = true;\n",
         "resources/reference/ref.json": b"{}\n",
+        "data/defaults/organizations.json": b"synthetic organizations\n",
         policy["contract"]["source"]: b"synthetic contract",
         policy["unicode_settings"][0]["path"]: b"setting a",
         policy["unicode_settings"][1]["path"]: b"setting b",
@@ -66,7 +68,23 @@ def test_canonical_policy_contains_all_exact_pins_and_closed_gates() -> None:
     assert policy["relocation_smoke"]["relocation_roots"] == 2
     assert policy["relocation_smoke"]["skia_canvas_construct_required"] is True
     assert policy["build_verification"]["verify_both_archives"] is True
+    assert policy["runtime_exact_files"] == BUILDER.expected_runtime_exact_files()
+    assert "data/defaults" in policy["runtime_source_roots"]
     BUILDER.assert_closed_safety(policy["safety"])
+
+
+def test_organizations_policy_pin_matches_rel13b_golden_manifest() -> None:
+    policy = BUILDER.load_policy()
+    golden_path = Path(__file__).with_name("golden") / "REL13B_EXACT_OWNER_RUNTIME.json"
+    golden = json.loads(golden_path.read_text(encoding="utf-8-sig"))
+    rows = [row for row in golden["files"] if row["path"] == "data/defaults/organizations.json"]
+    assert len(rows) == 1
+    binding = policy["runtime_exact_files"][0]
+    assert binding["role"] == "organizations"
+    assert binding["source_path"] == rows[0]["path"]
+    assert binding["package_path"] == "runtime/data/defaults/organizations.json"
+    assert binding["size"] == rows[0]["size"]
+    assert binding["sha256"] == rows[0]["sha256"]
 
 
 def test_policy_rejects_any_open_safety_gate() -> None:
@@ -77,13 +95,15 @@ def test_policy_rejects_any_open_safety_gate() -> None:
         BUILDER.validate_policy(opened)
 
 
-@pytest.mark.parametrize("mutation", ["rules_token", "rules_fragment", "component", "relative", "full"])
+@pytest.mark.parametrize("mutation", ["rules_token", "rules_fragment", "organizations_binding", "component", "relative", "full"])
 def test_policy_rejects_deleted_rules_guards_and_raised_path_limits(mutation: str) -> None:
     changed = copy.deepcopy(BUILDER.load_policy())
     if mutation == "rules_token":
         changed["legacy_rules_gate"]["forbidden_tokens"]["runtime"].pop()
     elif mutation == "rules_fragment":
         changed["legacy_rules_gate"]["forbidden_package_path_fragments"].clear()
+    elif mutation == "organizations_binding":
+        changed["runtime_exact_files"][0]["sha256"] = "0" * 64
     else:
         key = {"component": "component_max", "relative": "relative_max", "full": "full_path_max"}[mutation]
         changed["path_limits"][key] += 1
@@ -144,6 +164,59 @@ def test_service_test_tree_preserves_git_bound_cross_runtime_topology() -> None:
             assert (target / "modules" / "reconciliation" / "source" / "safe.mjs").is_file()
             assert (target / "modules" / "corrections" / "source" / "safe.mjs").is_file()
             assert (target / "resources" / "reference" / "ref.json").is_file()
+            assert (target / "data" / "defaults" / "organizations.json").is_file()
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("missing", "RUNTIME_EXACT_FILE_MISSING"),
+        ("size", "RUNTIME_EXACT_FILE_SIZE_MISMATCH"),
+        ("sha", "RUNTIME_EXACT_FILE_SHA256_MISMATCH"),
+    ],
+)
+def test_staged_runtime_organizations_rejects_missing_size_or_sha_drift(
+    state: str, expected: str,
+) -> None:
+    policy = copy.deepcopy(BUILDER.load_policy())
+    with tempfile.TemporaryDirectory() as raw:
+        stage = Path(raw)
+        target = stage / "runtime/data/defaults/organizations.json"
+        if state != "missing":
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"x" if state == "size" else b"synthetic")
+            if state == "sha":
+                policy["runtime_exact_files"][0].update({
+                    "size": len(b"synthetic"), "sha256": "0" * 64,
+                })
+        with pytest.raises(BUILDER.BuildError, match=expected):
+            BUILDER.verify_staged_runtime_exact_files(stage, policy)
+
+
+def test_exact_runtime_organizations_is_git_bound_and_copied_byte_for_byte() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        repository = Path(raw) / "repository"
+        repository.mkdir()
+        policy, head = make_git_source_fixture(repository)
+        catalog_path = repository / "data/defaults/organizations.json"
+        policy["runtime_exact_files"][0].update({
+            "size": catalog_path.stat().st_size,
+            "sha256": BUILDER.sha256_file(catalog_path),
+        })
+        contract_path = repository / Path(policy["contract"]["source"])
+        policy["contract"]["sha256"] = BUILDER.sha256_file(contract_path)
+        for row in policy["unicode_settings"]:
+            row["sha256"] = BUILDER.sha256_file(repository / Path(row["path"]))
+        source_record = BUILDER.exact_git_source_inventory(repository, head, policy)
+        evidence = BUILDER.verify_contract_and_settings(source_record, policy)
+        assert evidence["runtime_exact_files"] == policy["runtime_exact_files"]
+        stage = Path(raw) / "stage"
+        stage.mkdir()
+        BUILDER.copy_runtime_sources(repository, source_record, stage, policy)
+        verified = BUILDER.verify_staged_runtime_exact_files(stage, policy)
+        assert verified == policy["runtime_exact_files"]
+        packaged = stage / "runtime/data/defaults/organizations.json"
+        assert packaged.read_bytes() == catalog_path.read_bytes()
 
 
 @pytest.mark.parametrize("injection", ["tracked_drift", "untracked", "ignored"])

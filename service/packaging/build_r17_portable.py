@@ -40,7 +40,7 @@ POLICY_SCHEMA = "opiu-r17-portable-policy.v1"
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 RUNTIME_LOGICAL_ROOT = "runtime"
 RUNTIME_EDGE_PATH_FORMAT = "POSIX_RELATIVE_TO_LOGICAL_ROOT"
-EXPECTED_POLICY_VALUE_SHA256 = "26A3B809C1B1D77E56C293BEB5287A4771590D96BC690636DAC678FEA3685576"
+EXPECTED_POLICY_VALUE_SHA256 = "1C190E6EB730DBFA75BB48E6F20FC35C75290D1A373302BCC30B58C26F5C374F"
 RELATIVE_IMPORT_PATTERNS = (
     re.compile(r'''(?:from\s+|import\s*\(\s*|require\s*\(\s*|new\s+URL\s*\(\s*)["'](\.[^"']+)["']'''),
     re.compile(r'''\bimport\s*["'](\.[^"']+)["']'''),
@@ -138,6 +138,10 @@ def validate_policy(policy: dict[str, Any]) -> None:
         or exception.get("d_drive_a_hits") != 3
     ):
         raise BuildError("POLICY_PRIVACY_EXCEPTION_INVALID")
+    if policy.get("runtime_exact_files") != expected_runtime_exact_files():
+        raise BuildError("POLICY_RUNTIME_EXACT_FILES_BINDING_INVALID")
+    if "data/defaults" not in policy.get("runtime_source_roots", []):
+        raise BuildError("POLICY_RUNTIME_ORGANIZATIONS_ROOT_MISSING")
 
 
 def assert_closed_safety(value: Any, expected: dict[str, Any] | None = None) -> None:
@@ -152,6 +156,16 @@ def assert_closed_safety(value: Any, expected: dict[str, Any] | None = None) -> 
     }
     if not isinstance(value, dict) or value != required:
         raise BuildError("REPORT_ONLY_SAFETY_GATES_NOT_EXACT")
+
+
+def expected_runtime_exact_files() -> list[dict[str, Any]]:
+    return [{
+        "role": "organizations",
+        "source_path": "data/defaults/organizations.json",
+        "package_path": "runtime/data/defaults/organizations.json",
+        "size": 653773,
+        "sha256": "FA28B10504520A8EF5BD47ADED85401F2B521938479E4E895BCE37861AA6DE1B",
+    }]
 
 
 def is_reparse(path: Path) -> bool:
@@ -580,7 +594,34 @@ def verify_contract_and_settings(source_record: dict[str, Any], policy: dict[str
         if not source or source["sha256"] != row["sha256"]:
             raise BuildError(f"UNICODE_SETTING_SHA256_MISMATCH:{row['path']}")
         settings.append(dict(row))
-    return {"contract": dict(policy["contract"]), "unicode_settings": settings}
+    exact_files = []
+    for row in policy["runtime_exact_files"]:
+        source = by_path.get(row["source_path"])
+        if source is None:
+            raise BuildError(f"RUNTIME_EXACT_FILE_MISSING:{row['role']}")
+        if source["size"] != row["size"]:
+            raise BuildError(f"RUNTIME_EXACT_FILE_SIZE_MISMATCH:{row['role']}")
+        if source["sha256"] != row["sha256"]:
+            raise BuildError(f"RUNTIME_EXACT_FILE_SHA256_MISMATCH:{row['role']}")
+        exact_files.append(dict(row))
+    return {
+        "contract": dict(policy["contract"]), "unicode_settings": settings,
+        "runtime_exact_files": exact_files,
+    }
+
+
+def verify_staged_runtime_exact_files(stage: Path, policy: dict[str, Any]) -> list[dict[str, Any]]:
+    exact_files = []
+    for row in policy["runtime_exact_files"]:
+        target = stage / Path(row["package_path"])
+        if not target.is_file():
+            raise BuildError(f"RUNTIME_EXACT_FILE_MISSING:{row['role']}")
+        if target.stat().st_size != row["size"]:
+            raise BuildError(f"RUNTIME_EXACT_FILE_SIZE_MISMATCH:{row['role']}")
+        if sha256_file(target) != row["sha256"]:
+            raise BuildError(f"RUNTIME_EXACT_FILE_SHA256_MISMATCH:{row['role']}")
+        exact_files.append(dict(row))
+    return exact_files
 
 
 def _copy_verified_tree(source: Path, target: Path) -> None:
@@ -695,7 +736,8 @@ def _write_metadata(
     runtime_manifest = {
         "schema_version": RUNTIME_SCHEMA, "source_head": source_head,
         "policy_sha256": policy_sha, "safety": safety, "rules_service": False,
-        "legacy_rules_gate": legacy, "dependency_closure": dependency_closure, **runtime_record,
+        "legacy_rules_gate": legacy, "dependency_closure": dependency_closure,
+        "runtime_exact_files": list(policy["runtime_exact_files"]), **runtime_record,
     }
     runtime_manifest_path.write_bytes(canonical_json(runtime_manifest))
     (stage / "CONTRACT_SHA256.txt").write_bytes(
@@ -716,6 +758,7 @@ def _write_metadata(
         },
         "node": node_record, "source_binding": source_binding,
         "contract": dict(policy["contract"]), "unicode_settings": list(policy["unicode_settings"]),
+        "runtime_exact_files": list(policy["runtime_exact_files"]),
         "legacy_rules_gate": legacy, "privacy": privacy,
         "dependency_closure": dependency_closure, "safety": safety,
     }
@@ -729,6 +772,7 @@ def _write_metadata(
         "safety": safety, "legacy_rules_gate": legacy, "privacy": privacy,
         "dependency_closure": dependency_closure,
         "contract": dict(policy["contract"]), "unicode_settings": list(policy["unicode_settings"]),
+        "runtime_exact_files": list(policy["runtime_exact_files"]),
         "toolchains": policy["toolchains"], "self_excluded_from_inventory": True,
         **package_record,
     }
@@ -877,6 +921,7 @@ def _build_one(
         stage = work / policy["archive_root"]
         stage.mkdir()
         source_binding = copy_runtime_sources(repository, expected_source_record, stage, policy)
+        verify_staged_runtime_exact_files(stage, policy)
         source_binding["service_source"] = service_source_record
         source_binding["complete_source_scope"] = expected_source_record
         shutil.copyfile(go_build["first_exe"], stage / policy["executable_name"])

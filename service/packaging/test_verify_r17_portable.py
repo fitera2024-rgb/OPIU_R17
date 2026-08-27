@@ -37,6 +37,12 @@ def synthetic_policy() -> dict[str, object]:
     setting_a = "инструкция".encode("utf-8")
     setting_b = "группа;значение\r\n".encode("utf-8")
     exception_data = b"runneradmin D:\\a\\"
+    organizations = json_bytes({
+        "schema_version": "opiu-organizations.v1", "source": {}, "nodes": [],
+    })
+    policy["runtime_exact_files"][0].update({
+        "size": len(organizations), "sha256": VERIFIER.sha256_bytes(organizations),
+    })
     policy["contract"]["sha256"] = VERIFIER.sha256_bytes(contract)
     policy["unicode_settings"] = [
         {"path": "user-settings/КАК_НАСТРОИТЬ_ГРУППИРОВКУ.txt", "sha256": VERIFIER.sha256_bytes(setting_a)},
@@ -67,6 +73,7 @@ def synthetic_policy() -> dict[str, object]:
     policy["_fixture"] = {
         "contract": contract, "setting_a": setting_a, "setting_b": setting_b,
         "exception": exception_data, "node": node, "modules": module_payloads,
+        "organizations": organizations,
     }
     return policy
 
@@ -149,7 +156,8 @@ def rebuild_manifests(
     payloads["runtime/MANIFEST.json"] = json_bytes({
         "schema_version": VERIFIER.RUNTIME_SCHEMA, "source_head": SOURCE_HEAD,
         "policy_sha256": POLICY_SHA, "safety": policy["safety"], "rules_service": False,
-        "legacy_rules_gate": legacy, "dependency_closure": dependency_closure, **runtime_record,
+        "legacy_rules_gate": legacy, "dependency_closure": dependency_closure,
+        "runtime_exact_files": policy["runtime_exact_files"], **runtime_record,
     })
     if "R17_BUILD_PROVENANCE.json" not in payloads:
         service = payloads["OPIU_R17.exe"]
@@ -172,6 +180,7 @@ def rebuild_manifests(
             },
             "privacy": privacy, "legacy_rules_gate": legacy,
             "dependency_closure": dependency_closure,
+            "runtime_exact_files": policy["runtime_exact_files"],
             "source_binding": binding,
         })
     package_record = VERIFIER.inventory_record(payloads, excluded=("R17_PACKAGE_MANIFEST.json",))
@@ -183,6 +192,7 @@ def rebuild_manifests(
         "safety": policy["safety"], "privacy": privacy, "legacy_rules_gate": legacy,
         "dependency_closure": dependency_closure,
         "contract": policy["contract"], "unicode_settings": policy["unicode_settings"],
+        "runtime_exact_files": policy["runtime_exact_files"],
         "toolchains": policy["toolchains"], "self_excluded_from_inventory": True,
         **package_record,
     })
@@ -197,6 +207,7 @@ def valid_payloads(policy: dict[str, object]) -> dict[str, bytes]:
             b'import {reportOnly} from "./dependency.mjs";\nexport {reportOnly};\n'
         ),
         "runtime/modules/corrections/source/dependency.mjs": b"export const reportOnly = true;\n",
+        "runtime/data/defaults/organizations.json": fixture["organizations"],
         policy["contract"]["package_path"]: fixture["contract"],
         policy["unicode_settings"][0]["path"]: fixture["setting_a"],
         policy["unicode_settings"][1]["path"]: fixture["setting_b"],
@@ -249,7 +260,7 @@ def test_verifier_is_independent_of_the_builder_and_existing_packaging_base() ->
     assert "build_clean_source_service_candidate" not in source
 
 
-@pytest.mark.parametrize("mutation", ["rules_token", "rules_fragment", "component", "relative", "full"])
+@pytest.mark.parametrize("mutation", ["rules_token", "rules_fragment", "organizations_binding", "component", "relative", "full"])
 def test_canonical_policy_value_set_is_immutable(mutation: str) -> None:
     policy = VERIFIER.load_policy()
     changed = copy.deepcopy(policy)
@@ -257,6 +268,8 @@ def test_canonical_policy_value_set_is_immutable(mutation: str) -> None:
         changed["legacy_rules_gate"]["forbidden_tokens"]["env"].clear()
     elif mutation == "rules_fragment":
         changed["legacy_rules_gate"]["forbidden_package_path_fragments"].pop()
+    elif mutation == "organizations_binding":
+        changed["runtime_exact_files"][0]["sha256"] = "0" * 64
     else:
         key = {"component": "component_max", "relative": "relative_max", "full": "full_path_max"}[mutation]
         changed["path_limits"][key] += 1
@@ -343,7 +356,7 @@ def test_builder_and_verifier_accept_existing_directory_url() -> None:
         assert BUILDER.verify_runtime_dependency_closure(runtime) == VERIFIER.verify_runtime_dependency_closure(payloads)
 
 
-@pytest.mark.parametrize("mutation", ["contract", "unicode", "safety", "privacy", "toolchain"])
+@pytest.mark.parametrize("mutation", ["contract", "unicode", "organizations", "safety", "privacy", "toolchain"])
 def test_manifest_and_payload_mutations_fail_closed(mutation: str) -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -352,6 +365,8 @@ def test_manifest_and_payload_mutations_fail_closed(mutation: str) -> None:
             payloads[policy["contract"]["package_path"]] += b"tamper"
         elif mutation == "unicode":
             payloads[policy["unicode_settings"][0]["path"]] += b"tamper"
+        elif mutation == "organizations":
+            payloads[policy["runtime_exact_files"][0]["package_path"]] += b"tamper"
         elif mutation == "safety":
             opened = copy.deepcopy(policy["safety"])
             opened["release_allowed"] = True
@@ -378,6 +393,59 @@ def test_legacy_rules_runtime_mutation_is_rejected_even_with_honest_inventories(
         payloads.pop("R17_BUILD_PROVENANCE.json")
         rebuild_manifests(payloads, policy)
         archive = root / "legacy" / "OPIU_R17.zip"
+        write_archive(archive, payloads, policy)
+        with pytest.raises(VERIFIER.VerificationError, match="LEGACY_RULES_GATE_BLOCKED"):
+            VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("missing", "RUNTIME_EXACT_FILE_MISSING"),
+        ("tampered", "RUNTIME_EXACT_FILE_SHA256_MISMATCH"),
+    ],
+)
+def test_required_organizations_missing_or_tampered_is_rejected_with_honest_inventories(
+    mutation: str, expected: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        _, policy, payloads = make_valid(root / "seed")
+        path = policy["runtime_exact_files"][0]["package_path"]
+        if mutation == "missing":
+            payloads.pop(path)
+        else:
+            original = payloads[path]
+            payloads[path] = bytes([original[0] ^ 1]) + original[1:]
+        payloads.pop("R17_BUILD_PROVENANCE.json")
+        rebuild_manifests(payloads, policy)
+        archive = root / mutation / "OPIU_R17.zip"
+        write_archive(archive, payloads, policy)
+        with pytest.raises(VERIFIER.VerificationError, match=expected):
+            VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
+
+
+def test_runtime_exact_file_binding_claim_must_match_policy() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        _, policy, payloads = make_valid(root / "seed")
+        manifest = json.loads(payloads["R17_PACKAGE_MANIFEST.json"])
+        manifest["runtime_exact_files"] = []
+        payloads["R17_PACKAGE_MANIFEST.json"] = json_bytes(manifest)
+        archive = root / "binding" / "OPIU_R17.zip"
+        write_archive(archive, payloads, policy)
+        with pytest.raises(VERIFIER.VerificationError, match="RUNTIME_EXACT_FILE_BINDING_MISMATCH"):
+            VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
+
+
+def test_legacy_rules_defaults_remain_forbidden_after_organizations_catalog_returns() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        _, policy, payloads = make_valid(root / "seed")
+        payloads["runtime/data/defaults/rules.json"] = b"{}\n"
+        payloads.pop("R17_BUILD_PROVENANCE.json")
+        rebuild_manifests(payloads, policy)
+        archive = root / "rules-defaults" / "OPIU_R17.zip"
         write_archive(archive, payloads, policy)
         with pytest.raises(VERIFIER.VerificationError, match="LEGACY_RULES_GATE_BLOCKED"):
             VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
@@ -554,6 +622,7 @@ def test_synthetic_smoke_api_requires_two_distinct_relocation_roots(
                 "jszip_loaded": True, "artifact_tool_loaded": True,
                 "skia_canvas_loaded": True, "skia_canvas_constructed": True,
                 "health_verified": True, "bootstrap_verified": True,
+                "organizations_verified": True,
                 "port_released": True, "all_outputs_under_extracted_root": True,
                 "output_file_count": 1, "localhost_only": True,
                 "release_approved": False,
@@ -567,6 +636,25 @@ def test_synthetic_smoke_api_requires_two_distinct_relocation_roots(
         assert report["relocation_root_count"] == 2
         assert report["skia_canvas_constructed_in_both"] is True
         assert parents == [root / "short" / "relocation-a", root / "short" / "relocation-b"]
+
+
+@pytest.mark.parametrize("field", ["top_id", "node_type"])
+def test_control_organization_must_be_exact_upper_level(field: str) -> None:
+    rows = [
+        {
+            "node_id": node_id, "name": name, "path": name, "top_id": node_id,
+            "top_name": name, "parent_id": "", "depth": 0,
+            "node_type": "ORGANIZATION", "selectable": True, "source_verified": True,
+        }
+        for node_id, name in (
+            ("ERP-000000224", "9 Управляющая компания"),
+            ("ERP-000000076", "3 Сахалин"),
+        )
+    ]
+    VERIFIER.verify_control_organizations(rows)
+    rows[0][field] = "BROKEN"
+    with pytest.raises(VERIFIER.VerificationError, match="SMOKE_ORGANIZATION_SCOPE_INVALID"):
+        VERIFIER.verify_control_organizations(rows)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows relocation integration")

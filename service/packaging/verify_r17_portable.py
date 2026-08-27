@@ -27,7 +27,7 @@ RUNTIME_SCHEMA = "opiu-r17-runtime-manifest.v1"
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 RUNTIME_LOGICAL_ROOT = "runtime"
 RUNTIME_EDGE_PATH_FORMAT = "POSIX_RELATIVE_TO_LOGICAL_ROOT"
-EXPECTED_POLICY_VALUE_SHA256 = "26A3B809C1B1D77E56C293BEB5287A4771590D96BC690636DAC678FEA3685576"
+EXPECTED_POLICY_VALUE_SHA256 = "1C190E6EB730DBFA75BB48E6F20FC35C75290D1A373302BCC30B58C26F5C374F"
 RELATIVE_IMPORT_PATTERNS = (
     re.compile(r'''(?:from\s+|import\s*\(\s*|require\s*\(\s*|new\s+URL\s*\(\s*)["'](\.[^"']+)["']'''),
     re.compile(r'''\bimport\s*["'](\.[^"']+)["']'''),
@@ -87,7 +87,7 @@ def validate_policy(policy: dict[str, Any], *, enforce_canonical: bool = True) -
     required = {
         "schema_version", "archive_name", "archive_root", "executable_name",
         "fixed_zip_time", "contract", "required_metadata", "safety", "toolchains",
-        "unicode_settings", "legacy_rules_gate", "privacy", "path_limits",
+        "unicode_settings", "runtime_exact_files", "legacy_rules_gate", "privacy", "path_limits",
         "source_integrity", "runtime_dependency_closure", "relocation_smoke",
         "build_verification",
     }
@@ -141,11 +141,36 @@ def validate_policy(policy: dict[str, Any], *, enforce_canonical: bool = True) -
         }
     ):
         raise VerificationError("POLICY_PRIVACY_BINDING_INVALID")
+    expected_exact_files = [{
+        "role": "organizations",
+        "source_path": "data/defaults/organizations.json",
+        "package_path": "runtime/data/defaults/organizations.json",
+        "size": 653773,
+        "sha256": "FA28B10504520A8EF5BD47ADED85401F2B521938479E4E895BCE37861AA6DE1B",
+    }]
+    if policy.get("runtime_exact_files") != expected_exact_files:
+        raise VerificationError("POLICY_RUNTIME_EXACT_FILES_BINDING_INVALID")
+    if "data/defaults" not in policy.get("runtime_source_roots", []):
+        raise VerificationError("POLICY_RUNTIME_ORGANIZATIONS_ROOT_MISSING")
 
 
 def assert_safety(value: Any, expected: dict[str, Any]) -> None:
     if not isinstance(value, dict) or value != expected:
         raise VerificationError("REPORT_ONLY_SAFETY_GATES_NOT_EXACT")
+
+
+def verify_runtime_exact_files(payloads: dict[str, bytes], policy: dict[str, Any]) -> list[dict[str, Any]]:
+    verified = []
+    for row in policy["runtime_exact_files"]:
+        data = payloads.get(row["package_path"])
+        if data is None:
+            raise VerificationError(f"RUNTIME_EXACT_FILE_MISSING:{row['role']}")
+        if len(data) != row["size"]:
+            raise VerificationError(f"RUNTIME_EXACT_FILE_SIZE_MISMATCH:{row['role']}")
+        if sha256_bytes(data) != row["sha256"]:
+            raise VerificationError(f"RUNTIME_EXACT_FILE_SHA256_MISMATCH:{row['role']}")
+        verified.append(dict(row))
+    return verified
 
 
 def validate_relative_path(relative: str, policy: dict[str, Any]) -> None:
@@ -562,6 +587,7 @@ def verify_archive(
     provenance = _json_object(payloads["R17_BUILD_PROVENANCE.json"], "R17_BUILD_PROVENANCE.json")
     runtime_manifest = _json_object(payloads["runtime/MANIFEST.json"], "runtime/MANIFEST.json")
     runtime_safety = _json_object(payloads["runtime/SAFETY.json"], "runtime/SAFETY.json")
+    runtime_exact_files = verify_runtime_exact_files(payloads, policy)
     if manifest.get("schema_version") != PACKAGE_SCHEMA or provenance.get("schema_version") != PROVENANCE_SCHEMA:
         raise VerificationError("TOP_LEVEL_SCHEMA_INVALID")
     if runtime_manifest.get("schema_version") != RUNTIME_SCHEMA:
@@ -669,6 +695,9 @@ def verify_archive(
             raise VerificationError(f"UNICODE_SETTING_MISMATCH:{row['path']}")
     if manifest.get("contract") != contract or manifest.get("unicode_settings") != policy["unicode_settings"]:
         raise VerificationError("PACKAGE_BINDINGS_MISMATCH")
+    for document in (manifest, provenance, runtime_manifest):
+        if document.get("runtime_exact_files") != runtime_exact_files:
+            raise VerificationError("RUNTIME_EXACT_FILE_BINDING_MISMATCH")
     package_record = inventory_record(payloads, excluded=("R17_PACKAGE_MANIFEST.json",))
     for field in ("file_count", "total_size", "inventory_sha256", "files"):
         if manifest.get(field) != package_record[field]:
@@ -693,6 +722,7 @@ def verify_archive(
         "sha256": sha256_file(archive_path), "size": archive_path.stat().st_size,
         "entry_count": len(payloads), "source_head": manifest.get("source_head"),
         "release_approved": False, "safety": policy["safety"],
+        "runtime_exact_files": runtime_exact_files,
         "legacy_rules_gate": legacy, "privacy": privacy,
         "dependency_closure": dependency_closure,
         "source_binding": source_binding,
@@ -704,7 +734,7 @@ def verify_archive(
     return report
 
 
-def _http_json(url: str, timeout: float) -> dict[str, Any]:
+def _http_json_value(url: str, timeout: float) -> Any:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             if response.status != 200:
@@ -714,7 +744,44 @@ def _http_json(url: str, timeout: float) -> dict[str, Any]:
         raise VerificationError("SMOKE_HTTP_REQUEST_FAILED") from error
     if len(data) > 1024 * 1024:
         raise VerificationError("SMOKE_HTTP_RESPONSE_TOO_LARGE")
-    return _json_object(data, url)
+    try:
+        return json.loads(data.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise VerificationError("SMOKE_HTTP_JSON_INVALID") from error
+
+
+def _http_json(url: str, timeout: float) -> dict[str, Any]:
+    value = _http_json_value(url, timeout)
+    if not isinstance(value, dict):
+        raise VerificationError("SMOKE_HTTP_JSON_OBJECT_REQUIRED")
+    return value
+
+
+def _http_json_list(url: str, timeout: float) -> list[dict[str, Any]]:
+    value = _http_json_value(url, timeout)
+    if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
+        raise VerificationError("SMOKE_HTTP_JSON_OBJECT_LIST_REQUIRED")
+    return value
+
+
+def verify_control_organizations(organizations: list[dict[str, Any]]) -> None:
+    controls = {
+        "ERP-000000224": "9 Управляющая компания",
+        "ERP-000000076": "3 Сахалин",
+    }
+    for node_id, expected_name in controls.items():
+        matches = [row for row in organizations if row.get("node_id") == node_id]
+        if len(matches) != 1:
+            raise VerificationError(f"SMOKE_ORGANIZATION_IDENTITY_INVALID:{node_id}")
+        row = matches[0]
+        if (
+            row.get("name") != expected_name or row.get("path") != expected_name
+            or row.get("top_id") != node_id or row.get("top_name") != expected_name
+            or row.get("parent_id") != "" or row.get("depth") != 0
+            or row.get("node_type") != "ORGANIZATION" or row.get("selectable") is not True
+            or row.get("source_verified") is not True
+        ):
+            raise VerificationError(f"SMOKE_ORGANIZATION_SCOPE_INVALID:{node_id}")
 
 
 def _free_loopback_port() -> int:
@@ -847,6 +914,7 @@ const localRequire = createRequire(path.join(modules, "__opiu_smoke__.cjs"));
         process: subprocess.Popen[str] | None = None
         health: dict[str, Any] | None = None
         bootstrap: dict[str, Any] | None = None
+        organizations: list[dict[str, Any]] | None = None
         try:
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             process = subprocess.Popen(
@@ -866,6 +934,7 @@ const localRequire = createRequire(path.join(modules, "__opiu_smoke__.cjs"));
             if health is None:
                 raise VerificationError("SMOKE_HEALTH_TIMEOUT")
             bootstrap = _http_json(f"http://127.0.0.1:{port}/api/bootstrap", 2.0)
+            organizations = _http_json_list(f"http://127.0.0.1:{port}/api/organizations", 2.0)
             expected_public_safety = {
                 "mode": "REPORT_ONLY", "posting_rows": 0, "ready_to_upload": False,
                 "release_allowed": False, "live_1c_allowed": False,
@@ -881,6 +950,7 @@ const localRequire = createRequire(path.join(modules, "__opiu_smoke__.cjs"));
                 or bootstrap.get("engine_adapter_ready") is not True
             ):
                 raise VerificationError("SMOKE_BOOTSTRAP_CONTRACT_INVALID")
+            verify_control_organizations(organizations)
         finally:
             if process is not None and process.poll() is None:
                 process.terminate()
@@ -906,7 +976,8 @@ const localRequire = createRequire(path.join(modules, "__opiu_smoke__.cjs"));
             "status": "PASS", "relocated": True, "node_version_verified": True,
             "jszip_loaded": True, "artifact_tool_loaded": True, "skia_canvas_loaded": True,
             "skia_canvas_constructed": True,
-            "health_verified": True, "bootstrap_verified": True, "port_released": True,
+            "health_verified": True, "bootstrap_verified": True,
+            "organizations_verified": True, "port_released": True,
             "all_outputs_under_extracted_root": True, "output_file_count": len(output_files),
             "localhost_only": True, "release_approved": False,
         }
@@ -932,7 +1003,8 @@ def _run_two_relocation_smokes_after_static(
     boolean_fields = (
         "relocated", "node_version_verified", "jszip_loaded", "artifact_tool_loaded",
         "skia_canvas_loaded", "skia_canvas_constructed", "health_verified",
-        "bootstrap_verified", "port_released", "all_outputs_under_extracted_root",
+        "bootstrap_verified", "organizations_verified", "port_released",
+        "all_outputs_under_extracted_root",
         "localhost_only",
     )
     if any(report.get(field) is not True for report in relocations for field in boolean_fields):

@@ -366,3 +366,16 @@
 - Обязательный регрессионный тест: UK Oct/Nov, Сахалин и zero-run имеют exact 15 names/order; пустые 04A/04B/08 листы содержат headers и 0 business rows; wrapper заполняет placeholder на месте, optional 09 после обязательного набора; reopen без formula/relationship errors.
 - Реализация: core создаёт ровно 15 обязательных листов в порядке §12.1; `04A`, `04B`, `08_Операции_журнала` и `08_Решения_обоснование` существуют даже при нуле business rows и имеют фиксированные заголовки. Owner wrapper заменяет XML заранее созданного placeholder-листа на месте, сохраняя имя, позицию, `r:id`, Target и content-type; повторное применение идемпотентно. Optional `09_Доказанные_операции` допускается только листом №16. Активный лист — `01_Сверка_дерево` (`activeTab=1`).
 - Протокол проверки: focused contract `4/4 PASS`; real October golden/current `2/2 PASS`; APPROVAL-003 `38/38 PASS`; полный R005 `227 PASS`, `0 FAIL`, `1` штатный skip. Независимый реальный прогон UK Oct/Nov/Sakh: exact first 15 order; финансовые сигнатуры `65/65`, `R036` и physical-ID bags совпадают с baseline `c21788a`; exact operations `21/21/0`. Дублей names/sheetIds/rIds/Targets нет, все worksheet content-types корректны, formula-error scan пуст, INFO-строки не включены в business counts, `git diff --check` PASS.
+
+### PACK-001 — переносимый EXE не получает authoritative каталог организаций
+
+- Дата: `28.08.2026`
+- Статус: `DIAGNOSED`
+- Сообщил: независимая read-only проверка финальной упаковки.
+- Наблюдаемое поведение: `NewPipeline` в packaged-runtime без внешних adapters всегда открывает `runtime/data/defaults/organizations.json`, но `r17_portable_policy.json` и builder переносят только source-модули и `resources/reference`; каталога в Git нет. Такой EXE должен завершиться до `/api/health` и `/api/organizations` ошибкой `load authoritative organization catalog`.
+- Ожидаемое поведение: exact authoritative каталог организаций входит в подписанный runtime, учитывается source/runtime inventory и доступен по `runtime/data/defaults/organizations.json` после распаковки в любой короткий путь; `/api/organizations` возвращает selectable `ERP-000000224` и `ERP-000000076` с их верхними уровнями.
+- Затронутые пункты контракта: §§1, 3.1, 11, 13–14; A01, A03, A10, A13–A14.
+- Допустимый scope: exact resource `data/defaults/organizations.json`, packaging policy/builder/verifier/tests и production smoke; финансовая логика R005/R001, Rules Service и safety gates не меняются.
+- Обязательный регрессионный тест: чистый A/B build включает каталог с exact SHA-256; independent verifier и два relocation-smoke запуска проходят; `/api/health` и `/api/bootstrap` подтверждают `REPORT_ONLY`, `rules_service=false`, posting/live/executed `0`; `/api/organizations` содержит оба контрольных selectable узла.
+- Реализация: ожидается.
+- Протокол проверки: ожидается.

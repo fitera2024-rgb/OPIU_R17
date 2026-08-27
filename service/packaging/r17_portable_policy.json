@@ -1,0 +1,148 @@
+{
+  "schema_version": "opiu-r17-portable-policy.v1",
+  "policy_status": "REPORT_ONLY_ARCH_GATED",
+  "baseline_source_commit": "22c94df759cc69c7ed056c5ee3685b37d012e9a7",
+  "archive_name": "OPIU_R17.zip",
+  "archive_root": "OPIU_R17",
+  "executable_name": "OPIU_R17.exe",
+  "fixed_zip_time": [2026, 8, 27, 0, 0, 0],
+  "compression": "DEFLATE9",
+  "modes": {
+    "executable": "100755",
+    "regular": "100644"
+  },
+  "contract": {
+    "source": "contracts/Контракт_ОПИУ_v0.4_зафиксированный.docx",
+    "package_path": "contract/OPIU_v0.4.docx",
+    "sha256": "09AB635802E436C2C33E2FD39D8B35E62631376AB9AE8DA6F6EFC23EAF844BCD"
+  },
+  "required_metadata": [
+    "R17_PACKAGE_MANIFEST.json",
+    "R17_BUILD_PROVENANCE.json",
+    "runtime/MANIFEST.json",
+    "runtime/SAFETY.json",
+    "CONTRACT_SHA256.txt",
+    "README_RU.txt"
+  ],
+  "safety": {
+    "mode": "REPORT_ONLY",
+    "report_only": true,
+    "rules_service": false,
+    "posting_rows": 0,
+    "executed_posting_rows": 0,
+    "live_posting_rows": 0,
+    "ready_to_upload": false,
+    "release_allowed": false,
+    "external_release_allowed": false,
+    "execution_allowed": false,
+    "live_1c_allowed": false,
+    "live_delete_allowed": false,
+    "automatic_1c_upload_allowed": false,
+    "automatic_1c_posting_allowed": false,
+    "artifact_publication_authorized": false
+  },
+  "toolchains": {
+    "go": {
+      "version_line": "go version go1.22.12 windows/amd64",
+      "version": "go1.22.12",
+      "platform": "windows/amd64",
+      "go_exe_sha256": "08CFBE81F1BF519874CE8E6670EA98768D18CC0D16B9FF9D67EB785EC9A15CF9",
+      "file_count": 12900,
+      "inventory_sha256": "FC5948968417E9FAF0FE7172F70CAC33E131056D7225EB00F4B4EA9A3B69268E"
+    },
+    "node": {
+      "version_line": "v24.14.0",
+      "package_path": "runtime/node/node.exe",
+      "node_exe_sha256": "63C259C81E5D472B5F11C8D506070130CB04A1ECF84B80377A34ED6EC9048088",
+      "node_exe_size": 91380224,
+      "file_count": 1,
+      "inventory_sha256": "EA2AF5CAFD6DACC3C9EFAC1FA03627053ECC8B54040202FCC7EA04ADCE261837"
+    },
+    "node_modules": {
+      "package_path": "runtime/node_modules",
+      "file_count": 294,
+      "total_size": 50570254,
+      "inventory_sha256": "9A31C6F4FCCA4DDDB93DFC1E50DC06B03F2EBAB5B7575DDF7EF6CCE5502F1059",
+      "packages": {
+        "jszip": "3.10.1",
+        "@oai/artifact-tool": "2.8.31",
+        "skia-canvas": "3.0.8"
+      }
+    }
+  },
+  "unicode_settings": [
+    {
+      "path": "user-settings/КАК_НАСТРОИТЬ_ГРУППИРОВКУ.txt",
+      "sha256": "2DFBDBAEC823C47821AD9ED6E8FD71C8030556C4726CE480ED302EF55A25654A"
+    },
+    {
+      "path": "user-settings/Настройка_группировки_блоков.csv",
+      "sha256": "81154D1EFEDA3736BD2AEADED540FF8573412348D66F1E2317A80ADAAEB55494"
+    }
+  ],
+  "runtime_source_roots": [
+    "modules/corrections/source",
+    "modules/reconciliation/source",
+    "resources/reference"
+  ],
+  "runtime_excluded_names": [
+    "__pycache__",
+    "node_modules",
+    "testdata"
+  ],
+  "runtime_excluded_suffixes": [
+    ".test.mjs",
+    ".test.cjs",
+    "_test.go"
+  ],
+  "legacy_rules_gate": {
+    "required_status": "PASS",
+    "forbidden_repository_paths": [
+      "modules/rules-engine",
+      "modules/reconciliation/source/opiu_rules_ui.ps1",
+      "service/source/rules_registry.go",
+      "service/source/rules_review.go"
+    ],
+    "forbidden_package_path_fragments": [
+      "/modules/rules-engine/",
+      "/data/defaults/rules.json"
+    ],
+    "forbidden_tokens": {
+      "env": ["OPIU_RULES_CMD_JSON"],
+      "state": ["RULES_REVIEW", "WAIT_USER_RULES", "RunWaitingUserRules"],
+      "defaults": ["data/defaults/rules.json"],
+      "runtime": ["rulesEngineContext", "RulesRegistry", "RulesScript", "rules_engine_context", "rules_registry", "rules-engine-manifest"],
+      "ui": ["Rules Service", "rules-engine"],
+      "imports": ["modules/rules-engine", "rules-engine/source"]
+    },
+    "immutable_r001_exception": "modules/corrections/source/correction_rules.r001.json"
+  },
+  "privacy": {
+    "whole_zip_user_profile_path_free": false,
+    "local_customer_build_path_hits": 0,
+    "allowed_upstream_debug_exception": {
+      "path": "runtime/node_modules/@oai/artifact-tool/node_modules/skia-canvas/lib/skia.node",
+      "size": 24231424,
+      "sha256": "4E5B185CCDFFCEEDE5468B47C4646E2CE66F4E85EC35A753007EC32CB8720498",
+      "runneradmin_hits": 160,
+      "d_drive_a_hits": 3
+    }
+  },
+  "path_limits": {
+    "component_max": 80,
+    "relative_max": 180,
+    "full_path_prefix": "C:\\O\\R17A",
+    "full_path_max": 220
+  },
+  "archive_rejections": [
+    "traversal",
+    "absolute",
+    "unc",
+    "backslash",
+    "duplicate",
+    "casefold_duplicate",
+    "symlink",
+    "reparse",
+    "encrypted"
+  ]
+}

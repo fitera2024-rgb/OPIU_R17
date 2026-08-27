@@ -15,9 +15,12 @@ import (
 )
 
 type Pipeline struct {
-	store         *Store
-	commands      map[string][]string
-	runtime       *RuntimeAdapter
+	store    *Store
+	commands map[string][]string
+	runtime  *RuntimeAdapter
+	// Legacy Rules storage is intentionally not initialized or reachable from
+	// the production pipeline. It remains only so old persistence helpers can
+	// be removed in a later compatibility cleanup without weakening this cutover.
 	rulesRegistry *persistentRulesRegistry
 	runner        pipelineStageRunner
 	mu            sync.Mutex
@@ -57,7 +60,6 @@ func NewPipeline(store *Store) (*Pipeline, error) {
 		env   string
 	}{
 		{stage: "R005", env: "OPIU_R005_CMD_JSON"},
-		{stage: "RULES", env: "OPIU_RULES_CMD_JSON"},
 		{stage: "R001", env: "OPIU_R001_CMD_JSON"},
 	} {
 		value := strings.TrimSpace(os.Getenv(item.env))
@@ -75,26 +77,25 @@ func NewPipeline(store *Store) (*Pipeline, error) {
 		}
 		commands[item.stage] = command
 	}
+	if strings.TrimSpace(os.Getenv("OPIU_RULES_CMD_JSON")) != "" {
+		return nil, errors.New("OPIU_RULES_CMD_JSON is forbidden: production is direct R005 to R001")
+	}
 
 	var runtimeAdapter *RuntimeAdapter
-	var rulesRegistry *persistentRulesRegistry
 	if len(commands) == 0 {
 		adapter, err := discoverRuntimeAdapter()
 		if err != nil {
 			return nil, err
 		}
 		runtimeAdapter = adapter
-		if runtimeAdapter != nil {
-			rulesRegistry, err = newPersistentRulesRegistry(store, runtimeAdapter.RulesRegistry)
-			if err != nil {
-				return nil, fmt.Errorf("configure persistent rules registry: %w", err)
-			}
-		}
-	} else if len(commands) != 3 {
-		return nil, errors.New("all three external engine adapter commands are required")
+	} else if len(commands) != 2 {
+		return nil, errors.New("both direct R005 and R001 external engine adapter commands are required")
 	}
-	if len(commands) == 3 {
+	if len(commands) == 2 {
 		if err := requireExternalR005ScopePlaceholders(commands["R005"]); err != nil {
+			return nil, err
+		}
+		if err := requireExternalR001HandoffPlaceholders(commands["R001"]); err != nil {
 			return nil, err
 		}
 	}
@@ -102,7 +103,7 @@ func NewPipeline(store *Store) (*Pipeline, error) {
 	catalogPath := ""
 	if runtimeAdapter != nil {
 		catalogPath = filepath.Join(runtimeAdapter.Root, "data", "defaults", "organizations.json")
-	} else if len(commands) == 3 {
+	} else if len(commands) == 2 {
 		catalogPath = strings.TrimSpace(os.Getenv("OPIU_ORGANIZATION_CATALOG"))
 		if catalogPath == "" {
 			return nil, errors.New("OPIU_ORGANIZATION_CATALOG is required for external engine adapters")
@@ -122,10 +123,34 @@ func NewPipeline(store *Store) (*Pipeline, error) {
 		store:         store,
 		commands:      commands,
 		runtime:       runtimeAdapter,
-		rulesRegistry: rulesRegistry,
+		rulesRegistry: nil,
 		runner:        runStage,
 		active:        map[string]struct{}{},
 	}, nil
+}
+
+func requireExternalR001HandoffPlaceholders(command []string) error {
+	positions := map[string]int{}
+	for index, argument := range command {
+		for _, forbidden := range []string{"--decisions", "--rules", "--applications", "--reconciliation", "--codex-input", "--period", "--organization", "--run-id", "--organization-id"} {
+			if argument == forbidden || strings.HasPrefix(argument, forbidden+"=") {
+				return fmt.Errorf("OPIU_R001_CMD_JSON contains forbidden direct source override %s", forbidden)
+			}
+		}
+		if argument == "--handoff" || argument == "--handoff-sha256" {
+			if _, duplicate := positions[argument]; duplicate {
+				return fmt.Errorf("OPIU_R001_CMD_JSON repeats immutable Service argument %s", argument)
+			}
+			positions[argument] = index
+		}
+	}
+	for flag, placeholder := range map[string]string{"--handoff": "{handoff}", "--handoff-sha256": "{handoff_sha256}"} {
+		index, found := positions[flag]
+		if !found || index+1 >= len(command) || command[index+1] != placeholder {
+			return fmt.Errorf("OPIU_R001_CMD_JSON must contain exact pair %s %s", flag, placeholder)
+		}
+	}
+	return nil
 }
 
 func requireExternalR005ScopePlaceholders(command []string) error {
@@ -149,7 +174,7 @@ func (p *Pipeline) Ready() bool {
 	if p.runtime != nil {
 		return true
 	}
-	return len(p.commands["R005"]) > 0 && len(p.commands["RULES"]) > 0 && len(p.commands["R001"]) > 0
+	return len(p.commands["R005"]) > 0 && len(p.commands["R001"]) > 0
 }
 
 func (p *Pipeline) Start(run Run) error {
@@ -275,52 +300,64 @@ func (p *Pipeline) executeExternal(run Run, contextValue Context, erpPath, intal
 		"{context_id}":        contextValue.ID,
 		"{run_id}":            run.ID,
 	}
-	structuralControlProofPath := ""
-	for _, stage := range []string{"R005", "RULES", "R001"} {
-		run.Status = RunRunning
-		run.Stage = stage
-		run.Message = stageMessage(stage)
-		if err := p.store.UpdateRun(run); err != nil {
-			return
-		}
-		command := p.commands[stage]
-		if stage == "R005" {
-			command = appendEmptyArticleBindingSettingsArgument(command, emptyArticleBindingSettingsPath)
-			command = appendArticleApprovalSettingsArgument(command, articleApprovalSettingsPath)
-			if structuralControlSettingsPath != "" && hasStructuralControlSettingsArgument(command) {
-				finish(RunFailed, "R005_SETTINGS", "Команда сверки содержит повторную настройку группировки блоков")
-				return
-			}
-			command = appendStructuralControlSettingsArgument(command, structuralControlSettingsPath)
-			command = appendStructuralControlScopeArguments(command)
-			if err := p.verifyStructuralControlPipelineAudit(structuralControlAudit); err != nil {
-				finish(RunFailed, "R005_SETTINGS", "Настройка группировки блоков изменилась до запуска сверки")
-				return
-			}
-		} else {
-			if _, err := verifyStructuralControlProofArtifact(run, contextValue, runDir,
-				filepath.Join(runDir, "r005", "reconciliation.codex-input.json"), structuralControlProofPath); err != nil {
-				finish(RunFailed, "R005_PROOF", "Доказательство настройки группировки блоков изменилось после R005")
-				return
-			}
-			command = appendStructuralControlProofArgument(command, structuralControlProofPath)
-		}
-		if err := p.runStage(stage, command, values, runDir, ""); err != nil {
-			finish(RunFailed, stage, "Этап завершился ошибкой; технические детали сохранены в журнале запуска")
-			return
-		}
-		if stage == "R005" {
-			if err := p.anchorStructuralControlInventory(run, contextValue, filepath.Join(runDir, "r005")); err != nil {
-				finish(RunBlockedStructuralInventory, "R005_INVENTORY", "Проверенный состав верхних блоков R005 недоступен; правила не запускались")
-				return
-			}
-			structuralControlProofPath, _, err = materializeStructuralControlProof(run, contextValue, runDir,
-				filepath.Join(runDir, "r005", "reconciliation.codex-input.json"))
-			if err != nil {
-				finish(RunFailed, "R005_PROOF", "R005 не подтвердил применённую настройку группировки блоков")
-				return
-			}
-		}
+	r005Command := appendEmptyArticleBindingSettingsArgument(p.commands["R005"], emptyArticleBindingSettingsPath)
+	r005Command = appendArticleApprovalSettingsArgument(r005Command, articleApprovalSettingsPath)
+	if structuralControlSettingsPath != "" && hasStructuralControlSettingsArgument(r005Command) {
+		finish(RunFailed, "R005_SETTINGS", "Команда сверки содержит повторную настройку группировки блоков")
+		return
+	}
+	r005Command = appendStructuralControlSettingsArgument(r005Command, structuralControlSettingsPath)
+	r005Command = appendStructuralControlScopeArguments(r005Command)
+	if !p.updateStage(&run, "R005") {
+		return
+	}
+	if err := p.verifyStructuralControlPipelineAudit(structuralControlAudit); err != nil {
+		finish(RunFailed, "R005_SETTINGS", "Настройка группировки блоков изменилась до запуска сверки")
+		return
+	}
+	if err := p.runStage("R005", r005Command, values, runDir, ""); err != nil {
+		finish(RunFailed, "R005", "Этап завершился ошибкой; технические детали сохранены в журнале запуска")
+		return
+	}
+	r005Dir := filepath.Join(runDir, "r005")
+	r005Codex := filepath.Join(r005Dir, "reconciliation.codex-input.json")
+	if err := validateR005ReportOnlyPackage(r005Dir, contextValue, false); err != nil {
+		finish(RunFailed, "R005", "Сверка создала неполный или небезопасный отчётный комплект")
+		return
+	}
+	if err := p.anchorStructuralControlInventory(run, contextValue, r005Dir); err != nil {
+		finish(RunBlockedStructuralInventory, "R005_INVENTORY", "Проверенный состав верхних блоков R005 недоступен")
+		return
+	}
+	if _, _, err = materializeStructuralControlProof(run, contextValue, runDir, r005Codex); err != nil {
+		finish(RunFailed, "R005_PROOF", "R005 не подтвердил применённую настройку группировки блоков")
+		return
+	}
+	handoff, err := materializeServiceR001Handoff(run, contextValue, runDir, erpPath, intalevPath)
+	if err != nil {
+		finish(RunFailed, "R005_HANDOFF", "Service не создал точную неизменяемую передачу R005→R001")
+		return
+	}
+	if _, err := verifyServiceR001Handoff(handoff.Path, handoff.SHA256, run, contextValue, runDir); err != nil {
+		finish(RunFailed, "R005_HANDOFF", "Неизменяемая передача R005→R001 не прошла повторную проверку")
+		return
+	}
+	values["{handoff}"] = handoff.Path
+	values["{handoff_sha256}"] = handoff.SHA256
+	if err := resetR001OutputDirectory(runDir, filepath.Join(runDir, "r001")); err != nil {
+		finish(RunFailed, "R001", "Не удалось подготовить отдельный финальный комплект R001")
+		return
+	}
+	if !p.updateStage(&run, "R001") {
+		return
+	}
+	if err := p.runStage("R001", p.commands["R001"], values, runDir, ""); err != nil {
+		finish(RunFailed, "R001", "Этап завершился ошибкой; технические детали сохранены в журнале запуска")
+		return
+	}
+	if err := validateR001ReportOnlyPackageForRun(filepath.Join(runDir, "r001"), run, contextValue); err != nil {
+		finish(RunFailed, "R001", "R001 не сформировал полный безопасный комплект, привязанный к Service handoff")
+		return
 	}
 	finish(RunCompletedReportOnly, "DONE", "Отчётный запуск завершён; запись в 1С не выполнялась")
 }
@@ -331,16 +368,6 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 		return
 	}
 	adapter := p.runtime
-	rulesRegistry := p.rulesRegistry
-	if rulesRegistry == nil {
-		var err error
-		rulesRegistry, err = newPersistentRulesRegistry(p.store, adapter.RulesRegistry)
-		if err != nil {
-			finish(RunFailed, "RULES", "Постоянный реестр правил недоступен или повреждён")
-			return
-		}
-		p.rulesRegistry = rulesRegistry
-	}
 	mode, err := periodMode(contextValue.Period)
 	if err != nil {
 		finish(RunBlockedInvalidContext, "PREFLIGHT", "Период контекста не поддерживается")
@@ -348,10 +375,8 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 	}
 
 	r005Dir := filepath.Join(runDir, "r005")
-	rulesDir := filepath.Join(runDir, "rules")
-	handoffDir := filepath.Join(runDir, "handoff")
 	r001Dir := filepath.Join(runDir, "r001")
-	for _, directory := range []string{r005Dir, rulesDir, handoffDir, r001Dir} {
+	for _, directory := range []string{r005Dir, filepath.Join(runDir, "handoff"), r001Dir} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			finish(RunFailed, "PREFLIGHT", "Не удалось подготовить рабочую папку этапа")
 			return
@@ -434,82 +459,17 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 		return
 	}
 
-	rulesRegistrySnapshot, rulesRegistryBaseHash, err := rulesRegistry.snapshot(run.ID, "initial")
-	if err != nil {
-		finish(RunFailed, "RULES", "Не удалось подготовить проверенный снимок реестра правил")
-		return
-	}
-	rulesContextPath := filepath.Join(runDir, "rules_engine_context.json")
-	if err := writeRulesContext(rulesContextPath, run, contextValue, rulesRegistrySnapshot, r005Report, r005Codex,
-		structuralControlProofPath, rulesDir, handoffDir); err != nil {
-		finish(RunFailed, "RULES", "Не удалось подготовить контекст движка правил")
-		return
-	}
-	if !p.updateStage(&run, "RULES") {
-		return
-	}
 	if _, err := verifyStructuralControlProofArtifact(run, contextValue, runDir, r005Codex, structuralControlProofPath); err != nil {
-		finish(RunFailed, "R005_PROOF", "Доказательство настройки группировки блоков изменилось до Rules")
+		finish(RunFailed, "R005_PROOF", "Доказательство настройки группировки блоков изменилось после R005")
 		return
 	}
-	rulesCommand := []string{adapter.Node, adapter.RulesScript, "run", "--context", rulesContextPath, "--out", rulesDir}
-	if err := p.runStage("RULES", rulesCommand, nil, runDir, adapter.Root); err != nil {
-		finish(RunFailed, "RULES", "Движок правил завершился ошибкой; технические детали сохранены в журнале запуска")
-		return
-	}
-	workflow, err := readValidatedRulesWorkflow(rulesDir, run.ID, "initial")
+	handoff, err := materializeServiceR001Handoff(run, contextValue, runDir, erpPath, intalevPath)
 	if err != nil {
-		finish(RunFailed, "RULES", "Движок правил не создал обязательное решение workflow")
+		finish(RunFailed, "R005_HANDOFF", "Service не создал точную неизменяемую передачу R005→R001")
 		return
 	}
-	if workflow.NextAction == "FAILED" || workflow.NextAction == "FAILED_NO_STATE_CHANGE" {
-		finish(RunFailed, "RULES", "Workflow движка правил остановлен fail-closed")
-		return
-	}
-	if _, err := rulesRegistry.mergeEngineOutput(run.ID, "initial", rulesDir, rulesRegistryBaseHash); err != nil {
-		finish(RunFailed, "RULES", "Результат движка правил не прошёл безопасное сохранение в библиотеку")
-		return
-	}
-
-	switch workflow.NextAction {
-	case "WAIT_USER_RULES":
-		if err := p.runDiagnosticR001Package(adapter, run, contextValue, runDir, r005Report, r005Codex, r001Dir,
-			"RULES", "WAIT_USER_RULES", "Найдены предложения правил; требуется решение пользователя"); err != nil {
-			finish(RunFailed, "R001_DIAGNOSTIC", "Правила требуют решения пользователя; диагностический комплект R001 не сформирован")
-			return
-		}
-		finish(RunWaitingUserRules, "RULES_REVIEW", "Найдены предложения правил; сформирован безопасный диагностический комплект без проводок")
-		return
-	case "RERUN_R005":
-		if err := p.runDiagnosticR001Package(adapter, run, contextValue, runDir, r005Report, r005Codex, r001Dir,
-			"RULES", "RERUN_R005", "Правила требуют повторной сверки R005"); err != nil {
-			finish(RunFailed, "R001_DIAGNOSTIC", "Требуется повторная сверка R005; диагностический комплект R001 не сформирован")
-			return
-		}
-		finish(RunWaitingUserRules, "RULES_REVIEW", "Правила требуют повторной сверки R005; сформирован безопасный диагностический комплект без проводок")
-		return
-	case "COMPLETE":
-		if err := p.runDiagnosticR001Package(adapter, run, contextValue, runDir, r005Report, r005Codex, r001Dir,
-			"RULES", "COMPLETE_NO_R001", "Корректировки R001 не требуются"); err != nil {
-			finish(RunFailed, "R001_DIAGNOSTIC", "Корректировки не требуются; диагностический комплект R001 не сформирован")
-			return
-		}
-		finish(RunCompletedReportOnly, "DONE", "Сверка и проверка правил завершены; сформирован нулевой диагностический комплект без проводок")
-		return
-	case "PASS_TO_R001", "RERUN_R001":
-		// Continue below only with an explicit, existing handoff file.
-	default:
-		finish(RunFailed, "RULES", "Движок правил вернул неподдерживаемое действие")
-		return
-	}
-
-	handoffPath := strings.TrimSpace(workflow.Handoff.HandoffPath)
-	if workflow.Handoff.Target != "R001" || handoffPath == "" || !regularFile(handoffPath) {
-		finish(RunFailed, "RULES", "Передача в R001 не подтверждена обязательным handoff-файлом")
-		return
-	}
-	if err := verifyStructuralControlProofHandoff(handoffPath, run, contextValue, r005Codex, structuralControlProofPath); err != nil {
-		finish(RunFailed, "RULES", "Rules передал в R001 другое доказательство настройки группировки блоков")
+	if _, err := verifyServiceR001Handoff(handoff.Path, handoff.SHA256, run, contextValue, runDir); err != nil {
+		finish(RunFailed, "R005_HANDOFF", "Неизменяемая передача R005→R001 не прошла повторную проверку")
 		return
 	}
 	if err := resetR001OutputDirectory(runDir, r001Dir); err != nil {
@@ -522,14 +482,10 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 	r001Command := []string{
 		adapter.Node,
 		adapter.R001Script,
-		"--handoff", handoffPath,
+		"--handoff", handoff.Path,
+		"--handoff-sha256", handoff.SHA256,
 		"--output", r001Dir,
-		"--period", contextValue.Period,
-		"--organization", contextValue.Organization,
-		"--run-id", run.ID,
-		"--organization-id", contextValue.OrganizationID,
 	}
-	r001Command = appendStructuralControlProofArgument(r001Command, structuralControlProofPath)
 	r001Err := p.runStage("R001", r001Command, nil, runDir, adapter.Root)
 	packageErr := validateR001ReportOnlyPackageForRun(r001Dir, run, contextValue)
 	if packageErr != nil {
@@ -550,7 +506,7 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 		finish(RunFailed, "R001", "R001 вернул ненулевой exit без распознанного бизнес-блокера; диагностический комплект доступен, запись в 1С не выполнялась")
 		return
 	}
-	finish(RunCompletedReportOnly, "DONE", "Сверка, правила и диагностический комплект R001 завершены; запись в 1С не выполнялась")
+	finish(RunCompletedReportOnly, "DONE", "Сверка R005 и диагностический комплект R001 завершены напрямую; запись в 1С не выполнялась")
 }
 
 func (p *Pipeline) updateStage(run *Run, stage string) bool {
@@ -566,8 +522,6 @@ func stageMessage(stage string) string {
 		return "Выполняется сверка ERP и Инталев"
 	case "R005_INVENTORY":
 		return "Проверяется состав верхних блоков"
-	case "RULES":
-		return "Проверяются правила"
 	case "R001":
 		return "Формируется черновик корректировок"
 	default:

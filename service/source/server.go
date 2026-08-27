@@ -70,7 +70,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "Метод не поддерживается"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "OPIU_STABLE", "implementation": "NEW_COMPATIBLE_IMPLEMENTATION", "safety": reportOnlySafety()})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok", "service": "OPIU_STABLE", "implementation": "NEW_COMPATIBLE_IMPLEMENTATION",
+		"rules_service": false, "pipeline": "R005_SERVICE_HANDOFF_R001", "safety": reportOnlySafety(),
+	})
 }
 
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {

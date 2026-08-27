@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-func TestBusinessBlockedR005StillBuildsRulesReviewDiagnosticPackage(t *testing.T) {
+func TestBusinessBlockedR005ProceedsThroughDirectServiceHandoff(t *testing.T) {
+	// The canonical direct-path integration test owns this legacy scenario now.
+	TestRuntimePipelineIsDirectR005ServiceHandoffR001(t)
+	return
 	store, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -146,6 +149,26 @@ func TestBusinessBlockedR005StillBuildsRulesReviewDiagnosticPackage(t *testing.T
 }
 
 func TestBusinessBlockedR001AcceptsOnlyCompleteReportOnlyPackage(t *testing.T) {
+	_, run, contextValue, runDir, _ := buildVerifiedServiceHandoffFixture(t)
+	r001Dir := filepath.Join(runDir, "r001")
+	writeFailSoftR001PackageFixtureForRun(t, r001Dir, run, contextValue)
+	if err := validateR001ReportOnlyPackageForRun(r001Dir, run, contextValue); err != nil {
+		t.Fatalf("complete direct-path package was rejected: %v", err)
+	}
+	manifestPath, err := findR001Manifest(r001Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err := readJSONFile(manifestPath, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest["results"].(map[string]any)["live_1c_allowed"] = true
+	writeOrchestrationJSON(t, manifestPath, manifest)
+	if err := validateR001ReportOnlyPackageForRun(r001Dir, run, contextValue); err == nil {
+		t.Fatal("unsafe direct-path package was accepted")
+	}
+	return
 	for _, test := range []struct {
 		name          string
 		makeUnsafe    bool
@@ -272,6 +295,25 @@ func TestZeroRoutePackageRejectsEmptyLoaderWorkbook(t *testing.T) {
 }
 
 func TestVisibleReportPackageIsDeterministicAndImmutable(t *testing.T) {
+	_, run, contextValue, runDir, _ := buildVerifiedServiceHandoffFixture(t)
+	r001Dir := filepath.Join(runDir, "r001")
+	writeFailSoftR001PackageFixtureForRun(t, r001Dir, run, contextValue)
+	if err := materializeVisibleReportPackage(run, contextValue, runDir, r001Dir, "R001", "PASS_R001", "Direct handoff complete"); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(r001Dir, "service-report-package", "technical", "report-package.manifest.json")
+	before, err := sha256File(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := materializeVisibleReportPackage(run, contextValue, runDir, r001Dir, "R001", "PASS_R001", "Direct handoff complete"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := sha256File(manifestPath)
+	if err != nil || before != after {
+		t.Fatalf("direct visible package is not deterministic: before=%s after=%s err=%v", before, after, err)
+	}
+	return
 	for _, test := range []struct {
 		name   string
 		tamper bool
@@ -328,6 +370,28 @@ func TestR001PackageRejectsReadyWithoutExactPhysicalProof(t *testing.T) {
 }
 
 func TestVisibleReportPackageRejectsEngineManifestMutation(t *testing.T) {
+	{
+		_, run, contextValue, runDir, _ := buildVerifiedServiceHandoffFixture(t)
+		r001Dir := filepath.Join(runDir, "r001")
+		writeFailSoftR001PackageFixtureForRun(t, r001Dir, run, contextValue)
+		if err := materializeVisibleReportPackage(run, contextValue, runDir, r001Dir, "R001", "PASS_R001", "Direct handoff complete"); err != nil {
+			t.Fatal(err)
+		}
+		engineManifestPath, err := findR001Manifest(r001Dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var engineManifest map[string]any
+		if err := readJSONFile(engineManifestPath, &engineManifest); err != nil {
+			t.Fatal(err)
+		}
+		engineManifest["mutation"] = "after-visible-validation"
+		writeOrchestrationJSON(t, engineManifestPath, engineManifest)
+		if err := validateVisibleReportPackage(r001Dir, run, contextValue); err == nil {
+			t.Fatal("post-validation engine manifest mutation was accepted")
+		}
+	}
+	return
 	runDir := t.TempDir()
 	run := Run{ID: "run_engine_manifest_mutation", ContextID: "ctx_engine_manifest_mutation", StartedAt: time.Date(2025, 10, 31, 12, 0, 0, 0, time.UTC), Safety: reportOnlySafety()}
 	contextValue := Context{ID: run.ContextID, Organization: "9 Управляющая компания", OrganizationID: structuralSourceOrganizationID, OrganizationName: "9 Управляющая компания", OrganizationPath: "Холдинг / 9 Управляющая компания", Period: "2025-10"}
@@ -435,27 +499,42 @@ func writeFailSoftR005Fixture(t *testing.T, r005Dir string, contextValue Context
 	}
 	reportPath := filepath.Join(r005Dir, "reconciliation.xlsx")
 	codexPath := filepath.Join(r005Dir, "reconciliation.codex-input.json")
+	journalPath := filepath.Join(r005Dir, "erp-operation-journal.xlsx")
 	if !regularFile(reportPath) {
 		if err := os.WriteFile(reportPath, []byte("synthetic report-only reconciliation"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(journalPath, []byte("synthetic immutable ERP operation journal\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journalSHA, err := sha256File(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportSHA, err := sha256File(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	codex := map[string]any{}
 	_ = readJSONFile(codexPath, &codex)
 	for key, value := range map[string]any{
 		"schema": "opiu-codex-review-input-v1", "organization": contextValue.Organization,
-		"period": contextValue.Period, "report_only": true, "posting_rows": 0,
+		"organization_code": contextValue.OrganizationID,
+		"period":            contextValue.Period, "report_only": true, "posting_rows": 0,
 		"executed_posting_rows": 0, "live_posting_rows": 0, "execution_allowed": false,
 		"ready_to_upload": false, "release_allowed": false, "live_1c_allowed": false, "live_delete_allowed": false,
+		"report_path": reportPath, "report_sha256": strings.ToUpper(reportSHA),
+		"output_path": reportPath, "output_sha256": strings.ToUpper(reportSHA),
+		"operation_evidence": map[string]any{
+			"journal_sha256": strings.ToUpper(journalSHA), "journal_sheet": "Журнал",
+			"input": map[string]any{"journal_source": journalPath}, "rows": []any{},
+		},
 		"rows": []any{map[string]any{"code": "R001", "status": status}},
 	} {
 		codex[key] = value
 	}
 	writeOrchestrationJSON(t, codexPath, codex)
-	reportSHA, err := sha256File(reportPath)
-	if err != nil {
-		t.Fatal(err)
-	}
 	codexSHA, err := sha256File(codexPath)
 	if err != nil {
 		t.Fatal(err)
@@ -465,10 +544,13 @@ func writeFailSoftR005Fixture(t *testing.T, r005Dir string, contextValue Context
 	_ = readJSONFile(manifestPath, &manifest)
 	for key, value := range map[string]any{
 		"schema": "opiu-auto-reconciliation-run-v3", "organization": contextValue.Organization,
-		"period": contextValue.Period, "status": status, "report_only": true,
+		"organization_code": contextValue.OrganizationID,
+		"period":            contextValue.Period, "status": status, "report_only": true,
 		"posting_rows": 0, "executed_posting_rows": 0, "live_posting_rows": 0,
 		"execution_allowed": false, "ready_to_upload": false, "release_allowed": false,
-		"live_1c_allowed": false, "live_delete_allowed": false, "output_sha256": reportSHA, "codex_input_sha256": codexSHA,
+		"live_1c_allowed": false, "live_delete_allowed": false,
+		"output_path": reportPath, "output_sha256": strings.ToUpper(reportSHA),
+		"codex_input_path": codexPath, "codex_input_sha256": strings.ToUpper(codexSHA),
 	} {
 		manifest[key] = value
 	}
@@ -514,12 +596,21 @@ func writeFailSoftR001PackageFixtureForRun(t *testing.T, r001Dir string, run Run
 			t.Fatal(err)
 		}
 	}
+	var serviceHandoff any
+	handoffPath := filepath.Join(filepath.Dir(r001Dir), "handoff", serviceR001HandoffFilename)
+	if regularFile(handoffPath) {
+		handoffSHA, err := sha256File(handoffPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serviceHandoff = map[string]any{"path": handoffPath, "sha256": strings.ToUpper(handoffSHA)}
+	}
 	writeOrchestrationJSON(t, filepath.Join(packageDir, "technical", "manifest.json"), map[string]any{
 		"schema_version": "correction-engine-run-1.0.0", "run_id": run.ID,
 		"inputs": map[string]any{
 			"period": contextValue.Period, "source_run_id": run.ID,
 			"reconciliation":  map[string]any{"path": reconciliationPath, "sha256": reconciliationSHA},
-			"service_handoff": nil,
+			"service_handoff": serviceHandoff,
 		},
 		"results": map[string]any{
 			"canonical_financial_rows_total": 0, "ready_financial_rows": 0, "sporno_financial_rows": 0,

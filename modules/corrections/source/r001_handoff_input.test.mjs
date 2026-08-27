@@ -4,182 +4,154 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { requireVerifiedHandoffForRulesApplications, verifiedR001HandoffInput } from "./r001_handoff_input.mjs";
-import { structuralControlProofFromCodexPayload } from "../../rules-engine/source/structural_control_proof.mjs";
 
-async function sha256(filePath) {
-  return crypto.createHash("sha256").update(await fs.readFile(filePath)).digest("hex").toUpperCase();
-}
+import { assertNoDirectR001Overrides, verifiedR001HandoffInput } from "./r001_handoff_input.mjs";
 
-async function fixture() {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opiu-r001-handoff-"));
-  const report = path.join(root, "registered-report.xlsx");
-  const companion = path.join(root, "not-derived-name.json");
-  const rules = path.join(root, "engine_rules.json");
-  const applications = path.join(root, "r001_rule_application_drafts.json");
-  await fs.writeFile(report, "verified report");
-  const reportHash = await sha256(report);
-  const codexPayload = {
-    report_sha256: reportHash, operation_evidence: { pair_candidates: [] },
-    report_only: true, posting_rows: 0, ready_to_upload: false, release_allowed: false,
-    structural_control_settings_binding: {
-      status: "ACTIVE_EXACT_ORGANIZATION_MONTH", set_count: 1,
-      correction_authority: false, financial_rows: 0, posting_rows: 0, execution_allowed: false,
-      ui_fixed_registry: { control_set_ids: ["SET-VERSION-1"] },
-    },
-    structural_group_control_results: [{
-      control_set_id: "SET-VERSION-1", financial_rows: 0, posting_rows: 0,
-      execution_allowed: false, posting_allowed: false,
-    }],
+const hashBytes = (value) => crypto.createHash("sha256").update(value).digest("hex").toUpperCase();
+const hashFile = async (filePath) => hashBytes(await fs.readFile(filePath));
+const safety = {
+  mode: "REPORT_ONLY", posting_rows: 0, ready_to_upload: false,
+  release_allowed: false, execution_allowed: false, live_1c_allowed: false,
+};
+
+async function serviceHandoffFixture() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opiu-service-handoff-"));
+  const files = {};
+  const write = async (name, value) => {
+    const filePath = path.join(root, name);
+    const bytes = typeof value === "string" ? value : `${JSON.stringify(value)}\n`;
+    await fs.writeFile(filePath, bytes);
+    const stat = await fs.stat(filePath);
+    files[name] = { path: filePath, size: stat.size, sha256: await hashFile(filePath) };
+    return files[name];
   };
-  await fs.writeFile(companion, JSON.stringify(codexPayload));
-  await fs.writeFile(rules, JSON.stringify({ run_id: "RUN-ACTIVE", rules: [] }));
-  await fs.writeFile(applications, JSON.stringify({
-    schema_version: "opiu-rule-applications.v1", run_id: "RUN-ACTIVE", applications: [],
-    safety: { report_only: true, posting_rows: 0, ready_to_upload: false, release_allowed: false, live_1c_allowed: false },
-  }));
-  const handoff = {
-    schema_version: "opiu-r001-handoff.v1",
-    run_id: "RUN-ACTIVE",
-    source_r005_run_id: "RUN-ACTIVE",
-    organization: { id: "ORG-1", name: "Organization 1", path: "Holding / Organization 1" },
-    period: "2025-01",
-    reconciliation: { path: report, sha256: reportHash, codex_input_path: companion, codex_input_sha256: await sha256(companion) },
-    rules: { path: rules, sha256: await sha256(rules), rules_revision_set_hash: "RULESET-1" },
-    applications: { path: applications, sha256: await sha256(applications) },
-    structural_control_proof: structuralControlProofFromCodexPayload(codexPayload),
-  };
-  const handoffPath = path.join(root, "r001_handoff.json");
-  await fs.writeFile(handoffPath, JSON.stringify(handoff));
-  return { root, report, companion, rules, applications, handoff, handoffPath };
-}
-
-test("binds R001 to the explicit verified handoff files", async () => {
-  const item = await fixture();
-  const result = await verifiedR001HandoffInput({
-    handoffPath: item.handoffPath,
-    requestedRunId: "RUN-ACTIVE",
-    requestedOrganizationId: "ORG-1",
-    requestedOrganizationName: "Organization 1",
-    requestedPeriod: "2025-01",
-    reconciliationPath: item.report,
-    codexInputPath: item.companion,
-    applicationsPath: item.applications,
+  const erp = await write("erp-package.xlsx", "pinned ERP package\n");
+  const intalev = await write("intalev.xlsx", "pinned Intalev source\n");
+  const workbook = await write("reconciliation.xlsx", "R005 workbook\n");
+  const journal = await write("erp-journal.xlsx", "ERP journal\n");
+  const inventory = await write("structural-control-inventory.json", { inventory_id: "INV-1" });
+  const inventoryBinding = await write("structural-control-inventory.binding.json", {
+    run_id: "RUN-1", context_id: "CTX-1", organization_id: "ORG-1", organization_name: "Organization 1",
+    organization_path: "Holding / Organization 1", period: "2025-01", verified: true, sha256: inventory.sha256,
   });
-  assert.equal(result.codexInputPath, path.resolve(item.companion));
-  assert.equal(result.runId, "RUN-ACTIVE");
-  assert.deepEqual(result.structuralControlProof.applied_version_ids, ["SET-VERSION-1"]);
+  const proof = await write("structural-control-proof.json", {
+    schema_version: "opiu-structural-control-proof.v1", report_only: true, financial_rows: 0,
+    posting_rows: 0, correction_authority: false, execution_allowed: false,
+  });
+  const codex = await write("reconciliation.codex-input.json", {
+    schema: "opiu-codex-review-input-v1", organization: "Organization 1", organization_code: "ORG-1", period: "2025-01",
+    report_path: workbook.path, report_sha256: workbook.sha256,
+    report_only: true, posting_rows: 0, executed_posting_rows: 0, live_posting_rows: 0,
+    execution_allowed: false, ready_to_upload: false, release_allowed: false, live_1c_allowed: false, live_delete_allowed: false,
+    operation_evidence: {
+      journal_sha256: journal.sha256, journal_sheet: "Journal", input: { journal_source: journal.path },
+      rows: [{ source_row_id: "ROW-A", evidence_status: "PROVEN" }],
+    },
+  });
+  const manifest = await write("reconciliation.manifest.json", {
+    schema: "opiu-auto-reconciliation-run-v3", organization: "Organization 1", organization_code: "ORG-1", period: "2025-01",
+    output_path: workbook.path, output_sha256: workbook.sha256, codex_input_path: codex.path, codex_input_sha256: codex.sha256,
+    report_only: true, posting_rows: 0, executed_posting_rows: 0, live_posting_rows: 0,
+    execution_allowed: false, ready_to_upload: false, release_allowed: false, live_1c_allowed: false, live_delete_allowed: false,
+  });
+  const proofBinding = await write("structural-control-proof.binding.json", {
+    schema_version: "opiu-service-structural-control-proof-binding.v1", run_id: "RUN-1", context_id: "CTX-1",
+    organization_id: "ORG-1", organization_name: "Organization 1", organization_path: "Holding / Organization 1", period: "2025-01",
+    codex_input: codex, proof,
+  });
+  const sourceRowIDs = ["ROW-A"];
+  const handoff = {
+    schema_version: "opiu-service-r005-r001-handoff.v1", artifact_type: "R005_R001_SERVICE_HANDOFF",
+    run_id: "RUN-1", source_run_id: "RUN-1", context_id: "CTX-1",
+    organization: { id: "ORG-1", name: "Organization 1", hierarchy_path: "Holding / Organization 1" }, period: "2025-01",
+    sources: { erp, intalev }, r005: { workbook, codex_input: codex, manifest },
+    structural: { inventory, inventory_binding: inventoryBinding, proof, proof_binding: proofBinding },
+    physical_evidence: {
+      status: "VERIFIED_JOURNAL_REPORT_ONLY", erp_package: erp, erp_journal: { ...journal, sheet: "Journal" },
+      source_row_ids: sourceRowIDs, source_row_ids_sha256: hashBytes(JSON.stringify(sourceRowIDs)), unique_count: 1, reuse_count: 0,
+    },
+    cross_checks: {
+      manifest_schema: "opiu-auto-reconciliation-run-v3", codex_input_schema: "opiu-codex-review-input-v1",
+      scope_verified: true, source_hashes_verified: true, r005_hashes_verified: true,
+      structural_inventory_verified: true, structural_proof_verified: true, physical_evidence_bound: true,
+    },
+    safety,
+  };
+  const handoffPath = path.join(root, "handoff", "r005-r001-service-handoff.json");
+  await fs.mkdir(path.dirname(handoffPath), { recursive: true });
+  const rewrite = async (raw = `${JSON.stringify(handoff)}\n`) => {
+    await fs.writeFile(handoffPath, raw);
+    const handoffSha256 = await hashFile(handoffPath);
+    await fs.writeFile(`${handoffPath}.sha256`, `${handoffSha256}\n`);
+    return handoffSha256;
+  };
+  const handoffSha256 = await rewrite();
+  return { root, files, handoff, handoffPath, handoffSha256, rewrite };
+}
+
+test("accepts the exact Service-owned neutral handoff", async () => {
+  const item = await serviceHandoffFixture();
+  const result = await verifiedR001HandoffInput({ handoffPath: item.handoffPath, handoffSha256: item.handoffSha256 });
+  assert.equal(result.sourceRunId, "RUN-1");
+  assert.deepEqual(result.sourceRowIDs, ["ROW-A"]);
 });
 
-test("fails closed on run, organization, and period mismatch", async () => {
-  const item = await fixture();
-  for (const request of [
-    { requestedRunId: "RUN-OTHER" },
-    { requestedOrganizationId: "ORG-OTHER" },
-    { requestedPeriod: "2025-02" },
+test("requires both canonical handoff path and pinned SHA", async () => {
+  const item = await serviceHandoffFixture();
+  await assert.rejects(verifiedR001HandoffInput({ handoffPath: item.handoffPath }), /SERVICE_HANDOFF_SHA256_REQUIRED/u);
+  await assert.rejects(verifiedR001HandoffInput({ handoffSha256: item.handoffSha256 }), /SERVICE_HANDOFF_PATH_REQUIRED/u);
+});
+
+test("rejects handoff byte tamper against the Service-computed SHA", async () => {
+  const item = await serviceHandoffFixture();
+  await fs.appendFile(item.handoffPath, " ");
+  await assert.rejects(verifiedR001HandoffInput({ handoffPath: item.handoffPath, handoffSha256: item.handoffSha256 }), /SERVICE_HANDOFF_HASH_MISMATCH/u);
+});
+
+test("rejects drift in every handoff-bound artifact", async () => {
+  const item = await serviceHandoffFixture();
+  await fs.appendFile(item.files["reconciliation.codex-input.json"].path, "tamper");
+  await assert.rejects(verifiedR001HandoffInput({ handoffPath: item.handoffPath, handoffSha256: item.handoffSha256 }), /SERVICE_HANDOFF_ARTIFACT_DRIFT/u);
+});
+
+test("rejects unknown handoff keys under the exact schema", async () => {
+  const item = await serviceHandoffFixture();
+  item.handoff.unknown_authority = true;
+  const sha = await item.rewrite();
+  await assert.rejects(verifiedR001HandoffInput({ handoffPath: item.handoffPath, handoffSha256: sha }), /SERVICE_HANDOFF_EXACT_SCHEMA_MISMATCH/u);
+});
+
+test("rejects duplicate JSON keys before JSON.parse can collapse them", async () => {
+  const item = await serviceHandoffFixture();
+  const raw = `${JSON.stringify(item.handoff).replace('"run_id":"RUN-1"', '"run_id":"STALE","run_id":"RUN-1"')}\n`;
+  const sha = await item.rewrite(raw);
+  await assert.rejects(verifiedR001HandoffInput({ handoffPath: item.handoffPath, handoffSha256: sha }), /SERVICE_HANDOFF_DUPLICATE_KEY/u);
+});
+
+test("rejects duplicate, stale-digest, or reused physical SourceRowIDs", async () => {
+  for (const mutate of [
+    (physical) => { physical.source_row_ids = ["ROW-A", "ROW-A"]; physical.unique_count = 2; },
+    (physical) => { physical.source_row_ids_sha256 = "A".repeat(64); },
+    (physical) => { physical.reuse_count = 1; },
   ]) {
-    await assert.rejects(
-      verifiedR001HandoffInput({ handoffPath: item.handoffPath, ...request }),
-      /R001_HANDOFF_REQUEST_/,
-    );
+    const item = await serviceHandoffFixture();
+    mutate(item.handoff.physical_evidence);
+    const sha = await item.rewrite();
+    await assert.rejects(verifiedR001HandoffInput({ handoffPath: item.handoffPath, handoffSha256: sha }), /SERVICE_HANDOFF_PHYSICAL/u);
   }
 });
 
-test("fails closed when any handoff-bound file hash changes", async () => {
-  const item = await fixture();
-  await fs.appendFile(item.companion, "tampered");
-  await assert.rejects(
-    verifiedR001HandoffInput({ handoffPath: item.handoffPath }),
-    /R001_HANDOFF_HASH_MISMATCH/,
-  );
+test("rejects rehashed scope drift against pinned R005 inputs", async () => {
+  const item = await serviceHandoffFixture();
+  item.handoff.organization.name = "Other Organization";
+  const sha = await item.rewrite();
+  await assert.rejects(verifiedR001HandoffInput({ handoffPath: item.handoffPath, handoffSha256: sha }), /SERVICE_HANDOFF_R005_SCOPE_MISMATCH/u);
 });
 
-test("fails closed when a rehashed handoff tampers with structural-control proof", async () => {
-  const item = await fixture();
-  item.handoff.structural_control_proof = {
-    ...item.handoff.structural_control_proof,
-    control_result_count: 99,
-  };
-  await fs.writeFile(item.handoffPath, JSON.stringify(item.handoff));
-  await assert.rejects(
-    verifiedR001HandoffInput({ handoffPath: item.handoffPath }),
-    /STRUCTURAL_CONTROL_PROOF_DESCRIPTOR_MISMATCH/,
-  );
-});
-
-test("accepts explicit no-active structural settings as default all-groups proof", async () => {
-  const item = await fixture();
-  const codexPayload = JSON.parse(await fs.readFile(item.companion, "utf8"));
-  codexPayload.structural_control_settings_binding = {
-    status: "MISSING_DEFAULT_ALL_GROUPS", set_count: 0,
-    correction_authority: false, financial_rows: 0, posting_rows: 0, execution_allowed: false,
-  };
-  codexPayload.structural_group_control_results = [];
-  await fs.writeFile(item.companion, JSON.stringify(codexPayload));
-  item.handoff.reconciliation.codex_input_sha256 = await sha256(item.companion);
-  item.handoff.structural_control_proof = structuralControlProofFromCodexPayload(codexPayload);
-  await fs.writeFile(item.handoffPath, JSON.stringify(item.handoff));
-  const result = await verifiedR001HandoffInput({ handoffPath: item.handoffPath });
-  assert.equal(result.structuralControlProof.status, "NO_ACTIVE_DEFAULT_ALL_GROUPS");
-  assert.deepEqual(result.structuralControlProof.applied_version_ids, []);
-});
-
-test("does not derive a companion from the reconciliation filename", async () => {
-  const item = await fixture();
-  await assert.rejects(
-    verifiedR001HandoffInput({
-      handoffPath: item.handoffPath,
-      codexInputPath: item.report.replace(/\.xlsx$/i, ".codex-input.json"),
-    }),
-    /R001_HANDOFF_REQUEST_CODEX_INPUT_MISMATCH/,
-  );
-});
-
-test("rejects a hash-valid applications file with an unsafe disputed row", async () => {
-  const item = await fixture();
-  const unsafe = {
-    schema_version: "opiu-rule-applications.v1", run_id: "RUN-ACTIVE",
-    safety: { report_only: true, posting_rows: 0, ready_to_upload: false, release_allowed: false, live_1c_allowed: false },
-    applications: [{
-      application_id: "APP-1", candidate_id: "CAND-1", run_id: "RUN-ACTIVE", organization_id: "ORG-1", period: "2025-01",
-      result_status: "REVIEW", disputed_only: true, output_route: "СПОРНО", proof_status: "UNPROVEN", review_state: "NEEDS_REVIEW",
-      execution_allowed: false, posting_rows: 0, ready_to_upload: false, release_allowed: false, live_1c_allowed: true,
-      candidate_snapshot: { candidate_id: "CAND-1", scope: { organization_id: "ORG-1" }, action: { action_type: "STORNO_REPOST" } },
-    }],
-  };
-  await fs.writeFile(item.applications, JSON.stringify(unsafe));
-  item.handoff.applications.sha256 = await sha256(item.applications);
-  await fs.writeFile(item.handoffPath, JSON.stringify(item.handoff));
-  await assert.rejects(verifiedR001HandoffInput({ handoffPath: item.handoffPath }), /R001_HANDOFF_APPLICATION_SAFETY_MISMATCH/);
-});
-
-test("rejects confirmed or applied rows in the disputed-drafts handoff", async () => {
-  for (const resultStatus of ["CONFIRMED", "APPLIED"]) {
-    const item = await fixture();
-    const document = {
-      schema_version: "opiu-rule-applications.v1", run_id: "RUN-ACTIVE",
-      safety: { report_only: true, posting_rows: 0, ready_to_upload: false, release_allowed: false, live_1c_allowed: false },
-      applications: [{
-        application_id: "APP-1", candidate_id: "CAND-1", run_id: "RUN-ACTIVE", organization_id: "ORG-1", period: "2025-01",
-        result_status: resultStatus, disputed_only: false, output_route: "ГОТОВО", proof_status: "PROVEN", review_state: "NOT_REQUIRED",
-        execution_allowed: false, posting_rows: 0, ready_to_upload: false, release_allowed: false, live_1c_allowed: false,
-        candidate_snapshot: { candidate_id: "CAND-1", scope: { organization_id: "ORG-1" }, action: { action_type: "STORNO_REPOST" } },
-      }],
-    };
-    await fs.writeFile(item.applications, JSON.stringify(document));
-    item.handoff.applications.sha256 = await sha256(item.applications);
-    await fs.writeFile(item.handoffPath, JSON.stringify(item.handoff));
-    await assert.rejects(verifiedR001HandoffInput({ handoffPath: item.handoffPath }), /R001_HANDOFF_APPLICATION_STATUS_FORBIDDEN/);
+test("forbids decisions, rules, applications, and all direct source overrides", async () => {
+  for (const key of ["decisions", "rules", "applications", "reconciliation", "codex-input", "period", "organization", "run-id"]) {
+    assert.throws(() => assertNoDirectR001Overrides({ [key]: "value" }), /R001_DIRECT_SOURCE_OVERRIDE_FORBIDDEN/u);
   }
-});
-
-test("direct Rules application JSON requires a verified handoff", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opiu-r001-direct-apps-"));
-  const applicationsPath = path.join(root, "r001_rule_application_drafts.json");
-  await fs.writeFile(applicationsPath, JSON.stringify({ schema_version: "opiu-rule-applications.v1", applications: [] }));
-  await assert.rejects(
-    requireVerifiedHandoffForRulesApplications({ applicationsPath }),
-    /R001_RULE_APPLICATIONS_REQUIRE_VERIFIED_HANDOFF/,
-  );
-  await assert.doesNotReject(requireVerifiedHandoffForRulesApplications({ applicationsPath, handoffPath: path.join(root, "r001_handoff.json") }));
+  const item = await serviceHandoffFixture();
+  await assert.rejects(verifiedR001HandoffInput({ handoffPath: item.handoffPath, handoffSha256: item.handoffSha256, applicationsPath: "rules.json" }), /R001_DIRECT_SOURCE_OVERRIDE_FORBIDDEN/u);
 });

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestPipelineRequiresAllThreeAdapters(t *testing.T) {
+func TestPipelineRequiresDirectR005AndR001Adapters(t *testing.T) {
 	store, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -19,6 +19,26 @@ func TestPipelineRequiresAllThreeAdapters(t *testing.T) {
 	}
 	if pipeline.Ready() {
 		t.Fatal("partial or empty adapter set was treated as ready")
+	}
+}
+
+func TestPipelineRejectsRulesAndDirectR001Overrides(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPIU_RUNTIME_ROOT", "")
+	t.Setenv("OPIU_ORGANIZATION_CATALOG", "missing-catalog.json")
+	t.Setenv("OPIU_R005_CMD_JSON", `["r005","{run_id}","{context_id}","{organization_id}","{organization_name}","{organization_path}"]`)
+	t.Setenv("OPIU_R001_CMD_JSON", `["r001","--handoff","{handoff}","--handoff-sha256","{handoff_sha256}"]`)
+	t.Setenv("OPIU_RULES_CMD_JSON", `["rules"]`)
+	if _, err := NewPipeline(store); err == nil {
+		t.Fatal("production accepted OPIU_RULES_CMD_JSON")
+	}
+	t.Setenv("OPIU_RULES_CMD_JSON", "")
+	t.Setenv("OPIU_R001_CMD_JSON", `["r001","--handoff","{handoff}","--handoff-sha256","{handoff_sha256}","--decisions","forged.json"]`)
+	if _, err := NewPipeline(store); err == nil {
+		t.Fatal("production accepted a direct R001 decisions override")
 	}
 }
 

@@ -12,13 +12,15 @@ import (
 )
 
 // RuntimeAdapter describes a verified local runtime payload containing the
-// imported R005, Rules and R001 modules. The Service never downloads or
+// imported R005 and R001 modules. The Service never downloads or
 // executes arbitrary code: every entrypoint is resolved below one explicit
 // runtime root and is launched as an argv vector without a shell.
 type RuntimeAdapter struct {
-	Root                 string
-	Node                 string
-	R005Script           string
+	Root       string
+	Node       string
+	R005Script string
+	// Deprecated compatibility fields are never populated by runtime discovery
+	// and are unreachable from the production pipeline.
 	RulesScript          string
 	R001Script           string
 	R001DiagnosticScript string
@@ -118,11 +120,6 @@ func discoverRuntimeAdapter() (*RuntimeAdapter, error) {
 }
 
 func runtimeAdapterAt(root string) (*RuntimeAdapter, error) {
-	registry := filepath.Join(root, "rules", "rule_registry.json")
-	if !regularFile(registry) {
-		registry = filepath.Join(root, "data", "defaults", "rules.json")
-	}
-
 	r005Core := filepath.Join(root, "modules", "reconciliation", "source", "opiu_reconcile.mjs")
 	r001Core := filepath.Join(root, "modules", "corrections", "source", "correction_engine_r001.mjs")
 	r005Script := r005Core
@@ -139,10 +136,8 @@ func runtimeAdapterAt(root string) (*RuntimeAdapter, error) {
 	paths := map[string]string{
 		"r005":      r005Script,
 		"r005_core": r005Core,
-		"rules":     filepath.Join(root, "modules", "rules-engine", "source", "cli.mjs"),
 		"r001":      r001Script,
 		"r001_core": r001Core,
-		"registry":  registry,
 		"safety":    filepath.Join(root, "SAFETY.json"),
 	}
 	for label, path := range paths {
@@ -190,7 +185,7 @@ func runtimeAdapterAt(root string) (*RuntimeAdapter, error) {
 		node, _ = filepath.Abs(resolved)
 	}
 
-	// Bare ESM imports used by all three modules must resolve from a shared
+	// Bare ESM imports used by both modules must resolve from a shared
 	// ancestor. Packaging materializes this directory from the pinned payload.
 	sharedModules := filepath.Join(root, "node_modules")
 	if !directoryExists(sharedModules) {
@@ -201,10 +196,8 @@ func runtimeAdapterAt(root string) (*RuntimeAdapter, error) {
 		Root:                 root,
 		Node:                 node,
 		R005Script:           paths["r005"],
-		RulesScript:          paths["rules"],
 		R001Script:           paths["r001"],
 		R001DiagnosticScript: paths["r001_core"],
-		RulesRegistry:        paths["registry"],
 	}, nil
 }
 

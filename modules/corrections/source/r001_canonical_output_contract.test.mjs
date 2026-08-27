@@ -14,6 +14,7 @@ import {
   collectCanonicalFinancialOutput,
   verifyCanonicalOutputIntegrity,
 } from "./r001_canonical_output_contract.mjs";
+import { enforceServiceHandoffReadyAuthority } from "./service_r001_ready_authority.mjs";
 
 const SHA_A = "A".repeat(64);
 const SHA_B = "B".repeat(64);
@@ -157,9 +158,10 @@ function workbookRecords(output) {
   }));
 }
 
-test("READY STORNO crosses createCanonicalPostingRow and exports the exact A:AA contract", () => {
+test("exact Service handoff SourceRowID is the only authority that preserves READY", () => {
   const row = canonicalRow();
-  const output = collectCanonicalFinancialOutput([row]);
+  const gate = enforceServiceHandoffReadyAuthority([row], ["ROW-12"]);
+  const output = collectCanonicalFinancialOutput(gate.rows);
   assert.deepEqual(output.headers, LOADER_A_AA_FIELDS);
   assert.equal(output.headers.length, 27);
   assert.deepEqual(output.groups[0].rows[0].loader_values, row.loader_values);
@@ -167,6 +169,7 @@ test("READY STORNO crosses createCanonicalPostingRow and exports the exact A:AA 
   assert.equal(output.groups[0].rows[0].source.source_row_id, "ROW-12");
   assert.equal(output.counters.ready_financial_rows, 1);
   assert.equal(output.counters.storno_rows, 1);
+  assert.equal(gate.audit.blocked_pair_count, 0);
 });
 
 test("canonical filenames follow section 12.2 for proven and unknown source organizations", () => {
@@ -182,12 +185,17 @@ test("canonical filenames follow section 12.2 for proven and unknown source orga
   }), "[ИСТОЧНИК НЕ ОПРЕДЕЛЕН][28.02.2025]_ОПИУ_ГОТОВО_СПОРНО.xlsx");
 });
 
-test("READY REPOST keeps canonical loader accounting without exporter rewrite", () => {
+test("empty Service handoff SourceRowID set demotes every READY row to SPORNO", () => {
   const row = canonicalRow({ auditIdentity: "AUDIT-R", operation: "REPOST" });
-  const output = collectCanonicalFinancialOutput([row]);
-  assert.equal(output.rows[0].loader["СубконтоДт1"], "Назначение");
-  assert.deepEqual(output.rows[0].loader_values, row.loader_values);
+  const gate = enforceServiceHandoffReadyAuthority([row], []);
+  const output = collectCanonicalFinancialOutput(gate.rows);
+  assert.equal(output.rows[0].loader["СубконтоДт1"], null);
+  assert.equal(output.rows[0].source.source_row_id, "");
+  assert.equal(output.rows[0].output_route, "SPORNO");
+  assert.equal(output.counters.ready_financial_rows, 0);
+  assert.equal(output.counters.sporno_financial_rows, 1);
   assert.equal(output.counters.repost_rows, 1);
+  assert.deepEqual(gate.audit.blocker_codes, ["SERVICE_HANDOFF_SOURCE_ROW_ID_OUTSIDE_EXACT_SET"]);
 });
 
 test("explicit SPORNO STORNO and REPOST stay in SPORNO only with exact route/state", () => {
@@ -524,11 +532,20 @@ test("canonical integrity exposes full explicit service REPORT_ONLY safety witho
   assert.equal(integrity.registry_financial_rows, 2);
 });
 
-test("one physical ERP row cannot be reused across correction pairs", () => {
-  assert.throws(() => collectCanonicalFinancialOutput([
+test("outside or reused Service handoff SourceRowID yields zero READY and explicit blockers", () => {
+  const gate = enforceServiceHandoffReadyAuthority([
+    canonicalRow({ auditIdentity: "OUTSIDE", sourceOverrides: { source_row_id: "ROW-OUTSIDE" }, caseOverrides: { pair_id: "PAIR-OUTSIDE" } }),
     canonicalRow({ auditIdentity: "REUSE-A", caseOverrides: { pair_id: "PAIR-A" } }),
-    canonicalRow({ auditIdentity: "REUSE-B", operation: "REPOST", caseOverrides: { pair_id: "PAIR-B" } }),
-  ]), { code: "PHYSICAL_SOURCE_REUSED_ACROSS_PAIRS" });
+    canonicalRow({ auditIdentity: "REUSE-B", caseOverrides: { pair_id: "PAIR-B" } }),
+  ], ["ROW-12"]);
+  const output = collectCanonicalFinancialOutput(gate.rows);
+  assert.equal(output.counters.ready_financial_rows, 0);
+  assert.equal(output.counters.sporno_financial_rows, 3);
+  assert.ok(output.rows.every((row) => row.materialization_case.blockers.some((value) => value.startsWith("SERVICE_HANDOFF_SOURCE_ROW_ID_"))));
+  assert.deepEqual(new Set(gate.audit.blocker_codes), new Set([
+    "SERVICE_HANDOFF_SOURCE_ROW_ID_OUTSIDE_EXACT_SET",
+    "SERVICE_HANDOFF_SOURCE_ROW_ID_REUSED",
+  ]));
 });
 
 test("paired correction rejects unequal STORNO and REPOST amounts", () => {
@@ -595,7 +612,8 @@ test("active core writer accepts only the merged canonical group and legacy row 
   const engineSource = await fs.readFile(new URL("./correction_engine_r001.mjs", import.meta.url), "utf8");
   const strictWriterCalls = [...engineSource.matchAll(/await\s+buildStrictUploadWorkbook\(([^,]+),/g)].map((match) => match[1].trim());
   assert.deepEqual(strictWriterCalls, ["group.rows"]);
-  assert.match(engineSource, /collectCanonicalFinancialOutput\(\[/);
+  assert.match(engineSource, /enforceServiceHandoffReadyAuthority\(\[/);
+  assert.match(engineSource, /collectCanonicalFinancialOutput\(serviceHandoffAuthority\.rows,/);
   assert.doesNotMatch(engineSource, /await\s+buildStrictUploadWorkbook\((?:actions|applicationReview|disputedSidecar|materialization)\./);
   assert.match(engineSource, /posting_rows:\s*0,/);
 });

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -17,6 +18,7 @@ import re
 import shutil
 import stat
 import tempfile
+import tarfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -38,9 +40,8 @@ SERVICE_EXE_NAME = BASE.SERVICE_EXE_NAME
 PRODUCT_ROOT_RELATIVE = Path("development/OPIU_1.9.4")
 MANAGED_RUNTIME_ROOTS = (
     "modules/corrections/source",
+    "modules/corrections/contracts",
     "modules/reconciliation/source",
-    "modules/rules-engine/source",
-    "modules/rules-engine/contracts",
     "user-settings",
 )
 RUNTIME_TARGET_ROOTS = MANAGED_RUNTIME_ROOTS[:-1]
@@ -48,9 +49,39 @@ GIT_BOUND_USER_SETTINGS = {
     "user-settings/КАК_НАСТРОИТЬ_ГРУППИРОВКУ.txt",
     "user-settings/Настройка_группировки_блоков.csv",
 }
+GIT_BOUND_RUNTIME_DATA_FILES = frozenset({
+    "modules/corrections/contracts/schemas/service_r005_r001_handoff.schema.json",
+    "modules/corrections/source/correction_rules.r001.json",
+    "modules/reconciliation/source/catalog_descendants.current.json",
+    "modules/reconciliation/source/config.json",
+    "modules/reconciliation/source/external_reference/erp/ERP_Аналитики_ОПИУ.xlsx",
+    "modules/reconciliation/source/external_reference/erp/ERP_Показатели_ОПИУ.xlsx",
+    "modules/reconciliation/source/external_reference/erp/ERP_Формулы_ОПИУ.xlsx",
+    "modules/reconciliation/source/external_reference/erp/StatD_R.xlsx",
+    "modules/reconciliation/source/external_reference/erp/ИстчникиОтчетовЕРП.xlsx",
+    "modules/reconciliation/source/external_reference/erp/ОПИУ_Структура_ерп.xlsx",
+    "modules/reconciliation/source/external_reference/erp/ОПИУ_ФОРМУЛЫ_ерп.xlsx",
+    "modules/reconciliation/source/external_reference/intalev/Z_J_X.mxl",
+    "modules/reconciliation/source/external_reference/intalev/ОтчетПоСтруктуреОтчетов2.mxl",
+    "modules/reconciliation/source/external_reference/intalev/отчетПоФильтрам2.mxl",
+    "modules/reconciliation/source/organization_profiles.json",
+    "modules/reconciliation/source/owner_decision_policy.json",
+    "modules/reconciliation/source/owner_economic_route_proofs/uk9_2025_10_owner_approved.json",
+    "modules/reconciliation/source/owner_empty_article_bindings/uk9_2025_fzp_owner_approved.json",
+    "modules/reconciliation/source/r005_intalev_template_graph.current.json",
+    "modules/reconciliation/source/reference_catalog_manifest.current.json",
+    "modules/reconciliation/source/resources/UK_Актуальные_правила_сверки_2026-07-30_R005_CONSOLIDATED.xlsx",
+    "modules/reconciliation/source/resources/ОПИУ_по_образцу_ШАБЛОН.xlsx",
+    "modules/reconciliation/source/resources/khabarovsk_project.json",
+    "modules/reconciliation/source/resources/СтатьиДоходовИРасходовЕРП.xlsx",
+    "modules/reconciliation/source/testdata/structural-control-inventory-v3.fixture.json",
+})
 REQUIRED_STRUCTURAL_CONTROL_RUNTIME_FILES = frozenset({
     "modules/corrections/source/correction_engine_r001.mjs",
     "modules/corrections/source/r001_handoff_input.mjs",
+    "modules/corrections/source/service_r005_r001_handoff.mjs",
+    "modules/corrections/source/service_r001_ready_authority.mjs",
+    "modules/corrections/contracts/schemas/service_r005_r001_handoff.schema.json",
     "modules/corrections/source/service_r001_owner_wrapper.mjs",
     "modules/reconciliation/source/opiu_reconcile.mjs",
     "modules/reconciliation/source/service_r005_owner_wrapper.mjs",
@@ -60,14 +91,12 @@ REQUIRED_STRUCTURAL_CONTROL_RUNTIME_FILES = frozenset({
     "modules/reconciliation/source/structural_control_inventory_v3.mjs",
     "modules/reconciliation/source/structural_control_report_detail.mjs",
     "modules/reconciliation/source/structural_control_settings_binding.mjs",
-    "modules/rules-engine/source/handoff.mjs",
-    "modules/rules-engine/source/structural_control_proof.mjs",
 })
 REQUIRED_STRUCTURAL_CONTROL_SERVICE_SOURCE_FILES = frozenset({
     "fail_soft_report_package.go",
     "pipeline.go",
     "results_api.go",
-    "rules_review.go",
+    "r001_service_handoff.go",
     "runtime_adapter.go",
     "structural_control_inventory_anchor.go",
     "structural_control_inventory_v3.go",
@@ -75,7 +104,12 @@ REQUIRED_STRUCTURAL_CONTROL_SERVICE_SOURCE_FILES = frozenset({
     "structural_control_proof_pipeline.go",
     "structural_control_sets.go",
 })
-MODULE_NAMES = ("corrections", "reconciliation", "rules-engine")
+MODULE_NAMES = ("corrections", "reconciliation")
+LEGACY_RULES_RUNTIME_PATHS = (
+    "runtime/modules/rules-engine",
+    "runtime/rules",
+    "runtime/data/defaults/rules.json",
+)
 MODULE_MANIFEST_PATHS = tuple(
     f"modules/{module}/MODULE_MANIFEST.json" for module in MODULE_NAMES
 )
@@ -229,8 +263,75 @@ def assert_outputs_outside_repository(repository: Path, *outputs: Path) -> None:
             raise BuildError("OUTPUT_INSIDE_SOURCE_REPOSITORY")
 
 
+def product_root_relative(repository: Path) -> Path:
+    repository = repository.resolve()
+    if all((repository / root).is_dir() for root in MANAGED_RUNTIME_ROOTS):
+        return Path(".")
+    return PRODUCT_ROOT_RELATIVE
+
+
+def service_source_relative(repository: Path) -> Path:
+    repository = repository.resolve()
+    if (repository / "service" / "source").is_dir():
+        return Path("service/source")
+    return BASE.SERVICE_SOURCE_RELATIVE
+
+
+def git_service_source_inventory(repository: Path, source_head: str) -> dict[str, Any]:
+    source_relative = service_source_relative(repository)
+    source_prefix = source_relative.as_posix().rstrip("/") + "/"
+    result = BASE.run_process_bytes(
+        ["git", "-C", str(repository), "archive", "--format=tar", source_head, "--", source_prefix],
+        cwd=repository,
+        env=dict(os.environ),
+    )
+    BASE.require_binary_process(result, "GIT_ARCHIVE_SOURCE")
+    rows: list[dict[str, Any]] = []
+    try:
+        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
+            for member in archive.getmembers():
+                normalized = PurePosixPath(member.name).as_posix()
+                if member.isdir():
+                    continue
+                if not member.isfile() or not normalized.startswith(source_prefix):
+                    raise BuildError(f"GIT_SOURCE_ENTRY_UNSAFE:{normalized}")
+                relative = normalized[len(source_prefix):]
+                pure = PurePosixPath(relative)
+                if not relative or pure.is_absolute() or ".." in pure.parts:
+                    raise BuildError(f"GIT_SOURCE_ENTRY_UNSAFE:{normalized}")
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise BuildError(f"GIT_SOURCE_ENTRY_UNREADABLE:{relative}")
+                data = stream.read()
+                rows.append({"path": relative, "size": len(data), "sha256": sha256_bytes(data)})
+    except (tarfile.TarError, OSError) as error:
+        raise BuildError(f"GIT_SOURCE_ARCHIVE_INVALID:{error}") from error
+    return BASE.inventory_record_from_rows(rows)
+
+
+def exact_service_source_inventory(repository: Path, source_head: str) -> dict[str, Any]:
+    source_root = repository / service_source_relative(repository)
+    working = BASE.source_inventory(source_root)
+    committed = git_service_source_inventory(repository, source_head)
+    if working != committed:
+        raise BuildError("SERVICE_SOURCE_NOT_EXACT_GIT_TREE")
+    return working
+
+
+def verify_service_source_unchanged(
+    repository: Path,
+    source_head: str,
+    expected_inventory: dict[str, Any],
+) -> None:
+    BASE.verify_repository(repository, source_head)
+    if exact_service_source_inventory(repository, source_head) != expected_inventory:
+        raise BuildError("SERVICE_SOURCE_CHANGED_DURING_BUILD")
+
+
 def parse_git_tree(repository: Path, source_head: str) -> dict[str, dict[str, str]]:
-    paths = [f"{PRODUCT_ROOT_RELATIVE.as_posix()}/{root}" for root in MANAGED_RUNTIME_ROOTS]
+    product_relative = product_root_relative(repository)
+    prefix = "" if product_relative == Path(".") else product_relative.as_posix().rstrip("/") + "/"
+    paths = [f"{prefix}{root}" for root in MANAGED_RUNTIME_ROOTS]
     result = BASE.run_process_bytes(
         ["git", "-c", "core.quotePath=false", "-C", str(repository),
          "ls-tree", "-r", "-z", source_head, "--", *paths],
@@ -239,7 +340,6 @@ def parse_git_tree(repository: Path, source_head: str) -> dict[str, dict[str, st
     )
     BASE.require_binary_process(result, "GIT_RUNTIME_TREE")
     rows: dict[str, dict[str, str]] = {}
-    prefix = PRODUCT_ROOT_RELATIVE.as_posix().rstrip("/") + "/"
     for raw in result.stdout.split(b"\0"):
         if not raw:
             continue
@@ -250,7 +350,7 @@ def parse_git_tree(repository: Path, source_head: str) -> dict[str, dict[str, st
         if len(parts) != 3 or parts[1] != "blob" or parts[0] not in {"100644", "100755"}:
             raise BuildError("GIT_RUNTIME_TREE_ENTRY_UNSAFE")
         full_path = raw_path.decode("utf-8", "strict")
-        if not full_path.startswith(prefix):
+        if prefix and not full_path.startswith(prefix):
             raise BuildError("GIT_RUNTIME_TREE_SCOPE_ESCAPE")
         relative = PurePosixPath(full_path[len(prefix):]).as_posix()
         pure = PurePosixPath(relative)
@@ -273,7 +373,7 @@ def git_blob_id(data: bytes, object_format: str) -> str:
 
 def exact_runtime_overlay_inventory(repository: Path, source_head: str) -> dict[str, Any]:
     repository = repository.resolve()
-    product_root = repository / PRODUCT_ROOT_RELATIVE
+    product_root = repository / product_root_relative(repository)
     tree = parse_git_tree(repository, source_head)
     object_format = BASE.git_text(repository, "rev-parse", "--show-object-format").strip()
     working_paths: dict[str, Path] = {}
@@ -320,6 +420,7 @@ def exact_runtime_overlay_inventory(repository: Path, source_head: str) -> dict[
         row["path"] for row in record["files"]
         if PurePosixPath(row["path"]).suffix.lower() in FORBIDDEN_NEW_SUFFIXES
         and row["path"] not in GIT_BOUND_USER_SETTINGS
+        and row["path"] not in GIT_BOUND_RUNTIME_DATA_FILES
     ]
     if forbidden:
         raise BuildError(f"RUNTIME_OVERLAY_BUSINESS_FILE_FORBIDDEN:{len(forbidden)}")
@@ -455,6 +556,24 @@ def remove_exact_private_carrier_files(bundle: Path) -> dict[str, Any]:
     return record_from_rows(rows)
 
 
+def remove_legacy_rules_runtime(bundle: Path) -> dict[str, Any]:
+    rows = []
+    for relative in LEGACY_RULES_RUNTIME_PATHS:
+        target = bundle / Path(relative)
+        if not is_under(target, bundle):
+            raise BuildError("LEGACY_RULES_REMOVAL_PATH_ESCAPE")
+        if target.is_dir():
+            for item in BASE.regular_files(target):
+                rows.append({"path": item.relative_to(bundle).as_posix(), "size": item.stat().st_size, "sha256": BASE.sha256_file(item)})
+            shutil.rmtree(target)
+        elif target.is_file():
+            rows.append({"path": target.relative_to(bundle).as_posix(), "size": target.stat().st_size, "sha256": BASE.sha256_file(target)})
+            target.unlink()
+    if any((bundle / Path(relative)).exists() for relative in LEGACY_RULES_RUNTIME_PATHS):
+        raise BuildError("LEGACY_RULES_RUNTIME_REMOVAL_FAILED")
+    return record_from_rows(rows)
+
+
 def apply_runtime_overlay(
     bundle: Path,
     product_root: Path,
@@ -538,6 +657,8 @@ def closed_safety(source_head: str) -> dict[str, Any]:
         "artifact_published_by_builder": False,
         "release_approved": False,
         "live_1c_approved": False,
+        "rules_service": False,
+        "pipeline": "R005_SERVICE_HANDOFF_R001",
     })
     BASE.assert_report_only(safety)
     return safety
@@ -654,7 +775,11 @@ def replaced_paths_for(overlay: dict[str, Any], before: dict[str, Any]) -> set[s
         *(bundle_relative_for_overlay(row["path"]) for row in overlay["files"]),
         *REMOVED_PRIVATE_CARRIER_FILES,
     }
-    return {path for path in replaced if any(row["path"] == path for row in before["files"])}
+    before_paths = {row["path"] for row in before["files"]}
+    replaced.update(path for path in before_paths if any(
+        path == prefix or path.startswith(f"{prefix}/") for prefix in LEGACY_RULES_RUNTIME_PATHS
+    ))
+    return {path for path in replaced if path in before_paths}
 
 
 def assemble_candidate(
@@ -684,8 +809,9 @@ def assemble_candidate(
     before = inventory_with_source(bundle)
     carrier_only = verify_carrier_managed_closure(bundle, overlay)
     removed_private = remove_exact_private_carrier_files(bundle)
+    removed_rules = remove_legacy_rules_runtime(bundle)
 
-    apply_runtime_overlay(bundle, repository / PRODUCT_ROOT_RELATIVE, overlay)
+    apply_runtime_overlay(bundle, repository / product_root_relative(repository), overlay)
     actual_overlay = {row["path"]: row for row in managed_candidate_inventory(bundle)["files"]}
     for expected in overlay["files"]:
         actual = actual_overlay.get(expected["path"])
@@ -735,6 +861,7 @@ def assemble_candidate(
         "runtime_overlay_inventory": overlay,
         "preserved_carrier_reference_inventory": carrier_only,
         "removed_private_carrier_inventory": removed_private,
+        "removed_legacy_rules_runtime_inventory": removed_rules,
         "preserved_carrier_inventory": preserved,
         "service_source_inventory": source_inventory,
         "structural_control_packaging_proof": structural_control_packaging_proof,
@@ -823,8 +950,12 @@ def verify_candidate_bundle(
     if service_record["packaged_sha256"] == BASE_SERVICE_EXE_SHA256:
         raise BuildError("PACKAGED_SERVICE_EXE_STALE")
     runtime = bundle / "runtime"
+    if any((bundle / Path(relative)).exists() for relative in LEGACY_RULES_RUNTIME_PATHS):
+        raise BuildError("LEGACY_RULES_RUNTIME_PRESENT")
     safety = BASE.load_json(runtime / "SAFETY.json")
     assert_closed_safety_document(safety)
+    if safety.get("rules_service") is not False or safety.get("pipeline") != "R005_SERVICE_HANDOFF_R001":
+        raise BuildError("DIRECT_PIPELINE_SAFETY_DECLARATION_MISSING")
     if safety.get("runtime_source_sha") != source_head:
         raise BuildError("SAFETY_SOURCE_HEAD_MISMATCH")
     for module in MODULE_NAMES:
@@ -1034,14 +1165,14 @@ def build(
         raise BuildError("BASE_ARCHIVE_HASH_MISMATCH")
     validate_carrier_entries(carrier_archive)
     verified_head = BASE.verify_repository(repository, source_head)
-    service_source_root = repository / BASE.SERVICE_SOURCE_RELATIVE
-    source_record = BASE.exact_source_inventory(repository, verified_head, service_source_root)
+    service_source_root = repository / service_source_relative(repository)
+    source_record = exact_service_source_inventory(repository, verified_head)
     overlay_record = exact_runtime_overlay_inventory(repository, verified_head)
     verify_structural_control_packaging_closure(overlay_record, source_record)
     with tempfile.TemporaryDirectory(prefix="opiu-combined-package-") as raw:
         temporary = Path(raw)
         built = BASE.test_and_build_service(go_exe, service_source_root, temporary / "go-build")
-        BASE.verify_source_unchanged(repository, verified_head, service_source_root, source_record)
+        verify_service_source_unchanged(repository, verified_head, source_record)
         BASE.verify_repository(repository, verified_head)
         if exact_runtime_overlay_inventory(repository, verified_head) != overlay_record:
             raise BuildError("RUNTIME_OVERLAY_CHANGED_DURING_BUILD")

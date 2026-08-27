@@ -52,6 +52,14 @@ func writePipelineStructuralInventoryDocument(t *testing.T, store *Store, run Ru
 	if err != nil {
 		t.Fatal(err)
 	}
+	journalPath := filepath.Join(r005Dir, "erp-operation-journal.xlsx")
+	if err := os.WriteFile(journalPath, []byte("synthetic immutable ERP operation journal\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journalSHA, err := sha256File(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	plan := map[string]any{
 		"schema_version":           inventory["schema_version"],
 		"status":                   "ELIGIBLE_PENDING_CURRENT_RUN_PROVENANCE",
@@ -80,9 +88,17 @@ func writePipelineStructuralInventoryDocument(t *testing.T, store *Store, run Ru
 	}
 	codexPath := filepath.Join(r005Dir, "reconciliation.codex-input.json")
 	if err := atomicWriteJSON(codexPath, map[string]any{
-		"organization": contextValue.OrganizationName, "period": contextValue.Period,
-		"output_path": reportPath, "output_sha256": reportSHA, "structural_control_inventory": plan,
-		"report_only": true, "posting_rows": 0, "ready_to_upload": false, "release_allowed": false,
+		"schema": "opiu-codex-review-input-v1", "organization": contextValue.OrganizationName,
+		"organization_code": contextValue.OrganizationID, "period": contextValue.Period,
+		"report_path": reportPath, "report_sha256": strings.ToUpper(reportSHA),
+		"output_path": reportPath, "output_sha256": strings.ToUpper(reportSHA), "structural_control_inventory": plan,
+		"report_only": true, "posting_rows": 0, "executed_posting_rows": 0, "live_posting_rows": 0,
+		"execution_allowed": false, "ready_to_upload": false, "release_allowed": false,
+		"live_1c_allowed": false, "live_delete_allowed": false,
+		"operation_evidence": map[string]any{
+			"journal_sha256": strings.ToUpper(journalSHA), "journal_sheet": "Журнал",
+			"input": map[string]any{"journal_source": journalPath}, "rows": []any{},
+		},
 		"structural_control_settings_binding": map[string]any{
 			"status": "MISSING_DEFAULT_ALL_GROUPS", "set_count": 0, "sets": []any{},
 			"correction_authority": false, "financial_rows": 0, "posting_rows": 0, "execution_allowed": false,
@@ -97,9 +113,13 @@ func writePipelineStructuralInventoryDocument(t *testing.T, store *Store, run Ru
 	}
 	manifestPath := filepath.Join(r005Dir, "reconciliation.manifest.json")
 	if err := atomicWriteJSON(manifestPath, map[string]any{
-		"organization": contextValue.OrganizationName, "period": contextValue.Period,
-		"output_path": reportPath, "output_sha256": reportSHA, "structural_control_inventory": plan,
-		"codex_input_path": codexPath, "codex_input_sha256": codexSHA,
+		"schema": "opiu-auto-reconciliation-run-v3", "organization": contextValue.OrganizationName,
+		"organization_code": contextValue.OrganizationID, "period": contextValue.Period, "status": "PASS_R005",
+		"output_path": reportPath, "output_sha256": strings.ToUpper(reportSHA), "structural_control_inventory": plan,
+		"codex_input_path": codexPath, "codex_input_sha256": strings.ToUpper(codexSHA),
+		"report_only": true, "posting_rows": 0, "executed_posting_rows": 0, "live_posting_rows": 0,
+		"execution_allowed": false, "ready_to_upload": false, "release_allowed": false,
+		"live_1c_allowed": false, "live_delete_allowed": false,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +223,45 @@ func newPipelineStructuralContext(t *testing.T) (*Store, Context, Run, string) {
 	return store, contextValue, run, runDir
 }
 
-func TestExternalPipelineAnchorsVerifiedInventoryBeforeRules(t *testing.T) {
+func TestExternalPipelineAnchorsVerifiedInventoryBeforeDirectR001(t *testing.T) {
+	{
+		store, contextValue, run, runDir := newPipelineStructuralContext(t)
+		erpPath, intalevPath := testServiceSourcePaths(runDir)
+		stages := []string{}
+		pipeline := &Pipeline{store: store, commands: map[string][]string{
+			"R005": {"r005", "--run-id", "{run_id}", "--context-id", "{context_id}", "--organization-id", "{organization_id}", "--organization-name", "{organization_name}", "--organization-path", "{organization_path}"},
+			"R001": {"r001", "--handoff", "{handoff}", "--handoff-sha256", "{handoff_sha256}"},
+		}}
+		pipeline.runner = func(stage string, command []string, values map[string]string, _, _ string) error {
+			stages = append(stages, stage)
+			switch stage {
+			case "R005":
+				writePipelineStructuralInventoryV3(t, store, run, contextValue)
+			case "R001":
+				if _, ok := store.StructuralControlInventoryAnchor(run.ID); !ok {
+					t.Fatal("R001 started before immutable structural inventory anchor")
+				}
+				expanded := expandCommand(command, values)
+				joined := "\x00" + strings.Join(expanded, "\x00") + "\x00"
+				if !strings.Contains(joined, "\x00--handoff\x00") || !strings.Contains(joined, "\x00--handoff-sha256\x00") {
+					t.Fatalf("external R001 lost canonical handoff arguments: %#v", expanded)
+				}
+				writeFailSoftR001PackageFixtureForRun(t, filepath.Join(runDir, "r001"), run, contextValue)
+			default:
+				t.Fatalf("legacy stage became reachable: %s", stage)
+			}
+			return nil
+		}
+		var finalStatus RunStatus
+		var finalStage string
+		pipeline.executeExternal(run, contextValue, erpPath, intalevPath, runDir, func(status RunStatus, stage, _ string) {
+			finalStatus, finalStage = status, stage
+		})
+		if strings.Join(stages, ",") != "R005,R001" || finalStatus != RunCompletedReportOnly || finalStage != "DONE" {
+			t.Fatalf("external direct result: stages=%v status=%s stage=%s", stages, finalStatus, finalStage)
+		}
+	}
+	return
 	store, contextValue, run, runDir := newPipelineStructuralContext(t)
 	var finalStatus RunStatus
 	var finalStage string
@@ -249,6 +307,29 @@ func TestExternalPipelineAnchorsVerifiedInventoryBeforeRules(t *testing.T) {
 }
 
 func TestExternalPipelineBlocksBeforeRulesWithoutVerifiedInventory(t *testing.T) {
+	{
+		store, contextValue, run, runDir := newPipelineStructuralContext(t)
+		erpPath, intalevPath := testServiceSourcePaths(runDir)
+		pipeline := &Pipeline{store: store, commands: map[string][]string{
+			"R005": {"r005"}, "R001": {"r001", "--handoff", "{handoff}", "--handoff-sha256", "{handoff_sha256}"},
+		}}
+		pipeline.runner = func(stage string, _ []string, _ map[string]string, _, _ string) error {
+			if stage != "R005" {
+				t.Fatalf("downstream stage ran without inventory: %s", stage)
+			}
+			writeFailSoftR005Fixture(t, filepath.Join(runDir, "r005"), contextValue, "BLOCKED_STRUCTURAL_INVENTORY")
+			return nil
+		}
+		var finalStatus RunStatus
+		var finalStage string
+		pipeline.executeExternal(run, contextValue, erpPath, intalevPath, runDir, func(status RunStatus, stage, _ string) {
+			finalStatus, finalStage = status, stage
+		})
+		if finalStatus != RunBlockedStructuralInventory || finalStage != "R005_INVENTORY" {
+			t.Fatalf("missing inventory status=%s stage=%s", finalStatus, finalStage)
+		}
+	}
+	return
 	store, contextValue, run, runDir := newPipelineStructuralContext(t)
 	rulesStarted := false
 	var finalStatus RunStatus

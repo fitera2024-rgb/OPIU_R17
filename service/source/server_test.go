@@ -61,6 +61,9 @@ func TestHealthAndBootstrapKeepSafetyFalse(t *testing.T) {
 			t.Fatalf("%s status = %d", path, recorder.Code)
 		}
 		body := recorder.Body.String()
+		if path == "/api/health" && (!strings.Contains(body, `"rules_service":false`) || !strings.Contains(body, `"pipeline":"R005_SERVICE_HANDOFF_R001"`)) {
+			t.Fatalf("health omitted direct pipeline capability closure: %s", body)
+		}
 		for _, forbidden := range []string{"DO-NOT-EXPOSE-HASH", store.Root(), `"live_1c_allowed":true`, `"ready_to_upload":true`, `"posting_rows":1`} {
 			if strings.Contains(body, forbidden) {
 				t.Fatalf("%s exposed forbidden value %q: %s", path, forbidden, body)

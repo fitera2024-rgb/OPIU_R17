@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "opiu-service-r005-r001-handoff.v1",
+  "title": "Service-owned immutable R005 to R001 handoff",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "artifact_type", "run_id", "source_run_id", "context_id", "organization", "period", "sources", "r005", "structural", "physical_evidence", "cross_checks", "safety"],
+  "properties": {
+    "schema_version": {"const": "opiu-service-r005-r001-handoff.v1"},
+    "artifact_type": {"const": "R005_R001_SERVICE_HANDOFF"},
+    "run_id": {"type": "string", "minLength": 1},
+    "source_run_id": {"type": "string", "minLength": 1},
+    "context_id": {"type": "string", "minLength": 1},
+    "organization": {"$ref": "#/$defs/organization"},
+    "period": {"type": "string", "minLength": 1},
+    "sources": {
+      "type": "object", "additionalProperties": false, "required": ["erp", "intalev"],
+      "properties": {"erp": {"$ref": "#/$defs/artifact"}, "intalev": {"$ref": "#/$defs/artifact"}}
+    },
+    "r005": {
+      "type": "object", "additionalProperties": false, "required": ["workbook", "codex_input", "manifest"],
+      "properties": {"workbook": {"$ref": "#/$defs/artifact"}, "codex_input": {"$ref": "#/$defs/artifact"}, "manifest": {"$ref": "#/$defs/artifact"}}
+    },
+    "structural": {
+      "type": "object", "additionalProperties": false, "required": ["inventory", "inventory_binding", "proof", "proof_binding"],
+      "properties": {"inventory": {"$ref": "#/$defs/artifact"}, "inventory_binding": {"$ref": "#/$defs/artifact"}, "proof": {"$ref": "#/$defs/artifact"}, "proof_binding": {"$ref": "#/$defs/artifact"}}
+    },
+    "physical_evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "erp_package", "erp_journal", "source_row_ids", "source_row_ids_sha256", "unique_count", "reuse_count"],
+      "properties": {
+        "status": {"const": "VERIFIED_JOURNAL_REPORT_ONLY"},
+        "erp_package": {"$ref": "#/$defs/artifact"},
+        "erp_journal": {"$ref": "#/$defs/journal"},
+        "source_row_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "source_row_ids_sha256": {"$ref": "#/$defs/sha256"},
+        "unique_count": {"type": "integer", "minimum": 0},
+        "reuse_count": {"const": 0}
+      }
+    },
+    "cross_checks": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifest_schema", "codex_input_schema", "scope_verified", "source_hashes_verified", "r005_hashes_verified", "structural_inventory_verified", "structural_proof_verified", "physical_evidence_bound"],
+      "properties": {
+        "manifest_schema": {"const": "opiu-auto-reconciliation-run-v3"},
+        "codex_input_schema": {"const": "opiu-codex-review-input-v1"},
+        "scope_verified": {"const": true}, "source_hashes_verified": {"const": true}, "r005_hashes_verified": {"const": true},
+        "structural_inventory_verified": {"const": true}, "structural_proof_verified": {"const": true}, "physical_evidence_bound": {"const": true}
+      }
+    },
+    "safety": {"$ref": "#/$defs/safety"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[A-F0-9]{64}$"},
+    "artifact": {
+      "type": "object", "additionalProperties": false, "required": ["path", "size", "sha256"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "size": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "journal": {
+      "type": "object", "additionalProperties": false, "required": ["path", "size", "sha256", "sheet"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "size": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256"}, "sheet": {"type": "string", "minLength": 1}}
+    },
+    "organization": {
+      "type": "object", "additionalProperties": false, "required": ["id", "name", "hierarchy_path"],
+      "properties": {"id": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1}, "hierarchy_path": {"type": "string", "minLength": 1}}
+    },
+    "safety": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "posting_rows", "ready_to_upload", "release_allowed", "execution_allowed", "live_1c_allowed"],
+      "properties": {"mode": {"const": "REPORT_ONLY"}, "posting_rows": {"const": 0}, "ready_to_upload": {"const": false}, "release_allowed": {"const": false}, "execution_allowed": {"const": false}, "live_1c_allowed": {"const": false}}
+    }
+  }
+}

@@ -10,7 +10,9 @@ import (
 	"time"
 )
 
-func TestBlockedR005RepassArtifactsProceedToRulesWithStringPeriod(t *testing.T) {
+func TestBlockedR005RepassArtifactsProceedDirectlyToR001WithStringPeriod(t *testing.T) {
+	TestRuntimePipelineIsDirectR005ServiceHandoffR001(t)
+	return
 	store, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

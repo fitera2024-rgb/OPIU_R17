@@ -55,7 +55,7 @@ class CombinedPackagingTests(unittest.TestCase):
 
         proof = BUILDER.verify_structural_control_packaging_closure(runtime, service)
         self.assertEqual(proof["status"], "VERIFIED_EXACT_GIT_HEAD_CLOSURE")
-        self.assertEqual(proof["runtime_file_count"], 13)
+        self.assertEqual(proof["runtime_file_count"], 14)
         self.assertEqual(proof["service_source_file_count"], 10)
         self.assertFalse(proof["correction_authority"])
         self.assertEqual(proof["financial_rows"], 0)
@@ -65,7 +65,7 @@ class CombinedPackagingTests(unittest.TestCase):
             proof["runtime_files"],
         )
         self.assertIn(
-            "modules/rules-engine/source/structural_control_proof.mjs",
+            "modules/corrections/source/service_r005_r001_handoff.mjs",
             proof["runtime_files"],
         )
         self.assertIn("structural_control_proof_pipeline.go", proof["service_source_files"])
@@ -95,20 +95,24 @@ class CombinedPackagingTests(unittest.TestCase):
             BUILDER.MANAGED_RUNTIME_ROOTS,
             (
                 "modules/corrections/source",
+                "modules/corrections/contracts",
                 "modules/reconciliation/source",
-                "modules/rules-engine/source",
-                "modules/rules-engine/contracts",
                 "user-settings",
             ),
         )
         self.assertEqual(len(BUILDER.PRESERVED_CARRIER_RUNTIME_FILES), 14)
+        self.assertEqual(len(BUILDER.GIT_BOUND_RUNTIME_DATA_FILES), 25)
+        self.assertIn(
+            "modules/corrections/contracts/schemas/service_r005_r001_handoff.schema.json",
+            BUILDER.GIT_BOUND_RUNTIME_DATA_FILES,
+        )
         self.assertIn(
             "modules/reconciliation/source/resources/ОПИУ_по_образцу_ШАБЛОН.xlsx",
             BUILDER.PRESERVED_CARRIER_RUNTIME_FILES,
         )
 
     def test_exact_current_head_runtime_inventory_is_complete(self) -> None:
-        repository = SCRIPT.parents[4]
+        repository = SCRIPT.parents[2]
         head = subprocess.check_output(
             ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True,
         ).strip()
@@ -120,11 +124,7 @@ class CombinedPackagingTests(unittest.TestCase):
         self.assertEqual(record["dependency_scan"]["missing"], 0)
         proof = BUILDER.verify_structural_control_packaging_closure(
             record,
-            BUILDER.BASE.exact_source_inventory(
-                repository,
-                head,
-                repository / BUILDER.BASE.SERVICE_SOURCE_RELATIVE,
-            ),
+            BUILDER.exact_service_source_inventory(repository, head),
         )
         self.assertEqual(proof["runtime_files"], sorted(BUILDER.REQUIRED_STRUCTURAL_CONTROL_RUNTIME_FILES))
         self.assertIn(
@@ -142,6 +142,21 @@ class CombinedPackagingTests(unittest.TestCase):
             "modules/corrections/source/r001_reconciliation_workbook_adapter.mjs",
         }.issubset(paths))
         self.assertEqual(paths & BUILDER.GIT_BOUND_USER_SETTINGS, BUILDER.GIT_BOUND_USER_SETTINGS)
+
+    def test_legacy_rules_runtime_is_removed_and_not_required(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            bundle = Path(raw)
+            for relative in BUILDER.LEGACY_RULES_RUNTIME_PATHS:
+                target = bundle / relative
+                if target.suffix:
+                    write(target, b"legacy rules")
+                else:
+                    write(target / "legacy.mjs", b"legacy rules")
+            proof = BUILDER.remove_legacy_rules_runtime(bundle)
+            self.assertGreater(proof["file_count"], 0)
+            self.assertTrue(all(not (bundle / relative).exists()
+                                for relative in BUILDER.LEGACY_RULES_RUNTIME_PATHS))
+            self.assertNotIn("rules-engine", BUILDER.MODULE_NAMES)
 
     def test_exact_inventory_rejects_ignored_extra_runtime_input(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -172,7 +172,7 @@ func TestR001OwnerArchiveUsesActualOwnerFilesThroughDownloadRoute(t *testing.T) 
 	}
 
 	runDir := filepath.Join(store.RunsDir(), run.ID)
-	writeFailSoftR005Fixture(t, filepath.Join(runDir, "r005"), contextValue, "BLOCKED_R005_REPASS_REQUIRED")
+	prepareVerifiedServiceHandoffForRun(t, store, run, contextValue, runDir)
 	writeFailSoftR001PackageFixtureForRun(t, filepath.Join(runDir, "r001"), run, contextValue)
 	if err := materializeVisibleReportPackage(run, contextValue, runDir, filepath.Join(runDir, "r001"), "R001", "R001_COMPLETED_WITH_BLOCKERS", "Безопасный отчётный пакет"); err != nil {
 		t.Fatal(err)
@@ -354,7 +354,7 @@ func TestR001VerifiedDiagnosticPackageRemainsAvailableBeforeFinalReady(t *testin
 		t.Fatal(err)
 	}
 	runDir := filepath.Join(store.RunsDir(), run.ID)
-	writeFailSoftR005Fixture(t, filepath.Join(runDir, "r005"), contextValue, "BLOCKED_R005_REPASS_REQUIRED")
+	prepareVerifiedServiceHandoffForRun(t, store, run, contextValue, runDir)
 	writeFailSoftR001PackageFixtureForRun(t, filepath.Join(runDir, "r001"), run, contextValue)
 	if err := materializeVisibleReportPackage(run, contextValue, runDir, filepath.Join(runDir, "r001"), "R001", "R001_COMPLETED_WITH_BLOCKERS", "Безопасный диагностический пакет"); err != nil {
 		t.Fatal(err)
@@ -511,7 +511,7 @@ func TestR001ArchiveRejectsValidationToOpenMutationBeforeHTTP200(t *testing.T) {
 		t.Fatal(err)
 	}
 	runDir := filepath.Join(store.RunsDir(), run.ID)
-	writeFailSoftR005Fixture(t, filepath.Join(runDir, "r005"), contextValue, "BLOCKED_R005_REPASS_REQUIRED")
+	prepareVerifiedServiceHandoffForRun(t, store, run, contextValue, runDir)
 	writeFailSoftR001PackageFixtureForRun(t, filepath.Join(runDir, "r001"), run, contextValue)
 	root := filepath.Join(runDir, "r001")
 	if err := materializeVisibleReportPackage(run, contextValue, runDir, root, "R001", "R001_COMPLETED_WITH_BLOCKERS", "Безопасный отчётный пакет"); err != nil {

@@ -181,14 +181,47 @@ process.stdout.write(JSON.stringify(module.structuralControlProofFromCodexPayloa
 
 func writeStructuralControlInitialRunManifest(t *testing.T, runDir string, run Run, contextValue Context) {
 	t.Helper()
+	erpPath, intalevPath := testServiceSourcePaths(runDir)
+	if err := os.MkdirAll(filepath.Dir(erpPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(erpPath, []byte("synthetic pinned ERP package\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(intalevPath, []byte("synthetic pinned Intalev source\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	erpInfo, err := os.Stat(erpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intalevInfo, err := os.Stat(intalevPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	erpSHA, err := sha256File(erpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intalevSHA, err := sha256File(intalevPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := atomicWriteJSON(filepath.Join(runDir, "run_manifest.json"), internalRunManifest{
 		SchemaVersion: "opiu-stable-run.v1", RunID: run.ID, ContextID: contextValue.ID,
 		Organization: contextValue.Organization, OrganizationID: contextValue.OrganizationID,
 		OrganizationName: contextValue.OrganizationName, OrganizationPath: contextValue.OrganizationPath,
-		Period: contextValue.Period, Safety: reportOnlySafety(), CreatedAt: time.Now().UTC(),
+		Period:  contextValue.Period,
+		ERP:     internalFile{ID: "TEST-ERP", Name: filepath.Base(erpPath), SHA256: strings.ToUpper(erpSHA), Size: erpInfo.Size()},
+		Intalev: internalFile{ID: "TEST-INTALEV", Name: filepath.Base(intalevPath), SHA256: strings.ToUpper(intalevSHA), Size: intalevInfo.Size()},
+		Safety:  reportOnlySafety(), CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func testServiceSourcePaths(runDir string) (string, string) {
+	return filepath.Join(runDir, "test-sources", "erp-package.xlsx"), filepath.Join(runDir, "test-sources", "intalev.xlsx")
 }
 
 func writeStructuralControlCodexProofFixture(t *testing.T, path string, audit structuralControlPipelineAudit) {

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -94,7 +95,7 @@ func testWaitingRulesRun(t *testing.T) (*Store, Run) {
 	return store, run
 }
 
-func TestRulesReviewResultExposesCandidates(t *testing.T) {
+func TestRulesReviewResultIsDisabled(t *testing.T) {
 	store, run := testWaitingRulesRun(t)
 	server, err := NewServer(store, &Pipeline{})
 	if err != nil {
@@ -103,9 +104,10 @@ func TestRulesReviewResultExposesCandidates(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/runs/"+run.ID+"/result/rules", nil)
 	server.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
+	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
+	return
 	var payload map[string]any
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
@@ -174,7 +176,15 @@ func TestPersistRuleReviewDecisions(t *testing.T) {
 	}
 }
 
-func TestResumeAfterRuleDecisionsPassesToR001(t *testing.T) {
+func TestResumeAfterRuleDecisionsIsUnreachable(t *testing.T) {
+	{
+		store, run := testWaitingRulesRun(t)
+		pipeline := &Pipeline{store: store}
+		if err := pipeline.ResumeAfterRuleDecisions(run.ID, "unused"); err == nil || !strings.Contains(err.Error(), "Rules resume отключён") {
+			t.Fatalf("legacy Rules resume was reachable: %v", err)
+		}
+	}
+	return
 	store, run := testWaitingRulesRun(t)
 	contextValue, ok := store.Context(run.ContextID)
 	if !ok {

@@ -298,15 +298,24 @@ func validateR001ReportOnlyPackageForRun(r001Dir string, run Run, contextValue C
 	if err != nil || !validSHA256(manifest.Inputs.Reconciliation.SHA256) || !strings.EqualFold(reconciliationSHA, manifest.Inputs.Reconciliation.SHA256) {
 		return errors.New("R001 package reconciliation source hash does not match current R005")
 	}
-	if handoff := manifest.Inputs.ServiceHandoff; handoff != nil {
-		handoffPath, err := filepath.Abs(filepath.Clean(handoff.Path))
-		if err != nil || rejectSymlinkTraversal(runDir, handoffPath) != nil || !regularFile(handoffPath) {
-			return errors.New("R001 package handoff escaped the exact current run")
-		}
-		handoffSHA, err := sha256File(handoffPath)
-		if err != nil || !validSHA256(handoff.SHA256) || !strings.EqualFold(handoffSHA, handoff.SHA256) {
-			return errors.New("R001 package handoff hash does not match current run")
-		}
+	handoff := manifest.Inputs.ServiceHandoff
+	if handoff == nil {
+		return errors.New("R001 package omitted mandatory Service handoff")
+	}
+	handoffPath, err := filepath.Abs(filepath.Clean(handoff.Path))
+	if err != nil || rejectSymlinkTraversal(runDir, handoffPath) != nil || !regularFile(handoffPath) {
+		return errors.New("R001 package handoff escaped the exact current run")
+	}
+	expectedHandoffPath := filepath.Join(runDir, "handoff", serviceR001HandoffFilename)
+	if !sameFilesystemPath(handoffPath, expectedHandoffPath) {
+		return errors.New("R001 package did not use the canonical Service handoff")
+	}
+	handoffSHA, err := sha256File(handoffPath)
+	if err != nil || !validSHA256(handoff.SHA256) || !strings.EqualFold(handoffSHA, handoff.SHA256) {
+		return errors.New("R001 package handoff hash does not match current run")
+	}
+	if _, err := verifyServiceR001Handoff(handoffPath, handoff.SHA256, run, contextValue, runDir); err != nil {
+		return fmt.Errorf("R001 package Service handoff is invalid: %w", err)
 	}
 	if manifest.Results.CanonicalRows != nil && *manifest.Results.CanonicalRows > 0 {
 		packageDir := filepath.Dir(filepath.Dir(manifestPath))

@@ -39,6 +39,14 @@ func TestRuntimeAdapterPrefersOwnerDecisionWrappersWhenMaterialized(t *testing.T
 
 func TestRuntimeAdapterFallsBackToCoreWithoutOwnerDecisionWrappers(t *testing.T) {
 	root := makeRuntimeFixture(t)
+	for _, relative := range []string{
+		"modules/reconciliation/source/service_r005_owner_wrapper.mjs",
+		"modules/corrections/source/service_r001_owner_wrapper.mjs",
+	} {
+		if err := os.Remove(filepath.Join(root, filepath.FromSlash(relative))); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv("OPIU_NODE_PATH", filepath.Join(root, "runtime", "node", "node-test"))
 	adapter, err := runtimeAdapterAt(root)
 	if err != nil {

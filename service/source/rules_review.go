@@ -299,6 +299,8 @@ func (s *Server) persistRuleReviewDecisions(run Run, request ruleReviewDecisionR
 }
 
 func (p *Pipeline) ResumeAfterRuleDecisions(runID, decisionsPath string) error {
+	return errors.New("Rules resume отключён: production использует прямую неизменяемую передачу R005→R001")
+	/* Legacy implementation retained unreachable for first-stage cleanup.
 	if p.runtime == nil {
 		return errors.New("Продолжение после правил доступно только во встроенном runtime")
 	}
@@ -345,7 +347,7 @@ func (p *Pipeline) ResumeAfterRuleDecisions(runID, decisionsPath string) error {
 		}()
 		p.executeAfterRuleDecisions(run, decisionsPath)
 	}()
-	return nil
+	return nil */
 }
 
 func (p *Pipeline) executeAfterRuleDecisions(run Run, decisionsPath string) {

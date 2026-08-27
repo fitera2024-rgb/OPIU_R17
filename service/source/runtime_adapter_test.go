@@ -13,9 +13,8 @@ func makeRuntimeFixture(t *testing.T) string {
 	root := t.TempDir()
 	for _, relative := range []string{
 		"modules/reconciliation/source/opiu_reconcile.mjs",
-		"modules/rules-engine/source/cli.mjs",
 		"modules/corrections/source/correction_engine_r001.mjs",
-		"data/defaults/rules.json",
+		"modules/corrections/source/service_r001_owner_wrapper.mjs",
 		"SAFETY.json",
 		"node_modules/.keep",
 		"runtime/node/node-test",
@@ -45,6 +44,9 @@ func TestRuntimeAdapterDiscoveryUsesExplicitRoot(t *testing.T) {
 	}
 	if adapter == nil || adapter.Root != filepath.Clean(root) {
 		t.Fatalf("adapter = %#v", adapter)
+	}
+	if adapter.RulesScript != "" || adapter.RulesRegistry != "" || directoryExists(filepath.Join(root, "modules", "rules-engine")) {
+		t.Fatalf("production runtime unexpectedly requires Rules: %#v", adapter)
 	}
 }
 

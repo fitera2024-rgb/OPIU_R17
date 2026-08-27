@@ -19,8 +19,8 @@ func TestExternalR005ConfigurationRequiresExactScopePlaceholders(t *testing.T) {
 	}
 	t.Setenv("OPIU_RUNTIME_ROOT", "")
 	t.Setenv("OPIU_R005_CMD_JSON", `["r005"]`)
-	t.Setenv("OPIU_RULES_CMD_JSON", `["rules"]`)
-	t.Setenv("OPIU_R001_CMD_JSON", `["r001"]`)
+	t.Setenv("OPIU_RULES_CMD_JSON", "")
+	t.Setenv("OPIU_R001_CMD_JSON", `["r001","--handoff","{handoff}","--handoff-sha256","{handoff_sha256}"]`)
 	if _, err := NewPipeline(store); err == nil {
 		t.Fatal("external R005 command without exact run/context/organization placeholders was accepted")
 	}
@@ -39,14 +39,14 @@ func TestPublicJSONRejectsDuplicateAuthorityKeys(t *testing.T) {
 func TestContextCreationRejectsOrganizationOutsideAuthoritativeRuntimeCatalog(t *testing.T) {
 	root := makeRuntimeFixture(t)
 	catalogPath := filepath.Join(root, "data", "defaults", "organizations.json")
+	if err := os.MkdirAll(filepath.Dir(catalogPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(catalogPath, []byte(`{
 		"schema_version":"opiu-organizations.v1",
 		"source":{"path":"../../resources/reference/organizations.xlsx","sha256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","sheet":"Лист_1","rows":1,"title":"Организации","distribution_seed":"1.9.4"},
 		"nodes":[{"node_id":"ORG-9","code":"9","name":"9 Управляющая компания","path":"Холдинг / 9 Управляющая компания","parent_id":"","top_id":"ORG-9","top_name":"9 Управляющая компания","depth":0,"node_type":"ORGANIZATION","selectable":true,"source_row":1,"source_verified":true,"metadata":{"inn":""},"has_children":false,"node_name":"9 Управляющая компания","node_code":"9","hierarchy_path":"Холдинг / 9 Управляющая компания"}]
 	}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "data", "defaults", "rules.json"), []byte(`{"schema_version":"opiu-rule-registry.v2","rules":[],"revisions":[],"applications":[],"approvals":[],"evidence":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("OPIU_RUNTIME_ROOT", root)

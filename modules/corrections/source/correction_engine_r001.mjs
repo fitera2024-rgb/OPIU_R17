@@ -27,6 +27,8 @@ import {
   deriveHierarchyExactAmountAuthority,
   hierarchyContextByCode,
 } from "./r001_hierarchy_authority.mjs";
+import { assertNoDirectR001Overrides, verifyServiceR001Handoff } from "./service_r005_r001_handoff.mjs";
+import { enforceServiceHandoffReadyAuthority } from "./service_r001_ready_authority.mjs";
 
 const ENGINE_VERSION = "opiu-correction-engine-r001";
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -152,8 +154,9 @@ function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i += 1) {
     const item = argv[i];
-    if (!item.startsWith("--")) continue;
+    if (!item.startsWith("--")) throw new Error(`R001_POSITIONAL_ARGUMENT_FORBIDDEN:${item}`);
     const key = item.slice(2);
+    if (Object.hasOwn(args, key)) throw new Error(`R001_DUPLICATE_ARGUMENT_FORBIDDEN:${key}`);
     const value = argv[i + 1];
     if (!value || value.startsWith("--")) args[key] = true;
     else {
@@ -2419,15 +2422,19 @@ async function buildMasterRegistry(decisions, actions, metadata, outputPath, dis
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const serviceOrganizationName = clean(args.organization);
-  if (!args.reconciliation) {
-    throw new Error("Usage: node correction_engine_r001.mjs --reconciliation <xlsx> [--codex-input <json>] [--output <folder>] [--period YYYY-MM] [--organization name]");
+  assertNoDirectR001Overrides(args);
+  for (const key of Object.keys(args)) {
+    if (!["handoff", "handoff-sha256", "output"].includes(key)) {
+      throw new Error(`R001_ARGUMENT_FORBIDDEN:${key}`);
+    }
   }
-  if (args.handoff || args.decisions) {
-    throw new Error("EXTERNAL_RULES_DISABLED: передайте только доказательную сверку; R001 сам определяет корректировки");
-  }
-  const reconciliationPath = path.resolve(args.reconciliation);
-  const codexInputPath = args["codex-input"] ? path.resolve(args["codex-input"]) : "";
+  const verifiedHandoff = await verifyServiceR001Handoff({
+    handoffPath: clean(args.handoff || process.env.OPIU_R001_HANDOFF_PATH),
+    handoffSha256: clean(args["handoff-sha256"] || process.env.OPIU_R001_HANDOFF_SHA256),
+  });
+  const serviceOrganizationName = verifiedHandoff.organizationName;
+  const reconciliationPath = verifiedHandoff.reconciliationPath;
+  const codexInputPath = verifiedHandoff.codexInputPath;
   const decisionPath = "";
   const baseOutput = args.output ? path.resolve(args.output) : path.resolve("./outputs");
   const runId = timestampId();
@@ -2442,7 +2449,7 @@ async function main() {
   ]);
   const discoveryPolicy = CORRECTION_SELF_DISCOVERY_POLICY;
   const reconciliation = await readReconciliation(reconciliationPath);
-  const requestedPeriod = clean(args.period);
+  const requestedPeriod = verifiedHandoff.period;
   const requestedAccountingPeriods = new Set(accountingPeriods(requestedPeriod));
   const hierarchyAuthority = await deriveHierarchyExactAmountAuthority({
     treeRows: reconciliation.treeAllRecords ?? [],
@@ -2560,9 +2567,9 @@ async function main() {
     discoveryPolicySha,
     engineSha,
     analyticalPolicySha,
-    r001HandoffPath: "",
-    r001HandoffSha: "",
-    sourceRunId: "",
+    r001HandoffPath: verifiedHandoff.handoffPath,
+    r001HandoffSha: verifiedHandoff.handoffSha256,
+    sourceRunId: verifiedHandoff.sourceRunId,
     currentRunCanonicalAuthority: currentRunAuthority.audit,
     hierarchyAuthority: hierarchyAuthority.audit,
   };
@@ -2606,17 +2613,19 @@ async function main() {
   });
   const sparseEconomicRows = sparseEconomicMaterialization.canonical_posting_rows ?? [];
   const sparseEconomicCaseIds = new Set(sparseEconomicMaterialization.cases.map((item) => clean(item.case_id)).filter(Boolean));
-  const canonicalOutput = collectCanonicalFinancialOutput([
+  const serviceHandoffAuthority = enforceServiceHandoffReadyAuthority([
     ...currentRunStandaloneRows,
     ...exactCanonicalRows,
     ...groupScopedCanonicalRows,
     ...sparseEconomicRows,
-  ], {
+  ], verifiedHandoff.sourceRowIDs);
+  const canonicalOutput = collectCanonicalFinancialOutput(serviceHandoffAuthority.rows, {
     filenameForRow: (row) => row.output_route === "READY"
       ? buildOwnerUploadFileName({ organization: row.source_organization, sourceDate: row.period })
       : buildDisputedOwnerUploadFileName({ organization: row.source_organization, sourceDate: row.period }),
   });
   metadata.materializedPostingRows = canonicalOutput.counters.canonical_financial_rows_total;
+  metadata.serviceHandoffReadyAuthority = serviceHandoffAuthority.audit;
   metadata.sparseEconomicMaterialization = sparseEconomicMaterialization.audit;
   const materializationByCase = new Map([
     ...materialization.cases,

@@ -303,15 +303,15 @@
 ### ARCH-001 — production pipeline всё ещё требует Rules stage
 
 - Дата: `27.08.2026`
-- Статус: `NEW`
+- Статус: `IMPLEMENTED`
 - Сообщил: авторитетный acceptance и S09 architecture audit.
 - Наблюдаемое поведение: Service выполняет обязательную цепочку `R005 → RULES → R001`, читает mutable registry/legacy defaults и содержит WAIT_USER_RULES/review contour, хотя контракт требует `rules_service=false` и прямой доказательный R005→R001.
 - Ожидаемое поведение: Service-owned immutable handoff с SHA/scope/period/proof передаёт R005 напрямую R001; старые 177 rules, registry, `OPIU_RULES_CMD_JSON`, Rules UI/state и defaults не являются runtime dependency.
 - Затронутые пункты контракта: §§1, 1.2, 3–7, 9–10, 12–14, 16; A01–A12, A17–A22.
 - Допустимый scope: S09 migration по отдельной принятой карте; S04/S06 safety сохраняется, Rules не заменяется скрытым эквивалентом.
 - Обязательный регрессионный тест: ровно два stages R005/R001; corrupt SHA/scope/proof блокирует; без physical proof только СПОРНО; package не содержит legacy Rules runtime/defaults.
-- Реализация: ожидается.
-- Протокол проверки: ожидается.
+- Реализация: production Service выполняет только `R005 → immutable handoff → R001`. Handoff связывает точные организацию, период, входы, доказательства и SHA; R001 повторно проверяет его до формирования строк. Legacy Rules runtime/defaults и произвольные решения не участвуют в штатном маршруте. Некорректная или несбалансированная пара не создаёт финансовые A:AA-строки, но сохраняется одной видимой записью проверки с суммами, физическими источниками, блокером и причиной.
+- Протокол проверки: independent exact-chain review `PASS`; полный C02 `256/256 PASS`; полный Go `PASS`; critical Go `-count=3 PASS`; `go vet ./... PASS`; focused JS `39/39 PASS`; packaging architecture tests `17/17 PASS`; после merge объединённые JS, Go (`117.246s`) и packaging (`61 PASS`, `2` штатных Windows-skip) прошли, рабочее дерево было чистым.
 
 ### R005-008 — у UK отсутствует обязательный лист `08_Операции_журнала`
 
@@ -331,15 +331,15 @@
 ### CORR-002 — owner wrapper передаёт запрещённый core-параметр `--decisions`
 
 - Дата: `27.08.2026`
-- Статус: `NEW`
+- Статус: `IMPLEMENTED`
 - Сообщил: независимый S04 downstream review.
 - Наблюдаемое поведение: `service_r001_owner_wrapper.mjs` добавляет `--decisions`, а `correction_engine_r001.mjs` безусловно отклоняет этот параметр; штатный production E2E не может быть доказан.
 - Ожидаемое поведение: wrapper и core используют одну contract-bound схему immutable handoff; произвольные решения не получают authority.
 - Затронутые пункты контракта: §§7, 9, 12–14; A07–A12, A22.
 - Допустимый scope: определяется отдельным audit; safety/proof gates не ослабляются.
 - Обязательный регрессионный тест: production wrapper запускает core, exact handoff принят, legacy/arbitrary decisions блокируются, C02 `256/256`.
-- Реализация: ожидается.
-- Протокол проверки: ожидается.
+- Реализация: owner wrapper и core переведены на единственный contract-bound immutable handoff. Параметр `--decisions` не используется для выдачи полномочий; exact handoff принимается только после повторной проверки scope, SHA, доказательств и полной пары. Legacy/arbitrary decisions остаются заблокированными.
+- Протокол проверки: production wrapper→core входит в focused JS `39/39 PASS`; полный C02 `256/256 PASS`; полный Go и `go vet` — `PASS`; independent review подтвердил exact valid pair `READY`, а missing/outside/reused/mixed/malformed пары — только видимый `СПОРНО` без финансовых строк.
 
 ### R005-009 — октябрьский `R036` расходится с подтверждённым r13
 

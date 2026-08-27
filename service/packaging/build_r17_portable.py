@@ -37,6 +37,16 @@ PROVENANCE_SCHEMA = "opiu-r17-build-provenance.v1"
 RUNTIME_SCHEMA = "opiu-r17-runtime-manifest.v1"
 POLICY_SCHEMA = "opiu-r17-portable-policy.v1"
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+EXPECTED_POLICY_VALUE_SHA256 = "71400B25F1F765597E33D7F84EBF1C08E1C9BC41DEA52E92AEBEFAA2EA75169E"
+RELATIVE_IMPORT_PATTERNS = (
+    re.compile(r'''(?:from\s+|import\s*\(\s*|require\s*\(\s*|new\s+URL\s*\(\s*)["'](\.[^"']+)["']'''),
+    re.compile(r'''\bimport\s*["'](\.[^"']+)["']'''),
+)
+GENERIC_PROFILE_PATTERNS = (
+    re.compile(rb"(?i)(?:[A-Z]:[\\/]Users[\\/]|/Users/|/home/)"),
+    re.compile(rb"(?i)(?:[A-Z]\x00:\x00[\\/]\x00U\x00s\x00e\x00r\x00s\x00[\\/]\x00|/\x00U\x00s\x00e\x00r\x00s\x00/\x00|/\x00h\x00o\x00m\x00e\x00/\x00)"),
+    re.compile(rb"(?i)(?:\x00[A-Z]\x00:\x00[\\/]\x00U\x00s\x00e\x00r\x00s\x00[\\/]|\x00/\x00U\x00s\x00e\x00r\x00s\x00/|\x00/\x00h\x00o\x00m\x00e\x00/)"),
+)
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -51,6 +61,13 @@ def canonical_json(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
 
+def policy_value_sha256(value: dict[str, Any]) -> str:
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return sha256_bytes(payload)
+
+
 def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -63,6 +80,8 @@ def load_policy(path: Path = POLICY_PATH) -> dict[str, Any]:
 
 
 def validate_policy(policy: dict[str, Any]) -> None:
+    if policy_value_sha256(policy) != EXPECTED_POLICY_VALUE_SHA256:
+        raise BuildError("POLICY_VALUE_SET_NOT_EXACT")
     exact = {
         "schema_version": POLICY_SCHEMA,
         "archive_name": "OPIU_R17.zip",
@@ -175,6 +194,159 @@ def inventory_record_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _git_output_bytes(repository: Path, *arguments: str) -> bytes:
+    result = BASE.run_process_bytes(
+        ["git", "-c", "core.quotePath=false", "-C", str(repository), *arguments],
+        cwd=repository, env=dict(os.environ),
+    )
+    BASE.require_binary_process(result, f"GIT_{arguments[0].upper().replace('-', '_')}")
+    return result.stdout
+
+
+def source_scope_paths(policy: dict[str, Any]) -> list[str]:
+    values = [
+        "service/source", *policy["runtime_source_roots"], policy["contract"]["source"],
+        *(row["path"] for row in policy["unicode_settings"]),
+    ]
+    return sorted(set(values))
+
+
+def _git_tree(repository: Path, source_head: str, scopes: list[str]) -> dict[str, dict[str, str]]:
+    raw = _git_output_bytes(repository, "ls-tree", "-r", "-z", source_head, "--", *scopes)
+    rows: dict[str, dict[str, str]] = {}
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        metadata, separator, raw_path = record.partition(b"\t")
+        if not separator:
+            raise BuildError("GIT_TREE_ROW_INVALID")
+        parts = metadata.decode("ascii", "strict").split()
+        if len(parts) != 3 or parts[1] != "blob" or parts[0] not in {"100644", "100755"}:
+            raise BuildError("GIT_TREE_ENTRY_UNSAFE")
+        relative = raw_path.decode("utf-8", "strict")
+        pure = PurePosixPath(relative)
+        if pure.is_absolute() or ".." in pure.parts or relative in rows:
+            raise BuildError("GIT_TREE_PATH_UNSAFE")
+        rows[relative] = {"git_mode": parts[0], "git_blob": parts[2]}
+    if not rows:
+        raise BuildError("GIT_SOURCE_SCOPE_EMPTY")
+    return rows
+
+
+def _git_blob_id(data: bytes, object_format: str) -> str:
+    if object_format not in {"sha1", "sha256"}:
+        raise BuildError("GIT_OBJECT_FORMAT_UNSUPPORTED")
+    digest = hashlib.new(object_format)
+    digest.update(f"blob {len(data)}\0".encode("ascii"))
+    digest.update(data)
+    return digest.hexdigest()
+
+
+def _working_scope_files(repository: Path, scopes: list[str]) -> dict[str, Path]:
+    rows: dict[str, Path] = {}
+    for scope in scopes:
+        target = repository / Path(scope)
+        if target.is_file():
+            candidates = [target]
+        elif target.is_dir():
+            candidates = safe_files(target)
+        else:
+            raise BuildError(f"SOURCE_SCOPE_MISSING:{scope}")
+        for item in candidates:
+            if item.is_symlink() or is_reparse(item):
+                raise BuildError(f"SOURCE_SCOPE_LINK_FORBIDDEN:{scope}")
+            relative = item.relative_to(repository).as_posix()
+            if relative in rows and rows[relative] != item:
+                raise BuildError("SOURCE_SCOPE_DUPLICATE")
+            rows[relative] = item
+    return rows
+
+
+def exact_git_source_inventory(
+    repository: Path, source_head: str, policy: dict[str, Any],
+) -> dict[str, Any]:
+    repository = repository.resolve()
+    verified_head = BASE.verify_repository(repository, source_head)
+    scopes = source_scope_paths(policy)
+    tree = _git_tree(repository, verified_head, scopes)
+    working = _working_scope_files(repository, scopes)
+    expected_paths, actual_paths = set(tree), set(working)
+    if expected_paths != actual_paths:
+        missing = len(expected_paths - actual_paths)
+        extra = len(actual_paths - expected_paths)
+        raise BuildError(f"SOURCE_SCOPE_INJECTION_OR_MISSING:missing={missing}:extra={extra}")
+    object_format = BASE.git_text(repository, "rev-parse", "--show-object-format").strip()
+    rows: list[dict[str, Any]] = []
+    for relative in sorted(tree):
+        data = working[relative].read_bytes()
+        if _git_blob_id(data, object_format) != tree[relative]["git_blob"]:
+            raise BuildError(f"SOURCE_TRACKED_BLOB_DRIFT:{relative}")
+        rows.append({
+            "path": relative, "size": len(data), "sha256": sha256_bytes(data),
+            "git_blob": tree[relative]["git_blob"], "git_mode": tree[relative]["git_mode"],
+        })
+    record = inventory_record_from_rows(rows)
+    record.update({
+        "source_head": verified_head, "git_object_format": object_format,
+        "scopes": scopes, "exact_git_blobs": True, "ignored_injection_checked": True,
+    })
+    return record
+
+
+def _git_blob_bytes(repository: Path, row: dict[str, Any]) -> bytes:
+    data = _git_output_bytes(repository, "cat-file", "blob", row["git_blob"])
+    if len(data) != row["size"] or sha256_bytes(data) != row["sha256"]:
+        raise BuildError(f"GIT_BLOB_READ_MISMATCH:{row['path']}")
+    return data
+
+
+def source_subrecord(source_record: dict[str, Any], prefixes: Iterable[str]) -> dict[str, Any]:
+    normalized = tuple(prefix.rstrip("/") for prefix in prefixes)
+    rows = [
+        dict(row) for row in source_record["files"]
+        if any(row["path"] == prefix or row["path"].startswith(prefix + "/") for prefix in normalized)
+    ]
+    if not rows:
+        raise BuildError("SOURCE_SUBRECORD_EMPTY")
+    return inventory_record_from_rows(rows)
+
+
+def extract_git_tree(
+    repository: Path, source_record: dict[str, Any], prefix: str, target: Path,
+    *, policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    prefix = prefix.rstrip("/")
+    written: list[dict[str, Any]] = []
+    for row in source_record["files"]:
+        if not row["path"].startswith(prefix + "/"):
+            continue
+        local = row["path"][len(prefix) + 1:]
+        if policy is not None and _excluded(row["path"], policy):
+            continue
+        destination = target / Path(local)
+        if destination.exists():
+            raise BuildError(f"GIT_EXTRACTION_COLLISION:{row['path']}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(_git_blob_bytes(repository, row))
+        written.append({
+            "path": row["path"], "size": row["size"], "sha256": row["sha256"],
+            "git_blob": row["git_blob"], "git_mode": row["git_mode"],
+        })
+    if not written:
+        raise BuildError(f"GIT_EXTRACTION_EMPTY:{prefix}")
+    return inventory_record_from_rows(written)
+
+
+def extract_git_file(
+    repository: Path, source_record: dict[str, Any], relative: str, target: Path,
+) -> None:
+    row = next((item for item in source_record["files"] if item["path"] == relative), None)
+    if row is None:
+        raise BuildError(f"GIT_SOURCE_FILE_NOT_BOUND:{relative}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(_git_blob_bytes(repository, row))
+
+
 def validate_relative_path(relative: str, policy: dict[str, Any], *, include_root: bool = True) -> None:
     if not relative or "\\" in relative or relative.startswith(("/", "//")) or re.match(r"^[A-Za-z]:", relative):
         raise BuildError(f"PACKAGE_PATH_UNSAFE:{relative}")
@@ -203,6 +375,53 @@ def validate_tree_paths(root: Path, policy: dict[str, Any]) -> None:
         if folded in seen:
             raise BuildError(f"PACKAGE_PATH_CASEFOLD_DUPLICATE:{relative}")
         seen.add(folded)
+
+
+def _resolve_relative_dependency(source: str, specifier: str) -> list[str]:
+    clean = specifier.split("?", 1)[0].split("#", 1)[0]
+    raw_parts = [*PurePosixPath(source).parent.parts, *PurePosixPath(clean).parts]
+    parts: list[str] = []
+    for part in raw_parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                return []
+            parts.pop()
+        else:
+            parts.append(part)
+    if not parts:
+        return []
+    candidate = PurePosixPath(*parts).as_posix()
+    candidates = [candidate]
+    if not PurePosixPath(candidate).suffix:
+        candidates.extend(candidate + suffix for suffix in (".mjs", ".js", ".cjs", ".json"))
+        candidates.extend(candidate + "/index" + suffix for suffix in (".mjs", ".js", ".cjs", ".json"))
+    return candidates
+
+
+def verify_runtime_dependency_closure(root: Path) -> dict[str, Any]:
+    files = {item.relative_to(root).as_posix(): item for item in safe_files(root)}
+    checked = 0
+    edges: list[dict[str, str]] = []
+    for relative, item in sorted(files.items()):
+        if PurePosixPath(relative).suffix.lower() not in {".mjs", ".js", ".cjs"}:
+            continue
+        try:
+            text = item.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError as error:
+            raise BuildError(f"RUNTIME_SOURCE_ENCODING_INVALID:{relative}") from error
+        specifiers = []
+        for pattern in RELATIVE_IMPORT_PATTERNS:
+            specifiers.extend(pattern.findall(text))
+        for specifier in sorted(set(specifiers)):
+            checked += 1
+            candidates = _resolve_relative_dependency(relative, specifier)
+            matched = next((candidate for candidate in candidates if candidate in files), None)
+            if matched is None:
+                raise BuildError(f"RUNTIME_RELATIVE_IMPORT_MISSING:{relative}:{specifier}")
+            edges.append({"source": relative, "specifier": specifier, "target": matched})
+    return {"status": "PASS", "relative_dependency_count": checked, "edges": edges}
 
 
 def _production_scan_files(repository: Path) -> list[Path]:
@@ -252,27 +471,19 @@ def _excluded(relative: str, policy: dict[str, Any]) -> bool:
     return any(relative.endswith(suffix) for suffix in policy["runtime_excluded_suffixes"])
 
 
-def copy_runtime_sources(repository: Path, stage: Path, policy: dict[str, Any]) -> dict[str, Any]:
+def copy_runtime_sources(
+    repository: Path, source_record: dict[str, Any], stage: Path, policy: dict[str, Any],
+) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for root_relative in policy["runtime_source_roots"]:
-        source_root = repository / Path(root_relative)
-        if not source_root.is_dir():
-            raise BuildError(f"RUNTIME_SOURCE_ROOT_MISSING:{root_relative}")
         target_root = stage / "runtime" / Path(root_relative)
-        for source in safe_files(source_root):
-            local = source.relative_to(source_root).as_posix()
-            logical = PurePosixPath(root_relative).joinpath(local).as_posix()
-            if _excluded(logical, policy):
-                continue
-            target = target_root / Path(local)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-            if sha256_file(source) != sha256_file(target):
-                raise BuildError(f"RUNTIME_SOURCE_COPY_MISMATCH:{logical}")
-            rows.append({"path": logical, "size": target.stat().st_size, "sha256": sha256_file(target)})
+        record = extract_git_tree(
+            repository, source_record, root_relative, target_root, policy=policy,
+        )
+        rows.extend(record["files"])
     if not rows:
         raise BuildError("RUNTIME_SOURCE_SET_EMPTY")
-    return {"status": "EXACT_CLEAN_WORKTREE_COPY", **inventory_record_from_rows(rows)}
+    return {"status": "EXACT_GIT_BLOB_EXTRACTION", **inventory_record_from_rows(rows)}
 
 
 def verify_node(node_exe: Path, node_modules: Path, policy: dict[str, Any]) -> dict[str, Any]:
@@ -320,14 +531,15 @@ def verify_node(node_exe: Path, node_modules: Path, policy: dict[str, Any]) -> d
     return {"node": node_record, "node_modules": modules_record, "packages": dict(modules_policy["packages"])}
 
 
-def verify_contract_and_settings(repository: Path, policy: dict[str, Any]) -> dict[str, Any]:
-    contract = repository / Path(policy["contract"]["source"])
-    if not contract.is_file() or sha256_file(contract) != policy["contract"]["sha256"]:
+def verify_contract_and_settings(source_record: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    by_path = {row["path"]: row for row in source_record["files"]}
+    contract = by_path.get(policy["contract"]["source"])
+    if not contract or contract["sha256"] != policy["contract"]["sha256"]:
         raise BuildError("CONTRACT_SHA256_MISMATCH")
     settings = []
     for row in policy["unicode_settings"]:
-        source = repository / Path(row["path"])
-        if not source.is_file() or sha256_file(source) != row["sha256"]:
+        source = by_path.get(row["path"])
+        if not source or source["sha256"] != row["sha256"]:
             raise BuildError(f"UNICODE_SETTING_SHA256_MISMATCH:{row['path']}")
         settings.append(dict(row))
     return {"contract": dict(policy["contract"]), "unicode_settings": settings}
@@ -346,7 +558,7 @@ def _privacy_markers(paths: Iterable[Path]) -> list[bytes]:
     for path in paths:
         raw = str(path.resolve())
         for value in {raw, raw.replace("\\", "/")}:
-            markers.extend((value.encode("utf-8"), value.encode("utf-16le")))
+            markers.extend((value.encode("utf-8"), value.encode("utf-16le"), value.encode("utf-16be")))
     return [marker for marker in markers if marker]
 
 
@@ -355,7 +567,6 @@ def audit_privacy(root: Path, policy: dict[str, Any], local_paths: Iterable[Path
     exception_path = exception["path"]
     local_markers = _privacy_markers(local_paths)
     unauthorized: list[str] = []
-    generic_profile = re.compile(rb"(?i)(?:[A-Z]:[\\/]Users[\\/]|/Users/|/home/)")
     drive_a = re.compile(rb"(?i)D:\\a\\")
     runneradmin = re.compile(rb"(?i)runneradmin")
     found_exception = False
@@ -364,7 +575,7 @@ def audit_privacy(root: Path, policy: dict[str, Any], local_paths: Iterable[Path
         data = item.read_bytes()
         if any(marker in data for marker in local_markers):
             unauthorized.append(relative)
-        profile_hits = len(generic_profile.findall(data))
+        profile_hits = sum(len(pattern.findall(data)) for pattern in GENERIC_PROFILE_PATTERNS)
         drive_hits = len(drive_a.findall(data))
         runner_hits = len(runneradmin.findall(data))
         if relative == exception_path:
@@ -432,7 +643,7 @@ def _readme(source_head: str) -> bytes:
 def _write_metadata(
     stage: Path, policy: dict[str, Any], source_head: str, policy_sha: str,
     go_build: dict[str, Any], node_record: dict[str, Any], source_binding: dict[str, Any],
-    privacy: dict[str, Any], legacy: dict[str, Any],
+    privacy: dict[str, Any], legacy: dict[str, Any], dependency_closure: dict[str, Any],
 ) -> None:
     safety = dict(policy["safety"])
     assert_closed_safety(safety, policy["safety"])
@@ -442,7 +653,7 @@ def _write_metadata(
     runtime_manifest = {
         "schema_version": RUNTIME_SCHEMA, "source_head": source_head,
         "policy_sha256": policy_sha, "safety": safety, "rules_service": False,
-        "legacy_rules_gate": legacy, **runtime_record,
+        "legacy_rules_gate": legacy, "dependency_closure": dependency_closure, **runtime_record,
     }
     runtime_manifest_path.write_bytes(canonical_json(runtime_manifest))
     (stage / "CONTRACT_SHA256.txt").write_bytes(
@@ -463,7 +674,8 @@ def _write_metadata(
         },
         "node": node_record, "source_binding": source_binding,
         "contract": dict(policy["contract"]), "unicode_settings": list(policy["unicode_settings"]),
-        "legacy_rules_gate": legacy, "privacy": privacy, "safety": safety,
+        "legacy_rules_gate": legacy, "privacy": privacy,
+        "dependency_closure": dependency_closure, "safety": safety,
     }
     (stage / "R17_BUILD_PROVENANCE.json").write_bytes(canonical_json(provenance))
     package_record = inventory_record(stage, excluded=("R17_PACKAGE_MANIFEST.json",))
@@ -473,6 +685,7 @@ def _write_metadata(
         "source_head": source_head, "policy_sha256": policy_sha,
         "candidate_status": "REPORT_ONLY_ARCH_GATED", "release_approved": False,
         "safety": safety, "legacy_rules_gate": legacy, "privacy": privacy,
+        "dependency_closure": dependency_closure,
         "contract": dict(policy["contract"]), "unicode_settings": list(policy["unicode_settings"]),
         "toolchains": policy["toolchains"], "self_excluded_from_inventory": True,
         **package_record,
@@ -542,15 +755,25 @@ def promote_independent_pair(
 def _build_one(
     index: int, output: Path, repository: Path, source_head: str, go_exe: Path,
     node_exe: Path, node_modules: Path, policy: dict[str, Any], policy_sha: str,
+    expected_source_record: dict[str, Any],
 ) -> None:
     with tempfile.TemporaryDirectory(prefix=f"opiu-r17-independent-{index + 1}-") as raw:
         work = Path(raw)
-        go_build = BASE.test_and_build_service(go_exe, repository / "service" / "source", work / "go")
-        BASE.verify_repository(repository, source_head)
+        before = exact_git_source_inventory(repository, source_head, policy)
+        if before != expected_source_record:
+            raise BuildError("SOURCE_CHANGED_BEFORE_INDEPENDENT_BUILD")
+        service_source = work / "service-source"
+        service_source_record = extract_git_tree(
+            repository, expected_source_record, "service/source", service_source,
+        )
+        go_build = BASE.test_and_build_service(go_exe, service_source, work / "go")
+        if exact_git_source_inventory(repository, source_head, policy) != expected_source_record:
+            raise BuildError("SOURCE_CHANGED_AFTER_GO_BUILD")
         stage = work / policy["archive_root"]
         stage.mkdir()
-        source_binding = copy_runtime_sources(repository, stage, policy)
-        source_binding["service_source"] = BASE.inventory_record(repository / "service" / "source")
+        source_binding = copy_runtime_sources(repository, expected_source_record, stage, policy)
+        source_binding["service_source"] = service_source_record
+        source_binding["complete_source_scope"] = expected_source_record
         shutil.copyfile(go_build["first_exe"], stage / policy["executable_name"])
         node_target = stage / Path(policy["toolchains"]["node"]["package_path"])
         node_target.parent.mkdir(parents=True, exist_ok=True)
@@ -559,19 +782,21 @@ def _build_one(
         _copy_verified_tree(node_modules, modules_target)
         contract_target = stage / Path(policy["contract"]["package_path"])
         contract_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(repository / Path(policy["contract"]["source"]), contract_target)
+        extract_git_file(
+            repository, expected_source_record, policy["contract"]["source"], contract_target,
+        )
         for row in policy["unicode_settings"]:
             target = stage / Path(row["path"])
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(repository / Path(row["path"]), target)
+            extract_git_file(repository, expected_source_record, row["path"], target)
         node_record = verify_node(node_target, modules_target, policy)
         legacy = audit_legacy_rules_package(stage, policy)
+        dependency_closure = verify_runtime_dependency_closure(stage / "runtime")
         privacy = audit_privacy(
             stage, policy, (repository, go_exe.parent.parent, node_exe.parent, node_modules, output.parent, work),
         )
         _write_metadata(
             stage, policy, source_head, policy_sha, go_build, node_record,
-            source_binding, privacy, legacy,
+            source_binding, privacy, legacy, dependency_closure,
         )
         validate_tree_paths(stage, policy)
         if sha256_file(contract_target) != policy["contract"]["sha256"]:
@@ -582,8 +807,11 @@ def _build_one(
         )
         if final_privacy != privacy:
             raise BuildError("PRIVACY_EVIDENCE_CHANGED_AFTER_MANIFESTS")
-        BASE.verify_repository(repository, source_head)
+        if exact_git_source_inventory(repository, source_head, policy) != expected_source_record:
+            raise BuildError("SOURCE_CHANGED_BEFORE_ARCHIVE_WRITE")
         write_deterministic_zip(stage, output, policy)
+        if exact_git_source_inventory(repository, source_head, policy) != expected_source_record:
+            raise BuildError("SOURCE_CHANGED_AFTER_ARCHIVE_WRITE")
 
 
 def build(
@@ -595,8 +823,9 @@ def build(
     policy = load_policy(policy_path)
     policy_sha = sha256_file(policy_path)
     verified_head = BASE.verify_repository(repository, source_head)
+    source_record = exact_git_source_inventory(repository, verified_head, policy)
     legacy = audit_legacy_rules_repository(repository, policy)
-    verify_contract_and_settings(repository, policy)
+    verify_contract_and_settings(source_record, policy)
     verify_node(node_exe.resolve(), node_modules.resolve(), policy)
     if BASE.verify_toolchain(go_exe.resolve())["go_exe_sha256"] != policy["toolchains"]["go"]["go_exe_sha256"]:
         raise BuildError("GO_POLICY_BINDING_MISMATCH")
@@ -604,13 +833,15 @@ def build(
     def producer(index: int, temporary_output: Path) -> None:
         _build_one(
             index, temporary_output, repository, verified_head, go_exe.resolve(),
-            node_exe.resolve(), node_modules.resolve(), policy, policy_sha,
+            node_exe.resolve(), node_modules.resolve(), policy, policy_sha, source_record,
         )
 
     outputs = promote_independent_pair(output_a, output_b, producer, policy["archive_name"])
     return {
         "status": "BUILT_REPORT_ONLY_ARCH_GATED_CANDIDATE", "source_head": verified_head,
         "policy_sha256": policy_sha, "legacy_rules_gate": legacy,
+        "source_inventory_sha256": source_record["inventory_sha256"],
+        "source_file_count": source_record["file_count"],
         "release_approved": False, "safety": policy["safety"], **outputs,
     }
 

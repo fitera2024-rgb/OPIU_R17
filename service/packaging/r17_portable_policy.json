@@ -144,5 +144,23 @@
     "symlink",
     "reparse",
     "encrypted"
-  ]
+  ],
+  "source_integrity": {
+    "mode": "EXACT_GIT_BLOBS",
+    "reject_tracked_drift": true,
+    "reject_untracked_injection": true,
+    "reject_ignored_injection": true,
+    "recheck_before_and_after_each_build": true
+  },
+  "runtime_dependency_closure": {
+    "relative_imports_required": true,
+    "missing_imports_rejected": true
+  },
+  "relocation_smoke": {
+    "windows_required": true,
+    "health_required": true,
+    "node_and_package_load_required": true,
+    "port_release_required": true,
+    "outputs_under_extracted_root": true
+  }
 }

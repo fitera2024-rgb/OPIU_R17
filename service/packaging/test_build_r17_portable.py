@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -14,6 +15,35 @@ SPEC = importlib.util.spec_from_file_location("r17_portable_builder", SCRIPT)
 BUILDER = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(BUILDER)
+
+
+def make_git_source_fixture(root: Path) -> tuple[dict[str, object], str]:
+    policy = copy.deepcopy(BUILDER.load_policy())
+    files = {
+        "service/source/go.mod": b"module example.invalid/opiu\n\ngo 1.22\n",
+        "service/source/main.go": b"package main\nfunc main() {}\n",
+        "modules/corrections/source/safe.mjs": b"export const safe = true;\n",
+        "modules/reconciliation/source/safe.mjs": b"export const safe = true;\n",
+        "resources/reference/ref.json": b"{}\n",
+        policy["contract"]["source"]: b"synthetic contract",
+        policy["unicode_settings"][0]["path"]: b"setting a",
+        policy["unicode_settings"][1]["path"]: b"setting b",
+        ".gitignore": b"service/source/ignored.bin\n",
+    }
+    for relative, data in files.items():
+        target = root / Path(relative)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "R17 Test"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "r17@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "add", "--all"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "--quiet", "-m", "fixture"], cwd=root, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, text=True,
+        encoding="utf-8", stdout=subprocess.PIPE,
+    ).stdout.strip()
+    return policy, head
 
 
 def test_canonical_policy_contains_all_exact_pins_and_closed_gates() -> None:
@@ -36,8 +66,22 @@ def test_policy_rejects_any_open_safety_gate() -> None:
     policy = BUILDER.load_policy()
     opened = copy.deepcopy(policy)
     opened["safety"]["release_allowed"] = True
-    with pytest.raises(BUILDER.BuildError, match="REPORT_ONLY_SAFETY_GATES_NOT_EXACT"):
+    with pytest.raises(BUILDER.BuildError, match="POLICY_VALUE_SET_NOT_EXACT"):
         BUILDER.validate_policy(opened)
+
+
+@pytest.mark.parametrize("mutation", ["rules_token", "rules_fragment", "component", "relative", "full"])
+def test_policy_rejects_deleted_rules_guards_and_raised_path_limits(mutation: str) -> None:
+    changed = copy.deepcopy(BUILDER.load_policy())
+    if mutation == "rules_token":
+        changed["legacy_rules_gate"]["forbidden_tokens"]["runtime"].pop()
+    elif mutation == "rules_fragment":
+        changed["legacy_rules_gate"]["forbidden_package_path_fragments"].clear()
+    else:
+        key = {"component": "component_max", "relative": "relative_max", "full": "full_path_max"}[mutation]
+        changed["path_limits"][key] += 1
+    with pytest.raises(BUILDER.BuildError, match="POLICY_VALUE_SET_NOT_EXACT"):
+        BUILDER.validate_policy(changed)
 
 
 @pytest.mark.parametrize(
@@ -59,6 +103,49 @@ def test_all_short_path_limits_are_enforced() -> None:
     tightened["path_limits"]["full_path_max"] = 30
     with pytest.raises(BUILDER.BuildError, match="PACKAGE_FULL_PATH_TOO_LONG"):
         BUILDER.validate_relative_path("runtime/file.txt", tightened)
+
+
+def test_exact_git_blob_inventory_and_blob_extraction() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        repository = Path(raw)
+        policy, head = make_git_source_fixture(repository)
+        record = BUILDER.exact_git_source_inventory(repository, head, policy)
+        assert record["source_head"] == head
+        assert record["exact_git_blobs"] is True
+        assert record["ignored_injection_checked"] is True
+        assert all(row["git_blob"] and row["git_mode"] for row in record["files"])
+        with tempfile.TemporaryDirectory() as destination_raw:
+            destination = Path(destination_raw)
+            BUILDER.extract_git_tree(repository, record, "service/source", destination)
+            assert (destination / "main.go").read_bytes() == b"package main\nfunc main() {}\n"
+
+
+@pytest.mark.parametrize("injection", ["tracked_drift", "untracked", "ignored"])
+def test_exact_git_source_inventory_rejects_all_worktree_injection(injection: str) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        repository = Path(raw)
+        policy, head = make_git_source_fixture(repository)
+        if injection == "tracked_drift":
+            (repository / "service/source/main.go").write_bytes(b"package main\n// drift\n")
+            expected = "SOURCE_REPOSITORY_NOT_CLEAN"
+        elif injection == "untracked":
+            (repository / "service/source/injected.go").write_bytes(b"package injected\n")
+            expected = "SOURCE_REPOSITORY_NOT_CLEAN"
+        else:
+            (repository / "service/source/ignored.bin").write_bytes(b"ignored injection")
+            expected = "SOURCE_SCOPE_INJECTION_OR_MISSING"
+        with pytest.raises(BUILDER.BuildError, match=expected):
+            BUILDER.exact_git_source_inventory(repository, head, policy)
+
+
+def test_runtime_dependency_closure_rejects_missing_relative_import() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        runtime = Path(raw)
+        source = runtime / "modules/corrections/source/main.mjs"
+        source.parent.mkdir(parents=True)
+        source.write_text('import "./missing.mjs";\n', encoding="utf-8")
+        with pytest.raises(BUILDER.BuildError, match="RUNTIME_RELATIVE_IMPORT_MISSING"):
+            BUILDER.verify_runtime_dependency_closure(runtime)
 
 
 def test_two_independent_zip_producers_are_byte_identical_atomic_and_no_overwrite() -> None:
@@ -172,5 +259,8 @@ def test_privacy_gate_allows_only_the_exact_bound_upstream_exception() -> None:
         assert evidence["whole_zip_user_profile_path_free"] is False
         leaked = root / "runtime" / "leak.txt"
         leaked.write_bytes(b"C:\\Users\\customer\\build")
+        with pytest.raises(BUILDER.BuildError, match="LOCAL_CUSTOMER_BUILD_PATH_LEAK"):
+            BUILDER.audit_privacy(root, synthetic, ())
+        leaked.write_bytes("C:\\Users\\NB-FIT\\build".encode("utf-16-be"))
         with pytest.raises(BUILDER.BuildError, match="LOCAL_CUSTOMER_BUILD_PATH_LEAK"):
             BUILDER.audit_privacy(root, synthetic, ())

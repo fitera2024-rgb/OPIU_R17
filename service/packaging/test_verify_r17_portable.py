@@ -85,13 +85,21 @@ def audit_evidence(policy: dict[str, object]) -> tuple[dict[str, object], dict[s
     return privacy, legacy
 
 
-def rebuild_manifests(payloads: dict[str, bytes], policy: dict[str, object]) -> None:
+def rebuild_manifests(
+    payloads: dict[str, bytes], policy: dict[str, object], *,
+    closure_override: dict[str, object] | None = None,
+) -> None:
     privacy, legacy = audit_evidence(policy)
+    dependency_closure = (
+        closure_override
+        if closure_override is not None
+        else VERIFIER.verify_runtime_dependency_closure(payloads)
+    )
     runtime_record = VERIFIER.inventory_record(payloads, prefix="runtime/", excluded=("runtime/MANIFEST.json",))
     payloads["runtime/MANIFEST.json"] = json_bytes({
         "schema_version": VERIFIER.RUNTIME_SCHEMA, "source_head": SOURCE_HEAD,
         "policy_sha256": POLICY_SHA, "safety": policy["safety"], "rules_service": False,
-        "legacy_rules_gate": legacy, **runtime_record,
+        "legacy_rules_gate": legacy, "dependency_closure": dependency_closure, **runtime_record,
     })
     if "R17_BUILD_PROVENANCE.json" not in payloads:
         service = payloads["OPIU_R17.exe"]
@@ -113,6 +121,7 @@ def rebuild_manifests(payloads: dict[str, bytes], policy: dict[str, object]) -> 
                 "second_sha256": VERIFIER.sha256_bytes(service), "size": len(service),
             },
             "privacy": privacy, "legacy_rules_gate": legacy,
+            "dependency_closure": dependency_closure,
         })
     package_record = VERIFIER.inventory_record(payloads, excluded=("R17_PACKAGE_MANIFEST.json",))
     payloads["R17_PACKAGE_MANIFEST.json"] = json_bytes({
@@ -121,6 +130,7 @@ def rebuild_manifests(payloads: dict[str, bytes], policy: dict[str, object]) -> 
         "source_head": SOURCE_HEAD, "policy_sha256": POLICY_SHA,
         "candidate_status": "REPORT_ONLY_ARCH_GATED", "release_approved": False,
         "safety": policy["safety"], "privacy": privacy, "legacy_rules_gate": legacy,
+        "dependency_closure": dependency_closure,
         "contract": policy["contract"], "unicode_settings": policy["unicode_settings"],
         "toolchains": policy["toolchains"], "self_excluded_from_inventory": True,
         **package_record,
@@ -132,7 +142,10 @@ def valid_payloads(policy: dict[str, object]) -> dict[str, bytes]:
     payloads = {
         "OPIU_R17.exe": b"MZ synthetic service",
         "runtime/node/node.exe": fixture["node"],
-        "runtime/modules/corrections/source/safe.mjs": b"export const reportOnly = true;\n",
+        "runtime/modules/corrections/source/safe.mjs": (
+            b'import {reportOnly} from "./dependency.mjs";\nexport {reportOnly};\n'
+        ),
+        "runtime/modules/corrections/source/dependency.mjs": b"export const reportOnly = true;\n",
         policy["contract"]["package_path"]: fixture["contract"],
         policy["unicode_settings"][0]["path"]: fixture["setting_a"],
         policy["unicode_settings"][1]["path"]: fixture["setting_b"],
@@ -183,6 +196,21 @@ def test_verifier_is_independent_of_the_builder_and_existing_packaging_base() ->
     source = SCRIPT.read_text(encoding="utf-8")
     assert "build_r17_portable" not in source
     assert "build_clean_source_service_candidate" not in source
+
+
+@pytest.mark.parametrize("mutation", ["rules_token", "rules_fragment", "component", "relative", "full"])
+def test_canonical_policy_value_set_is_immutable(mutation: str) -> None:
+    policy = VERIFIER.load_policy()
+    changed = copy.deepcopy(policy)
+    if mutation == "rules_token":
+        changed["legacy_rules_gate"]["forbidden_tokens"]["env"].clear()
+    elif mutation == "rules_fragment":
+        changed["legacy_rules_gate"]["forbidden_package_path_fragments"].pop()
+    else:
+        key = {"component": "component_max", "relative": "relative_max", "full": "full_path_max"}[mutation]
+        changed["path_limits"][key] += 1
+    with pytest.raises(VERIFIER.VerificationError, match="POLICY_VALUE_SET_NOT_EXACT"):
+        VERIFIER.validate_policy(changed)
 
 
 def test_positive_static_verification_and_identical_pair() -> None:
@@ -237,6 +265,97 @@ def test_legacy_rules_runtime_mutation_is_rejected_even_with_honest_inventories(
         write_archive(archive, payloads, policy)
         with pytest.raises(VERIFIER.VerificationError, match="LEGACY_RULES_GATE_BLOCKED"):
             VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
+
+
+def test_missing_relative_import_is_rejected_with_honest_inventories() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        _, policy, payloads = make_valid(root / "seed")
+        claimed_closure = json.loads(payloads["runtime/MANIFEST.json"])["dependency_closure"]
+        payloads.pop("runtime/modules/corrections/source/dependency.mjs")
+        payloads.pop("R17_BUILD_PROVENANCE.json")
+        rebuild_manifests(payloads, policy, closure_override=claimed_closure)
+        archive = root / "missing-import" / "OPIU_R17.zip"
+        write_archive(archive, payloads, policy)
+        with pytest.raises(VERIFIER.VerificationError, match="RUNTIME_RELATIVE_IMPORT_MISSING"):
+            VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
+
+
+def test_utf16be_local_profile_path_is_rejected_with_honest_inventories() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        _, policy, payloads = make_valid(root / "seed")
+        payloads["runtime/privacy.bin"] = "C:\\Users\\NB-FIT\\build".encode("utf-16-be")
+        payloads.pop("R17_BUILD_PROVENANCE.json")
+        rebuild_manifests(payloads, policy)
+        archive = root / "utf16be" / "OPIU_R17.zip"
+        write_archive(archive, payloads, policy)
+        with pytest.raises(VERIFIER.VerificationError, match="LOCAL_CUSTOMER_BUILD_PATH_LEAK"):
+            VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
+
+
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("runtime/node/extra.dll", "RUNTIME_NODE_FILE_SET_INVALID"),
+        ("user-settings/╨Ъ╨Р╨Ъ_╨Э╨Р╨б╨в╨а╨Ю╨Ш╨в╨м.txt", "UNICODE_SETTINGS_FILE_SET_INVALID"),
+    ],
+)
+def test_extra_node_sibling_or_mojibake_setting_is_rejected_with_honest_inventories(
+    path: str, message: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        _, policy, payloads = make_valid(root / "seed")
+        payloads[path] = b"honestly inventoried injection"
+        payloads.pop("R17_BUILD_PROVENANCE.json")
+        rebuild_manifests(payloads, policy)
+        archive = root / "extra" / "OPIU_R17.zip"
+        write_archive(archive, payloads, policy)
+        with pytest.raises(VERIFIER.VerificationError, match=message):
+            VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
+
+
+def test_relocation_smoke_api_fails_closed_for_synthetic_non_executables() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        archive, policy, _ = make_valid(Path(raw))
+        expected = "SMOKE_NODE_VERSION_FAILED" if os.name == "nt" else "SMOKE_WINDOWS_REQUIRED"
+        with pytest.raises(VERIFIER.VerificationError, match=expected):
+            VERIFIER.verify_archive(
+                archive, policy, policy_sha256=POLICY_SHA, run_smoke=True,
+                smoke_parent=Path(raw) / "relocated", smoke_timeout=2.0,
+            )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows relocation integration")
+def test_public_relocation_smoke_api_runs_after_static_verification() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        archive, policy, _ = make_valid(Path(raw))
+        with pytest.raises(VERIFIER.VerificationError, match="SMOKE_NODE_VERSION_FAILED"):
+            VERIFIER.verify_archive_relocation_smoke(
+                archive, policy, policy_sha256=POLICY_SHA,
+                smoke_parent=Path(raw) / "short", timeout=2.0,
+            )
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or not os.environ.get("OPIU_R17_INTEGRATION_ARCHIVE"),
+    reason="set OPIU_R17_INTEGRATION_ARCHIVE for the real Windows relocation smoke",
+)
+def test_real_windows_archive_relocation_smoke() -> None:
+    archive = Path(os.environ["OPIU_R17_INTEGRATION_ARCHIVE"])
+    policy = VERIFIER.load_policy()
+    report = VERIFIER.verify_archive_relocation_smoke(
+        archive, policy, policy_sha256=VERIFIER.sha256_file(VERIFIER.POLICY_PATH), timeout=30.0,
+    )
+    assert report == {
+        "status": "PASS", "relocated": True, "node_version_verified": True,
+        "jszip_loaded": True, "artifact_tool_loaded": True, "skia_canvas_loaded": True,
+        "health_verified": True, "bootstrap_verified": True, "port_released": True,
+        "all_outputs_under_extracted_root": True,
+        "output_file_count": report["output_file_count"],
+        "localhost_only": True, "release_approved": False,
+    }
 
 
 @pytest.mark.parametrize("kind", ["traversal", "casefold", "collision", "timestamp", "mode"])

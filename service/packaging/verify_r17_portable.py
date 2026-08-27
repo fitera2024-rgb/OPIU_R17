@@ -5,8 +5,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import socket
 import stat
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
@@ -17,6 +24,17 @@ POLICY_SCHEMA = "opiu-r17-portable-policy.v1"
 PACKAGE_SCHEMA = "opiu-r17-package-manifest.v1"
 PROVENANCE_SCHEMA = "opiu-r17-build-provenance.v1"
 RUNTIME_SCHEMA = "opiu-r17-runtime-manifest.v1"
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+EXPECTED_POLICY_VALUE_SHA256 = "71400B25F1F765597E33D7F84EBF1C08E1C9BC41DEA52E92AEBEFAA2EA75169E"
+RELATIVE_IMPORT_PATTERNS = (
+    re.compile(r'''(?:from\s+|import\s*\(\s*|require\s*\(\s*|new\s+URL\s*\(\s*)["'](\.[^"']+)["']'''),
+    re.compile(r'''\bimport\s*["'](\.[^"']+)["']'''),
+)
+GENERIC_PROFILE_PATTERNS = (
+    re.compile(rb"(?i)(?:[A-Z]:[\\/]Users[\\/]|/Users/|/home/)"),
+    re.compile(rb"(?i)(?:[A-Z]\x00:\x00[\\/]\x00U\x00s\x00e\x00r\x00s\x00[\\/]\x00|/\x00U\x00s\x00e\x00r\x00s\x00/\x00|/\x00h\x00o\x00m\x00e\x00/\x00)"),
+    re.compile(rb"(?i)(?:\x00[A-Z]\x00:\x00[\\/]\x00U\x00s\x00e\x00r\x00s\x00[\\/]|\x00/\x00U\x00s\x00e\x00r\x00s\x00/|\x00/\x00h\x00o\x00m\x00e\x00/)"),
+)
 
 
 class VerificationError(RuntimeError):
@@ -33,6 +51,13 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest().upper()
+
+
+def policy_value_sha256(value: dict[str, Any]) -> str:
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return sha256_bytes(payload)
 
 
 def _json_object(data: bytes, label: str) -> dict[str, Any]:
@@ -61,11 +86,14 @@ def validate_policy(policy: dict[str, Any], *, enforce_canonical: bool = True) -
         "schema_version", "archive_name", "archive_root", "executable_name",
         "fixed_zip_time", "contract", "required_metadata", "safety", "toolchains",
         "unicode_settings", "legacy_rules_gate", "privacy", "path_limits",
+        "source_integrity", "runtime_dependency_closure", "relocation_smoke",
     }
     if not required.issubset(policy):
         raise VerificationError("POLICY_FIELDS_MISSING")
     if not enforce_canonical:
         return
+    if policy_value_sha256(policy) != EXPECTED_POLICY_VALUE_SHA256:
+        raise VerificationError("POLICY_VALUE_SET_NOT_EXACT")
     expected = {
         "schema_version": POLICY_SCHEMA, "archive_name": "OPIU_R17.zip",
         "archive_root": "OPIU_R17", "executable_name": "OPIU_R17.exe",
@@ -155,6 +183,53 @@ def inventory_record(payloads: dict[str, bytes], *, prefix: str = "", excluded: 
     }
 
 
+def _resolve_relative_dependency(source: str, specifier: str) -> list[str]:
+    clean = specifier.split("?", 1)[0].split("#", 1)[0]
+    raw_parts = [*PurePosixPath(source).parent.parts, *PurePosixPath(clean).parts]
+    parts: list[str] = []
+    for part in raw_parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                return []
+            parts.pop()
+        else:
+            parts.append(part)
+    if not parts:
+        return []
+    candidate = PurePosixPath(*parts).as_posix()
+    candidates = [candidate]
+    if not PurePosixPath(candidate).suffix:
+        candidates.extend(candidate + suffix for suffix in (".mjs", ".js", ".cjs", ".json"))
+        candidates.extend(candidate + "/index" + suffix for suffix in (".mjs", ".js", ".cjs", ".json"))
+    return candidates
+
+
+def verify_runtime_dependency_closure(payloads: dict[str, bytes]) -> dict[str, Any]:
+    paths = set(payloads)
+    checked = 0
+    edges: list[dict[str, str]] = []
+    for relative in sorted(paths):
+        if not relative.startswith("runtime/") or PurePosixPath(relative).suffix.lower() not in {".mjs", ".js", ".cjs"}:
+            continue
+        try:
+            text = payloads[relative].decode("utf-8-sig")
+        except UnicodeDecodeError as error:
+            raise VerificationError(f"RUNTIME_SOURCE_ENCODING_INVALID:{relative}") from error
+        specifiers = []
+        for pattern in RELATIVE_IMPORT_PATTERNS:
+            specifiers.extend(pattern.findall(text))
+        for specifier in sorted(set(specifiers)):
+            checked += 1
+            candidates = _resolve_relative_dependency(relative, specifier)
+            matched = next((candidate for candidate in candidates if candidate in paths), None)
+            if matched is None:
+                raise VerificationError(f"RUNTIME_RELATIVE_IMPORT_MISSING:{relative}:{specifier}")
+            edges.append({"source": relative, "specifier": specifier, "target": matched})
+    return {"status": "PASS", "relative_dependency_count": checked, "edges": edges}
+
+
 def _read_archive(archive_path: Path, policy: dict[str, Any]) -> tuple[dict[str, bytes], dict[str, zipfile.ZipInfo]]:
     if not archive_path.is_file() or archive_path.name != policy["archive_name"]:
         raise VerificationError("ARCHIVE_NAME_OR_FILE_INVALID")
@@ -217,12 +292,11 @@ def _read_archive(archive_path: Path, policy: dict[str, Any]) -> tuple[dict[str,
 def _verify_privacy(payloads: dict[str, bytes], policy: dict[str, Any]) -> dict[str, Any]:
     exception = policy["privacy"]["allowed_upstream_debug_exception"]
     exception_path = exception["path"]
-    profile = re.compile(rb"(?i)(?:[A-Z]:[\\/]Users[\\/]|/Users/|/home/)")
     runneradmin = re.compile(rb"(?i)runneradmin")
     drive_a = re.compile(rb"(?i)D:\\a\\")
     unauthorized: list[str] = []
     for relative, data in payloads.items():
-        profile_hits = len(profile.findall(data))
+        profile_hits = sum(len(pattern.findall(data)) for pattern in GENERIC_PROFILE_PATTERNS)
         runner_hits = len(runneradmin.findall(data))
         drive_hits = len(drive_a.findall(data))
         if relative == exception_path:
@@ -275,6 +349,7 @@ def _verify_legacy(payloads: dict[str, bytes], policy: dict[str, Any]) -> dict[s
 
 def verify_archive(
     archive_path: Path, policy: dict[str, Any], *, policy_sha256: str | None = None,
+    run_smoke: bool = False, smoke_parent: Path | None = None, smoke_timeout: float = 20.0,
 ) -> dict[str, Any]:
     payloads, _ = _read_archive(archive_path, policy)
     required = set(policy["required_metadata"])
@@ -287,6 +362,14 @@ def verify_archive(
     expected_exes = {policy["executable_name"], policy["toolchains"]["node"]["package_path"]}
     if set(exe_paths) != expected_exes:
         raise VerificationError("EXECUTABLE_SET_INVALID")
+    expected_node_files = {policy["toolchains"]["node"]["package_path"]}
+    actual_node_files = {path for path in payloads if path.startswith("runtime/node/")}
+    if actual_node_files != expected_node_files:
+        raise VerificationError("RUNTIME_NODE_FILE_SET_INVALID")
+    expected_settings = {row["path"] for row in policy["unicode_settings"]}
+    actual_settings = {path for path in payloads if path.startswith("user-settings/")}
+    if actual_settings != expected_settings:
+        raise VerificationError("UNICODE_SETTINGS_FILE_SET_INVALID")
     manifest = _json_object(payloads["R17_PACKAGE_MANIFEST.json"], "R17_PACKAGE_MANIFEST.json")
     provenance = _json_object(payloads["R17_BUILD_PROVENANCE.json"], "R17_BUILD_PROVENANCE.json")
     runtime_manifest = _json_object(payloads["runtime/MANIFEST.json"], "runtime/MANIFEST.json")
@@ -395,18 +478,236 @@ def verify_archive(
             raise VerificationError(f"RUNTIME_INVENTORY_MISMATCH:{field}")
     privacy = _verify_privacy(payloads, policy)
     legacy = _verify_legacy(payloads, policy)
+    dependency_closure = verify_runtime_dependency_closure(payloads)
     for document in (manifest, provenance):
         if document.get("privacy") != privacy or document.get("legacy_rules_gate") != legacy:
             raise VerificationError("AUDIT_EVIDENCE_MISMATCH")
     if runtime_manifest.get("legacy_rules_gate") != legacy or runtime_manifest.get("rules_service") is not False:
         raise VerificationError("RUNTIME_LEGACY_GATE_MISMATCH")
-    return {
+    for document in (manifest, provenance, runtime_manifest):
+        if document.get("dependency_closure") != dependency_closure:
+            raise VerificationError("RUNTIME_DEPENDENCY_CLOSURE_EVIDENCE_MISMATCH")
+    report = {
         "status": "PASS_REPORT_ONLY_CANDIDATE", "archive": archive_path.name,
         "sha256": sha256_file(archive_path), "size": archive_path.stat().st_size,
         "entry_count": len(payloads), "source_head": manifest.get("source_head"),
         "release_approved": False, "safety": policy["safety"],
         "legacy_rules_gate": legacy, "privacy": privacy,
+        "dependency_closure": dependency_closure,
     }
+    if run_smoke:
+        report["relocation_smoke"] = _run_relocation_smoke_after_static(
+            archive_path, policy, smoke_parent=smoke_parent, timeout=smoke_timeout,
+        )
+    return report
+
+
+def _http_json(url: str, timeout: float) -> dict[str, Any]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            if response.status != 200:
+                raise VerificationError(f"SMOKE_HTTP_STATUS_INVALID:{response.status}")
+            data = response.read(1024 * 1024 + 1)
+    except (OSError, urllib.error.URLError) as error:
+        raise VerificationError("SMOKE_HTTP_REQUEST_FAILED") from error
+    if len(data) > 1024 * 1024:
+        raise VerificationError("SMOKE_HTTP_RESPONSE_TOO_LARGE")
+    return _json_object(data, url)
+
+
+def _free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _is_reparse(path: Path) -> bool:
+    try:
+        return bool(getattr(os.lstat(path), "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT)
+    except OSError as error:
+        raise VerificationError("SMOKE_PATH_METADATA_FAILED") from error
+
+
+def _wait_port_released(port: int, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind(("127.0.0.1", port))
+            return
+        except OSError:
+            time.sleep(0.1)
+    raise VerificationError("SMOKE_PORT_NOT_RELEASED")
+
+
+def _run_relocation_smoke_after_static(
+    archive_path: Path, policy: dict[str, Any], *, smoke_parent: Path | None, timeout: float,
+) -> dict[str, Any]:
+    if os.name != "nt":
+        raise VerificationError("SMOKE_WINDOWS_REQUIRED")
+    if timeout <= 0 or timeout > 120:
+        raise VerificationError("SMOKE_TIMEOUT_INVALID")
+    parent = smoke_parent.resolve() if smoke_parent is not None else None
+    if parent is not None:
+        parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="opiu-r17-relocated-", dir=parent) as raw:
+        extraction = Path(raw).resolve()
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extractall(extraction)
+        package_root = (extraction / policy["archive_root"]).resolve()
+        try:
+            package_root.relative_to(extraction)
+        except ValueError as error:
+            raise VerificationError("SMOKE_EXTRACTION_ROOT_ESCAPE") from error
+        if not package_root.is_dir():
+            raise VerificationError("SMOKE_PACKAGE_ROOT_MISSING")
+        for item in package_root.rglob("*"):
+            if item.is_symlink() or _is_reparse(item):
+                raise VerificationError("SMOKE_EXTRACTED_SYMLINK_FORBIDDEN")
+            try:
+                item.resolve().relative_to(package_root)
+            except ValueError as error:
+                raise VerificationError("SMOKE_EXTRACTED_PATH_ESCAPE") from error
+        initial_files = {
+            item.relative_to(package_root).as_posix()
+            for item in package_root.rglob("*") if item.is_file()
+        }
+
+        executable = package_root / policy["executable_name"]
+        node = package_root / Path(policy["toolchains"]["node"]["package_path"])
+        modules = package_root / Path(policy["toolchains"]["node_modules"]["package_path"])
+        environment = dict(os.environ)
+        private_root = package_root / "smoke-private"
+        temp_root = private_root / "temp"
+        for directory in (private_root, temp_root):
+            directory.mkdir(parents=True, exist_ok=True)
+        environment.update({
+            "OPIU_RUNTIME_ROOT": str(package_root / "runtime"),
+            "OPIU_NODE_PATH": str(node),
+            "APPDATA": str(private_root / "appdata"),
+            "LOCALAPPDATA": str(private_root / "localappdata"),
+            "TEMP": str(temp_root), "TMP": str(temp_root),
+            "OPIU_ALLOW_LIVE_1C": "0", "OPIU_READY_TO_UPLOAD": "0",
+            "OPIU_RELEASE_ALLOWED": "0", "OPIU_ENABLE_POSTING": "0",
+            "NODE_OPTIONS": "", "NODE_PATH": "", "NODE_ENV": "production", "TZ": "UTC",
+        })
+        try:
+            version = subprocess.run(
+                [str(node), "--version"], cwd=package_root, env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise VerificationError("SMOKE_NODE_VERSION_FAILED") from error
+        if version.returncode != 0 or version.stdout.strip() != policy["toolchains"]["node"]["version_line"]:
+            raise VerificationError("SMOKE_NODE_VERSION_INVALID")
+        node_script = r'''
+const path = require("path");
+const {createRequire} = require("module");
+const {pathToFileURL} = require("url");
+const modules = process.argv[1];
+const localRequire = createRequire(path.join(modules, "__opiu_smoke__.cjs"));
+(async () => {
+  const specs = [
+    "jszip",
+    "@oai/artifact-tool",
+    path.join(modules, "@oai", "artifact-tool", "node_modules", "skia-canvas"),
+  ];
+  for (const spec of specs) {
+    const resolved = localRequire.resolve(spec);
+    await import(pathToFileURL(resolved).href);
+  }
+  process.stdout.write("NODE_RUNTIME_LOAD_PASS");
+})().catch((error) => { process.stderr.write(String(error)); process.exit(9); });
+'''
+        try:
+            loaded = subprocess.run(
+                [str(node), "-e", node_script, str(modules)], cwd=package_root, env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding="utf-8", errors="replace", timeout=timeout, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise VerificationError("SMOKE_NODE_RUNTIME_LOAD_FAILED") from error
+        if loaded.returncode != 0 or loaded.stdout.strip() != "NODE_RUNTIME_LOAD_PASS":
+            raise VerificationError("SMOKE_NODE_RUNTIME_LOAD_INVALID")
+
+        port = _free_loopback_port()
+        data_dir = package_root / "smoke-output"
+        process: subprocess.Popen[str] | None = None
+        health: dict[str, Any] | None = None
+        bootstrap: dict[str, Any] | None = None
+        try:
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            process = subprocess.Popen(
+                [str(executable), "-addr", f"127.0.0.1:{port}", "-data-dir", str(data_dir), "-no-open"],
+                cwd=package_root, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace", creationflags=creationflags,
+            )
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise VerificationError(f"SMOKE_SERVICE_EXITED_EARLY:{process.returncode}")
+                try:
+                    health = _http_json(f"http://127.0.0.1:{port}/api/health", 1.0)
+                    break
+                except VerificationError:
+                    time.sleep(0.1)
+            if health is None:
+                raise VerificationError("SMOKE_HEALTH_TIMEOUT")
+            bootstrap = _http_json(f"http://127.0.0.1:{port}/api/bootstrap", 2.0)
+            expected_public_safety = {
+                "mode": "REPORT_ONLY", "posting_rows": 0, "ready_to_upload": False,
+                "release_allowed": False, "live_1c_allowed": False,
+            }
+            if (
+                health.get("status") != "ok" or health.get("service") != "OPIU_STABLE"
+                or health.get("safety") != expected_public_safety
+            ):
+                raise VerificationError("SMOKE_HEALTH_CONTRACT_INVALID")
+            if (
+                not str(bootstrap.get("service_version", "")).startswith("1.9.4")
+                or bootstrap.get("safety") != expected_public_safety
+                or bootstrap.get("engine_adapter_ready") is not True
+            ):
+                raise VerificationError("SMOKE_BOOTSTRAP_CONTRACT_INVALID")
+        finally:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        _wait_port_released(port, min(timeout, 10.0))
+        output_files = []
+        for item in package_root.rglob("*"):
+            if item.is_symlink() or _is_reparse(item):
+                raise VerificationError("SMOKE_OUTPUT_LINK_FORBIDDEN")
+            if not item.is_file():
+                continue
+            try:
+                relative = item.resolve().relative_to(package_root).as_posix()
+            except ValueError as error:
+                raise VerificationError("SMOKE_OUTPUT_OUTSIDE_EXTRACTED_ROOT") from error
+            if relative not in initial_files:
+                output_files.append(relative)
+        return {
+            "status": "PASS", "relocated": True, "node_version_verified": True,
+            "jszip_loaded": True, "artifact_tool_loaded": True, "skia_canvas_loaded": True,
+            "health_verified": True, "bootstrap_verified": True, "port_released": True,
+            "all_outputs_under_extracted_root": True, "output_file_count": len(output_files),
+            "localhost_only": True, "release_approved": False,
+        }
+
+
+def verify_archive_relocation_smoke(
+    archive_path: Path, policy: dict[str, Any], *, policy_sha256: str | None = None,
+    smoke_parent: Path | None = None, timeout: float = 20.0,
+) -> dict[str, Any]:
+    verify_archive(archive_path, policy, policy_sha256=policy_sha256)
+    return _run_relocation_smoke_after_static(
+        archive_path, policy, smoke_parent=smoke_parent, timeout=timeout,
+    )
 
 
 def verify_pair(
@@ -431,6 +732,9 @@ def main() -> None:
     parser.add_argument("--archive-a", type=Path, required=True)
     parser.add_argument("--archive-b", type=Path)
     parser.add_argument("--policy", type=Path, default=POLICY_PATH)
+    parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--smoke-parent", type=Path)
+    parser.add_argument("--smoke-timeout", type=float, default=20.0)
     arguments = parser.parse_args()
     try:
         policy = load_policy(arguments.policy)
@@ -438,8 +742,17 @@ def main() -> None:
         result = (
             verify_pair(arguments.archive_a, arguments.archive_b, policy, policy_sha256=policy_sha)
             if arguments.archive_b else
-            verify_archive(arguments.archive_a, policy, policy_sha256=policy_sha)
+            verify_archive(
+                arguments.archive_a, policy, policy_sha256=policy_sha,
+                run_smoke=arguments.smoke, smoke_parent=arguments.smoke_parent,
+                smoke_timeout=arguments.smoke_timeout,
+            )
         )
+        if arguments.archive_b and arguments.smoke:
+            result["relocation_smoke"] = verify_archive_relocation_smoke(
+                arguments.archive_a, policy, policy_sha256=policy_sha,
+                smoke_parent=arguments.smoke_parent, timeout=arguments.smoke_timeout,
+            )
     except VerificationError as error:
         code = str(error).split(":", 1)[0] or "VERIFY_FAILED"
         parser.exit(2, json.dumps({"status": "VERIFY_FAILED", "error": code}) + "\n")

@@ -231,7 +231,7 @@ test("explicit STORNO and REPOST stay directional SPORNO with unknown physical f
   assert.equal(bridge.canonical_posting_rows.length, 0);
 });
 
-test("exact ERP organization and SourceRowID provenance never collapse into report organization", () => {
+test("exact ERP provenance stays separate but bridge cannot promote it before pinned reopen", () => {
   const bridge = bridgeR001DecisionsToMaterializationCases([decision({
     output_route: "READY",
     correction_allowed: true,
@@ -263,7 +263,8 @@ test("exact ERP organization and SourceRowID provenance never collapse into repo
   })], { provenance: { handoff_sha256: HASH_A, applications_sha256: HASH_B } });
   const [materializationCase] = bridge.financial_cases;
 
-  assert.equal(materializationCase.output_route, "READY");
+  assert.equal(materializationCase.output_route, "SPORNO");
+  assert.ok(materializationCase.blockers.includes("EXACT_SOURCE_REOPEN_REQUIRED_FOR_READY"));
   assert.equal(materializationCase.reconciliation_organization, "Report organization");
   assert.equal(materializationCase.physical_source.source_organization, "Physical ERP organization");
   assert.equal(materializationCase.physical_source.source_row_id, "ERP-ROW-42");

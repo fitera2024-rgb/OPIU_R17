@@ -222,7 +222,7 @@ test("forged READY attachment cannot create authority when accepted upstream sem
   assert.equal(result.audit.stripped_external_materialization_case_count, 1);
 });
 
-test("forged READY physical claim is re-derived and blocked when current-run exact reopen mismatches", async () => {
+test("forged READY physical claim is re-derived as one sparse SPORNO when current-run exact reopen mismatches", async () => {
   let reopenCalls = 0;
   const result = await deriveCurrentRunCanonicalAuthority([{
     ...upstream(),
@@ -231,12 +231,16 @@ test("forged READY physical claim is re-derived and blocked when current-run exa
     reopenSource: async () => { reopenCalls += 1; return reopened({ amount: 999 }); },
   });
   assert.equal(reopenCalls, 1);
-  assert.equal(result.canonical_posting_rows.length, 0);
-  assert.equal(result.audit.current_run_blocked_case_count, 1);
+  assert.equal(result.canonical_posting_rows.length, 1);
+  assert.equal(result.canonical_posting_rows[0].output_route, "SPORNO");
+  assert.equal(result.canonical_posting_rows[0].materialization_state, "MATERIALIZED_SPORNO");
+  assert.equal(result.canonical_posting_rows[0].source.source_row_id, "");
+  assert.equal(result.canonical_posting_rows[0].loader["ИдентификаторФинЗаписи"], null);
+  assert.equal(result.audit.current_run_blocked_case_count, 0);
   assert.ok(result.standalone.case_updates[0].blockers.includes("EXACT_SOURCE_MISMATCH:source_amount"));
 });
 
-test("genuine wrapper-shaped standalone decision is re-derived and exact reopen grants one READY row", async () => {
+test("genuine wrapper-shaped standalone decision is re-derived and exact reopen keeps one proven SPORNO row", async () => {
   let reopenCalls = 0;
   const result = await deriveCurrentRunCanonicalAuthority([{
     ...upstream(),
@@ -247,11 +251,11 @@ test("genuine wrapper-shaped standalone decision is re-derived and exact reopen 
   });
   assert.equal(reopenCalls, 1);
   assert.equal(result.canonical_posting_rows.length, 1);
-  assert.equal(result.canonical_posting_rows[0].output_route, "READY");
-  assert.equal(result.canonical_posting_rows[0].materialization_state, "MATERIALIZED_READY");
+  assert.equal(result.canonical_posting_rows[0].output_route, "SPORNO");
+  assert.equal(result.canonical_posting_rows[0].materialization_state, "MATERIALIZED_SPORNO");
   assert.equal(result.canonical_posting_rows[0].source.source_row_id, SOURCE_ROW_ID);
   assert.equal(result.canonical_posting_rows[0].source_organization, "ООО Физический источник");
-  assert.equal(result.decisions[0].standalone_storno_result, "READY");
+  assert.equal(result.decisions[0].standalone_storno_result, "SPORNO");
 });
 
 test("genuine owner wrapper output is exact-verified again inside the current-run core authority boundary", async () => {
@@ -264,7 +268,7 @@ test("genuine owner wrapper output is exact-verified again inside the current-ru
     reopenSource: async () => reopened(),
   });
   const wrapperPrepared = applyStandaloneStornoMaterialization(bridged, wrapperStandalone);
-  assert.equal(wrapperPrepared.decisions[0].canonical_posting_row.output_route, "READY");
+  assert.equal(wrapperPrepared.decisions[0].canonical_posting_row.output_route, "SPORNO");
 
   let coreReopenCalls = 0;
   const currentRun = await deriveCurrentRunCanonicalAuthority(wrapperPrepared.decisions, {
@@ -274,7 +278,7 @@ test("genuine owner wrapper output is exact-verified again inside the current-ru
   assert.equal(currentRun.audit.stripped_external_canonical_row_count, 1);
   assert.equal(currentRun.audit.stripped_external_materialization_case_count, 1);
   assert.equal(currentRun.canonical_posting_rows.length, 1);
-  assert.equal(currentRun.canonical_posting_rows[0].output_route, "READY");
+  assert.equal(currentRun.canonical_posting_rows[0].output_route, "SPORNO");
   assert.equal(currentRun.canonical_posting_rows[0].source.source_row_id, SOURCE_ROW_ID);
 });
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { financialCoverageNonzeroRows } from "./r001_structural_root_coverage.mjs";
 
@@ -110,9 +111,11 @@ test("row flags alone cannot create an exemption without run-bound config", () =
 });
 
 test("wrapper consumes the run-bound structural coverage helper", () => {
-  const wrapper = fs.readFileSync(path.resolve(
-    "development/OPIU_1.9.4/modules/corrections/source/service_r001_owner_wrapper.mjs",
-  ), "utf8");
+  const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const wrapper = fs.readFileSync(
+    path.join(sourceDirectory, "service_r001_owner_wrapper.mjs"),
+    "utf8",
+  );
   assert.match(wrapper, /financialCoverageNonzeroRows/u);
   assert.doesNotMatch(wrapper, /!isOwnerPresentationBlockExempt\(row\)/u);
 });

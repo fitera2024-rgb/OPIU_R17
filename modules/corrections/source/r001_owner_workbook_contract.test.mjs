@@ -215,7 +215,7 @@ test("rules application UNPROVEN with exact source structure produces SPORNO dra
   ]);
   assert.equal(result.uploadRows.length, 2);
   assert.equal(result.uploadRows[0][18], "ERP-FIN-CASE-1");
-  assert.match(result.uploadRows[0][15], /спорно/i);
+  assert.match(result.uploadRows[0][15], /Статус проверки: требуется подтверждение пользователя/i);
   assert.equal(result.blockers.length, 1);
 });
 

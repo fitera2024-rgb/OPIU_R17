@@ -102,8 +102,8 @@ test("hierarchy context retains the complete Intalev path", () => {
   assert.equal(context.path, "Административные расходы / ФЗП и компенсационные выплаты / Компенсации");
 });
 
-test("one exact non-closing physical child becomes authoritative despite the old review label", () => {
-  const result = deriveHierarchyExactAmountAuthority({
+test("one exact non-closing physical child becomes authoritative despite the old review label", async () => {
+  const result = await deriveHierarchyExactAmountAuthority({
     treeRows: rows(),
     period: "2025-10",
     reconciliationOrganization: "9 Управляющая компания",
@@ -125,8 +125,8 @@ test("one exact non-closing physical child becomes authoritative despite the old
   assert.equal(decision.intalev_path, "Административные расходы / ФЗП и компенсационные выплаты / Компенсации");
 });
 
-test("two non-closing exact children remain blocked as ambiguous", () => {
-  const result = deriveHierarchyExactAmountAuthority({
+test("two non-closing exact children remain blocked as ambiguous", async () => {
+  const result = await deriveHierarchyExactAmountAuthority({
     treeRows: rows([physical({ row: 106, code: "SRC-SECOND", rowId: "F".repeat(64) })]),
     period: "2025-10",
     reconciliationOrganization: "9 Управляющая компания",
@@ -137,10 +137,10 @@ test("two non-closing exact children remain blocked as ambiguous", () => {
   assert.equal(result.blockers.find((item) => item.reconciliation_row === "R034")?.reason, "HIERARCHY_EXACT_AMOUNT_SOURCE_AMBIGUOUS");
 });
 
-test("paired liability gap generically reclassifies exact employee parts from the direct parent article", () => {
+test("paired liability gap generically reclassifies exact employee parts from the direct parent article", async () => {
   const sourceA = "1".repeat(64);
   const sourceB = "2".repeat(64);
-  const result = deriveHierarchyExactAmountAuthority({
+  const result = await deriveHierarchyExactAmountAuthority({
     treeRows: [
       structural({ row: 1, code: "R001", level: 2, label: "Административные расходы", type: "БЛОК" }),
       structural({ row: 10, code: "R100", level: 5, label: "Базовая статья" }),
@@ -168,10 +168,10 @@ test("paired liability gap generically reclassifies exact employee parts from th
   assert.ok(paired.every((item) => item.ECONOMIC_CORRECTION_PROVEN === true));
 });
 
-test("competing exact and paired-liability proofs for one residual remain review evidence without financial pairs", () => {
+test("competing exact and paired-liability proofs for one residual remain review evidence without financial pairs", async () => {
   const exactSource = "9".repeat(64);
   const parentSourceA = "1".repeat(64);
-  const result = deriveHierarchyExactAmountAuthority({
+  const result = await deriveHierarchyExactAmountAuthority({
     treeRows: [
       structural({ row: 1, code: "R001", level: 2, label: "Административные расходы", type: "БЛОК" }),
       structural({ row: 10, code: "R100", level: 5, label: "Базовая статья" }),
@@ -229,9 +229,9 @@ test("competing exact and paired-liability proofs for one residual remain review
   assert.equal(canonicalOutput.counters.posting_rows, 0);
 });
 
-test("exact and paired-liability authorities on different analytical bases remain independently financial", () => {
+test("exact and paired-liability authorities on different analytical bases remain independently financial", async () => {
   const exact = rows();
-  const result = deriveHierarchyExactAmountAuthority({
+  const result = await deriveHierarchyExactAmountAuthority({
     treeRows: [
       ...exact,
       structural({ row: 200, code: "R200", level: 5, label: "Базовая статья 2" }),
@@ -259,12 +259,12 @@ test("exact and paired-liability authorities on different analytical bases remai
   assert.deepEqual(new Set(result.decisions.map((item) => item.reconciliation_row)), new Set(["R034", "R201"]));
 });
 
-test("accepted intergroup hierarchy route uses the one exact common-signature physical ERP set", () => {
+test("accepted intergroup hierarchy route uses the one exact common-signature physical ERP set", async () => {
   const routeId = "GENERIC-RECLASS-ROUTE-1";
   const payrollA = "9".repeat(64);
   const payrollB = "A".repeat(64);
   const compensation = "B".repeat(64);
-  const result = deriveHierarchyExactAmountAuthority({
+  const result = await deriveHierarchyExactAmountAuthority({
     treeRows: [
       structural({ row: 1, code: "R001", level: 2, label: "Административные расходы", type: "БЛОК" }),
       structural({

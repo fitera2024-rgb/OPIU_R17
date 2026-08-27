@@ -62,6 +62,18 @@ function stornoAccounting(source = physical(), overrides = {}) {
   };
 }
 
+function physicalProof(overrides = {}) {
+  return {
+    declared: true,
+    source_operation_proven: true,
+    physical_source_unique: true,
+    pinned_source_reopened: true,
+    source_reuse_checked: true,
+    target_classification_proven: true,
+    ...overrides,
+  };
+}
+
 function materializationCase(overrides = {}) {
   return createMaterializationCase({
     case_id: "CASE-1",
@@ -84,6 +96,7 @@ function materializationCase(overrides = {}) {
     output_route: "READY",
     physical_source: physical(),
     target_accounting: target(),
+    physical_proof: physicalProof(),
     ...overrides,
   });
 }
@@ -105,7 +118,7 @@ function loader(source = physical(), result = target(), operation = "STORNO") {
     СуммаВВалютеКт: null,
     КоличествоДт: null,
     КоличествоКт: null,
-    Содержание: "REPORT_ONLY draft",
+    Содержание: "Переклассификация доказанной операции ERP",
     СчетДтИсточник: source.debit,
     СчетКтИсточник: source.credit,
     ИдентификаторФинЗаписи: source.source_row_id,
@@ -208,6 +221,23 @@ test("READY posting row with incomplete physical identity fails closed", () => {
   throwsCode(() => materializationCase({ correction_allowed: false }), "READY_AUTHORITY_MISSING");
 });
 
+test("READY requires every physical proof flag explicitly true", () => {
+  for (const proof of [
+    undefined,
+    {},
+    physicalProof({ source_operation_proven: false }),
+    physicalProof({ physical_source_unique: false }),
+    physicalProof({ pinned_source_reopened: false }),
+    physicalProof({ source_reuse_checked: false }),
+    physicalProof({ target_classification_proven: false }),
+  ]) {
+    throwsCode(
+      () => materializationCase({ physical_proof: proof }),
+      "READY_PHYSICAL_PROOF_INCOMPLETE",
+    );
+  }
+});
+
 test("READY ADD_ONE_SIDE cannot choose either STORNO or REPOST without explicit direction", () => {
   throwsCode(
     () => materializationCase({ action: "ADD_ONE_SIDE", role: "STANDALONE" }),
@@ -298,6 +328,32 @@ test("explicit STORNO and REPOST remain valid SPORNO rows with incomplete eviden
     assert.equal(row.source.source_row_id, "");
     assert.equal(row.safety.posting_rows, 0);
   }
+});
+
+test("SPORNO never treats an omitted physical proof as proof of a complete-looking source", () => {
+  const value = materializationCase({
+    action: "STORNO",
+    role: "STANDALONE",
+    output_route: "SPORNO",
+    correction_allowed: false,
+    proof_status: "INCOMPLETE",
+    physical_proof: undefined,
+  });
+  const row = postingRow(value);
+  assert.equal(row.source.source_row_id, "");
+  assert.equal(row.loader["ИдентификаторФинЗаписи"], null);
+  assert.equal(row.loader["СчетДт"], null);
+  assert.equal(row.loader["СчетКт"], null);
+});
+
+test("canonical user content rejects technical audit identifiers", () => {
+  const value = materializationCase();
+  const technicalLoader = loader(value.physical_source, stornoAccounting(value.physical_source), "STORNO");
+  technicalLoader["Содержание"] = "Переклассификация | CaseID=CASE-1 | REPORT_ONLY";
+  throwsCode(
+    () => postingRow(value, { loader: technicalLoader }),
+    "TECHNICAL_CONTENT_IN_USER_FIELD",
+  );
 });
 
 test("STORNO cannot replace the exact physical source accounting tuple", () => {

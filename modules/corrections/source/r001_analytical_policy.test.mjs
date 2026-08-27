@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import test from "node:test";
 
 import {
@@ -48,23 +47,29 @@ test("legacy correction families normalize without changing rules/config", () =>
 });
 
 test("engine retains proven STORNO/REPOST generation and hard live gates", () => {
-  const engineSource = fs.readFileSync(new URL("./correction_engine_r001.mjs", import.meta.url), "utf8");
-  assert.match(engineSource, /if \(result\.type === "STORNO_REPOST"\)/);
-  assert.match(engineSource, /makeLoaderRow\(decision, "STORNO"/);
-  assert.match(engineSource, /makeLoaderRow\(decision, "REPOST"/);
-  assert.match(engineSource, /live_executable_rows:\s*0/);
-  assert.match(engineSource, /posting_rows:\s*0/);
-  assert.match(engineSource, /execution_allowed:\s*false/);
-  assert.match(engineSource, /ready_to_upload:\s*false/);
-  assert.match(engineSource, /release_allowed:\s*false/);
-  assert.doesNotMatch(engineSource, /candidate\?\.action\?\.parameters\?\.delta \?\? application\?\.amount/);
-  assert.match(engineSource, /reportRow\.erp_amount/);
-  assert.match(engineSource, /reportRow\.intalev_amount/);
-  assert.match(engineSource, /BLOCKED_CONTEXT_ISOLATION/);
-  assert.match(engineSource, /const humanTrace = \[/);
-  assert.match(engineSource, /`Причина корректировки: \$\{reason\}`/);
-  assert.match(engineSource, /Инталев: \$\{clean\(decision\.intalev_reference\)/);
-  assert.match(engineSource, /ERP: регистратор \$\{clean\(decision\.registrar\)/);
+  const result = buildAnalyticalContext({
+    organization: ORG,
+    period: PERIOD,
+    erp_current: 90,
+    intalev_target: 100,
+    corrections: [correction()],
+  });
+
+  assert.equal(result.analytical_draft_corrections.length, 1);
+  const draft = result.analytical_draft_corrections[0];
+  assert.equal(draft.correction_family, "STORNO_REPOST");
+  assert.equal(draft.reason, "Историческая классификация требует корректировки");
+  assert.deepEqual(draft.evidence_references, ["ERP.xlsx/Лист1/42"]);
+  assert.equal(draft.executable, false);
+  assert.equal(result.counts.live_executable_rows, 0);
+  assert.deepEqual(result.safety, {
+    execution_allowed: false,
+    live_posting_allowed: false,
+    ready_to_upload: false,
+    release_allowed: false,
+    live_delete_allowed: false,
+    live_1c_allowed: false,
+  });
 });
 
 test("proven STORNO_REPOST remains analytical and traceable", () => {

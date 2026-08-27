@@ -164,17 +164,15 @@ function outputRoute(decision, action, source, blockers) {
   const requested = normalizedRequestedRoute(decision);
   if (requested === "REVIEW_ONLY") return "REVIEW_ONLY";
   if (requested === "READY") {
-    if (action === "STORNO" && relevantIntalevAbsenceProof(decision).proven) {
-      // Upstream physical proof is necessary but not sufficient for this
-      // standalone route. The exact-source verifier must reopen the pinned ERP source before it
-      // can promote the canonical case to READY.
-      blockers.push("EXACT_SOURCE_REOPEN_REQUIRED_FOR_READY");
-      return "SPORNO";
-    }
-    if (decision?.correction_allowed === true
+    // A bridge only transports an upstream claim.  It never reopens the pinned
+    // ERP journal and therefore cannot prove freshness or no-reuse.  Promotion
+    // to READY belongs to an exact-source materializer after that verification.
+    blockers.push("EXACT_SOURCE_REOPEN_REQUIRED_FOR_READY");
+    if (!(decision?.correction_allowed === true
       && physicalProofAccepted(decision)
-      && physicallyComplete(source)) return "READY";
-    blockers.push("PHYSICAL_SOURCE_PROOF_INCOMPLETE_FOR_READY");
+      && physicallyComplete(source))) {
+      blockers.push("PHYSICAL_SOURCE_PROOF_INCOMPLETE_FOR_READY");
+    }
     return "SPORNO";
   }
   return "SPORNO";
@@ -276,6 +274,13 @@ function bridgeOne(decision, index, provenance) {
       output_route: route,
       physical_source: source,
       target_accounting: targetAccounting(decision),
+      physical_proof: {
+        source_operation_proven: decision?.SOURCE_OPERATION_PROVEN === true,
+        physical_source_unique: decision?.PHYSICAL_SOURCE_UNIQUE === true,
+        target_classification_proven: decision?.TARGET_CLASSIFICATION_PROVEN === true,
+        pinned_source_reopened: false,
+        source_reuse_checked: false,
+      },
       analytical_basis: {
         reconciliation_row: decision?.reconciliation_row,
         analytical_basis_id: decision?.analytical_basis_id,
@@ -290,6 +295,11 @@ function bridgeOne(decision, index, provenance) {
         path: decision?.intalev_path,
         source_reference: decision?.intalev_reference,
         amount: number(decision?.intalev_target),
+      },
+      business_evidence: {
+        intalev_references: decision?.intalev_references,
+        intalev_technical_reference: decision?.intalev_technical_reference,
+        intalev_document_absent: decision?.intalev_document_absent === true,
       },
       economic_route: {
         route_id: first(decision?.intergroup_reclass_id, decision?.economic_route_id),

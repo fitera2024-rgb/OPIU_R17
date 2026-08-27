@@ -8,12 +8,27 @@ import {
   createCanonicalPostingRow,
   createMaterializationCase,
 } from "./r001_materialization_contract.mjs";
+import { buildR001BusinessContent } from "./r001_business_content.mjs";
 import {
   relevantIntalevAbsenceProof,
 } from "../../reconciliation/source/intalev_source_scope.mjs";
 
 export const R001_STANDALONE_STORNO_SCHEMA =
   "opiu-r001-standalone-storno-materialization.v1";
+
+const BALANCED_PAIR_REQUIRED_BLOCKER = "BALANCED_STORNO_REPOST_PAIR_REQUIRED_FOR_READY";
+const BALANCED_PAIR_REQUIRED_REASON =
+  "односторонний STORNO требует сбалансированной пары STORNO/REPOST для подтверждённого результата";
+const PHYSICAL_SOURCE_INCOMPLETE_REASON =
+  "физическая строка ERP не доказана однозначно; односторонний STORNO оставлен для ручной проверки";
+const PHYSICAL_SOURCE_MISMATCH_REASON =
+  "физическая строка ERP при повторной проверке не совпала с закреплённым доказательством";
+const PHYSICAL_SOURCE_REOPEN_FAILED_REASON =
+  "закреплённый источник ERP не удалось повторно открыть и проверить";
+const PHYSICAL_SOURCE_REUSED_REASON =
+  "физическая строка ERP уже использована другой корректировкой и не может быть использована повторно";
+const CLOSING_PHYSICAL_SOURCE_REASON =
+  "закреплённая строка ERP является закрывающей и не доказывает исходную экономическую операцию";
 
 function text(value) {
   return String(value ?? "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
@@ -255,15 +270,26 @@ function verifiedPhysicalSource(claim, reopened) {
   };
 }
 
-function materializationCaseWith(materializationCase, { route, physicalSource, sourceArticle, blockers }) {
+function materializationCaseWith(materializationCase, {
+  route,
+  physicalSource,
+  physicalProof,
+  sourceArticle,
+  blockers,
+  correctionAllowed = materializationCase.correction_allowed,
+  reason = materializationCase.reason,
+}) {
   return createMaterializationCase({
     ...materializationCase,
     output_route: route,
+    correction_allowed: correctionAllowed,
     physical_source: physicalSource ?? materializationCase.physical_source,
+    physical_proof: physicalProof ?? materializationCase.physical_proof,
     economic: {
       ...materializationCase.economic,
       source_article: sourceArticle ?? materializationCase.economic.source_article,
     },
+    reason,
     blockers: unique(blockers),
     safety: REPORT_ONLY_SAFETY,
   });
@@ -272,6 +298,32 @@ function materializationCaseWith(materializationCase, { route, physicalSource, s
 function loaderForStorno(materializationCase) {
   const source = materializationCase.physical_source;
   const loader = Object.fromEntries(LOADER_A_AA_FIELDS.map((field) => [field, null]));
+  const baseContent = buildR001BusinessContent({
+    operation: "STORNO",
+    erp: {
+      document: source.document,
+      date: source.date,
+      postingNumber: source.posting_number,
+      debit: source.debit,
+      credit: source.credit,
+      amount: materializationCase.correction_amount,
+      organization: source.source_organization,
+      debitDepartment: source.debit_department,
+      creditDepartment: source.credit_department,
+    },
+    economic: { sourceArticle: materializationCase.economic?.source_article },
+    decision: materializationCase.business_evidence,
+    caseId: materializationCase.case_id,
+    pairId: materializationCase.pair_id,
+    sourceRowId: source.source_row_id,
+    intalevDocumentNotPresented: materializationCase.business_evidence?.intalev_document_absent === true
+      && materializationCase.source_scope?.relevant_intalev_absence_proven === true,
+  });
+  const userFacingContent = baseContent.split(" | REPORT_ONLY")[0];
+  const reason = text(materializationCase.reason)
+    || (materializationCase.output_route === "SPORNO"
+      ? "требуется ручная проверка: физическая строка ERP не доказана однозначно"
+      : "");
   Object.assign(loader, {
     "СчетДт": source.debit || null,
     "СчетКт": source.credit || null,
@@ -280,14 +332,9 @@ function loaderForStorno(materializationCase) {
     "ПодразделениеКт": source.credit_department || null,
     "СуммаВВалютеУчета": materializationCase.correction_amount,
     "СуммаВВалютеОтчетности": materializationCase.correction_amount,
-    "Содержание": [
-      `СТОРНО: снимаем ${moneyText(materializationCase.correction_amount)} со статьи «${text(materializationCase.economic?.source_article) || "исходная статья ERP"}»`,
-      `Причина: ${text(materializationCase.reason) || "сумма присутствует только в ERP и подтверждена сверкой"}`,
-      `Источник Инталев: строка сверки ${text(materializationCase.intalev_source?.reconciliation_row || materializationCase.analytical_basis?.reconciliation_row) || "указана в сверке"}; путь «${text(materializationCase.intalev_source?.path) || "см. доказательную сверку ОПИУ"}»`,
-      text(source.content) ? `Исходное содержание: ${text(source.content)}` : "",
-      `Источник ERP: ${text(source.document) || "документ не указан"}; проводка ${text(source.posting_number || source.posting_no) || "не указана"}; строка ${text(source.source_range) || "не указана"}`,
-      `Техническая ссылка: CaseID=${materializationCase.case_id}; SourceRowID=${source.source_row_id}`,
-    ].filter(Boolean).join(" | "),
+    "Содержание": reason
+      ? `${userFacingContent} | Причина: ${reason}`
+      : userFacingContent,
     "СчетДтИсточник": source.debit || null,
     "СчетКтИсточник": source.credit || null,
     "ИдентификаторФинЗаписи": source.source_row_id || null,
@@ -332,19 +379,51 @@ function canonicalStornoRow(materializationCase) {
   });
 }
 
-function blockedCase(materializationCase, blockers) {
-  return materializationCaseWith(materializationCase, {
-    route: materializationCase.output_route === "REVIEW_ONLY" ? "REVIEW_ONLY" : "SPORNO",
-    blockers: [...materializationCase.blockers, ...blockers],
-  });
-}
-
 export async function materializeStandaloneStornoCases(decisions = [], { reopenSource = reopenPinnedSource } = {}) {
   if (!Array.isArray(decisions)) throw new TypeError("Standalone STORNO decisions must be an array");
   if (typeof reopenSource !== "function") throw new TypeError("reopenSource must be a function");
   const canonicalPostingRows = [];
   const caseUpdates = [];
   const skipped = [];
+  const usedPhysicalSources = new Set();
+  const recordSporno = ({
+    index,
+    originalCase,
+    blockers,
+    reason,
+    physicalSource = {},
+    physicalProof = {
+      source_operation_proven: false,
+      physical_source_unique: false,
+      target_classification_proven: true,
+      pinned_source_reopened: false,
+      source_reuse_checked: false,
+    },
+    sourceArticle,
+  }) => {
+    const resultBlockers = unique([...blockers, BALANCED_PAIR_REQUIRED_BLOCKER]);
+    const materializationCase = materializationCaseWith(originalCase, {
+      route: "SPORNO",
+      physicalSource,
+      physicalProof,
+      sourceArticle,
+      correctionAllowed: false,
+      reason,
+      blockers: [
+        ...originalCase.blockers.filter((item) => text(item) !== "EXACT_SOURCE_REOPEN_REQUIRED_FOR_READY"),
+        ...resultBlockers,
+      ],
+    });
+    const canonicalPostingRow = canonicalStornoRow(materializationCase);
+    canonicalPostingRows.push(canonicalPostingRow);
+    caseUpdates.push(Object.freeze({
+      upstream_decision_index: index,
+      result: "SPORNO",
+      blockers: Object.freeze(resultBlockers),
+      materialization_case: materializationCase,
+      canonical_posting_row: canonicalPostingRow,
+    }));
+  };
 
   for (let index = 0; index < decisions.length; index += 1) {
     const decision = decisions[index];
@@ -362,28 +441,36 @@ export async function materializeStandaloneStornoCases(decisions = [], { reopenS
     const source = originalCase.physical_source;
     if (isClosingAccount(source.debit) || isClosingAccount(source.credit)) {
       const blockers = ["CLOSING_ROW_NOT_ECONOMIC_SOURCE"];
-      caseUpdates.push(Object.freeze({
-        upstream_decision_index: index,
-        result: "BLOCKED",
-        blockers: Object.freeze(blockers),
-        materialization_case: blockedCase(originalCase, blockers),
-      }));
+      recordSporno({
+        index,
+        originalCase,
+        blockers,
+        reason: CLOSING_PHYSICAL_SOURCE_REASON,
+      });
       continue;
     }
 
-    const canAttemptReady = decision?.SOURCE_OPERATION_PROVEN === true
+    const canAttemptExactReopen = decision?.SOURCE_OPERATION_PROVEN === true
       && decision?.PHYSICAL_SOURCE_UNIQUE === true
       && originalCase.correction_allowed === true
       && exactPhysicalClaimComplete(source);
 
-    if (!canAttemptReady) {
+    if (!canAttemptExactReopen) {
       const blockers = ["EXACT_PHYSICAL_SOURCE_INCOMPLETE_OR_AMBIGUOUS"];
-      caseUpdates.push(Object.freeze({
-        upstream_decision_index: index,
-        result: "BLOCKED",
-        blockers: Object.freeze(blockers),
-        materialization_case: blockedCase(originalCase, blockers),
-      }));
+      recordSporno({
+        index,
+        originalCase,
+        blockers,
+        reason: PHYSICAL_SOURCE_INCOMPLETE_REASON,
+        physicalSource: source,
+        physicalProof: {
+          source_operation_proven: decision?.SOURCE_OPERATION_PROVEN === true,
+          physical_source_unique: decision?.PHYSICAL_SOURCE_UNIQUE === true,
+          target_classification_proven: true,
+          pinned_source_reopened: false,
+          source_reuse_checked: false,
+        },
+      });
       continue;
     }
 
@@ -391,39 +478,57 @@ export async function materializeStandaloneStornoCases(decisions = [], { reopenS
       const reopened = await reopenSource({ decision, materialization_case: originalCase });
       const blockers = compareExactSource(originalCase, reopened);
       if (blockers.length) {
-        caseUpdates.push(Object.freeze({
-          upstream_decision_index: index,
-          result: "BLOCKED",
-          blockers: Object.freeze(blockers),
-          materialization_case: blockedCase(originalCase, blockers),
-        }));
+        recordSporno({
+          index,
+          originalCase,
+          blockers,
+          reason: PHYSICAL_SOURCE_MISMATCH_REASON,
+        });
         continue;
       }
       const verifiedSource = verifiedPhysicalSource(source, reopened);
+      const physicalSourceKey = [
+        verifiedSource.source_archive_sha256,
+        verifiedSource.journal_sha256,
+        verifiedSource.source_sheet,
+        verifiedSource.source_range,
+        verifiedSource.source_row_id,
+      ].map(text).join("\u0000");
+      if (usedPhysicalSources.has(physicalSourceKey)) {
+        const reuseBlockers = ["PHYSICAL_SOURCE_ALREADY_USED"];
+        recordSporno({
+          index,
+          originalCase,
+          blockers: reuseBlockers,
+          reason: PHYSICAL_SOURCE_REUSED_REASON,
+        });
+        continue;
+      }
       const sourceArticle = text(reopened.row.article) || originalCase.economic.source_article;
-      const materializationCase = materializationCaseWith(originalCase, {
-        route: "READY",
+      usedPhysicalSources.add(physicalSourceKey);
+      recordSporno({
+        index,
+        originalCase,
+        blockers: [],
+        reason: BALANCED_PAIR_REQUIRED_REASON,
         physicalSource: verifiedSource,
+        physicalProof: {
+          source_operation_proven: true,
+          physical_source_unique: true,
+          target_classification_proven: true,
+          pinned_source_reopened: true,
+          source_reuse_checked: true,
+        },
         sourceArticle,
-        blockers: originalCase.blockers.filter((item) => text(item) !== "EXACT_SOURCE_REOPEN_REQUIRED_FOR_READY"),
       });
-      const canonicalPostingRow = canonicalStornoRow(materializationCase);
-      canonicalPostingRows.push(canonicalPostingRow);
-      caseUpdates.push(Object.freeze({
-        upstream_decision_index: index,
-        result: "READY",
-        blockers: Object.freeze([]),
-        materialization_case: materializationCase,
-        canonical_posting_row: canonicalPostingRow,
-      }));
     } catch (error) {
       const blocker = text(error?.code) || `EXACT_SOURCE_REOPEN_FAILED:${text(error?.message) || "UNKNOWN"}`;
-      caseUpdates.push(Object.freeze({
-        upstream_decision_index: index,
-        result: "BLOCKED",
-        blockers: Object.freeze([blocker]),
-        materialization_case: blockedCase(originalCase, [blocker]),
-      }));
+      recordSporno({
+        index,
+        originalCase,
+        blockers: [blocker],
+        reason: PHYSICAL_SOURCE_REOPEN_FAILED_REASON,
+      });
     }
   }
 

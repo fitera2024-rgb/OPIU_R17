@@ -143,7 +143,7 @@ test("15. disputed state is visible in filename, content, audit and all live gat
   assert.match(buildDisputedOwnerUploadFileName({ organization: "ООО Источник", sourceDate: "2025-11" }), /_ОПИУ_ГОТОВО_СПОРНО\.xlsx$/);
   assert.match(row[15], /^Операция REPOST \| ERP:/);
   assert.match(row[15], /Статья: «ФЗП» → «НДФЛ»/);
-  assert.match(row[15], /\| REPORT_ONLY \| CaseID=CASE-1 \| PairID=PAIR-1 \| SourceRowID=A{64}$/);
+  assert.doesNotMatch(row[15], /REPORT_ONLY|CaseID|PairID|SourceRowID/);
   assert.equal(row.audit.status, "_СПОРНО");
   assert.equal(row.audit.executionAllowed, false);
   assert.equal(row.audit.live1cAllowed, false);
@@ -295,6 +295,6 @@ test("20. sparse economic route keeps business content, signed STORNO and blank 
   assert.ok(result.canonical_posting_rows.every((row) => row.loader["ИдентификаторФинЗаписи"] === null));
   assert.match(result.canonical_posting_rows[0].loader["Содержание"], /^Операция STORNO \| .*Статья:/);
   assert.match(result.canonical_posting_rows[1].loader["Содержание"], /^Операция REPOST \| .*Статья:/);
-  assert.ok(result.canonical_posting_rows.every((row) => row.loader["Содержание"].includes("REPORT_ONLY")));
+  assert.ok(result.canonical_posting_rows.every((row) => !/REPORT_ONLY|CaseID|PairID|SourceRowID/.test(row.loader["Содержание"])));
   assert.ok(result.canonical_posting_rows.every((row) => row.safety.posting_rows === 0));
 });

@@ -9,6 +9,7 @@ import {
   createCanonicalPostingRow,
   createMaterializationCase,
 } from "./r001_materialization_contract.mjs";
+import { buildR001BusinessContent } from "./r001_business_content.mjs";
 import { canonicalSpornoRowFromMaterializationCase } from "./r001_canonical_output_contract.mjs";
 
 const MONEY_EPSILON = 0.0000001;
@@ -26,13 +27,6 @@ function numberValue(value) {
 function cents(value) {
   const amount = numberValue(value);
   return amount === null ? null : Math.round(amount * 100);
-}
-
-function moneyText(value) {
-  return Number(value ?? 0).toLocaleString("ru-RU", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
 }
 
 function sha256Buffer(buffer) {
@@ -263,12 +257,8 @@ function canonicalReadyPhysicalComplete(raw, source) {
 export function materializeExactSourceRow({ raw, operation, partCents, sourceCode, sourceLabel, targetCode, targetLabel: newTargetLabel, decision, reconciliationOrganization, source, subset, outputRoute = "SPORNO" }) {
   const sourceCents = cents(raw.amount);
   const isStorno = operation === "STORNO";
-  // The owner loader represents STORNO by operation kind, not by a negative amount.
-  // Keep the source sign for audit, but emit positive loader measures for STORNO.
-  const signedPartCents = Math.abs(isStorno ? sourceCents : partCents);
-  const ratio = isStorno
-    ? (sourceCents === 0 ? 1 : Math.abs(sourceCents) / sourceCents)
-    : (sourceCents === 0 ? 1 : signedPartCents / sourceCents);
+  const signedPartCents = isStorno ? -Math.abs(sourceCents ?? partCents ?? 0) : Math.abs(partCents ?? 0);
+  const ratio = sourceCents === 0 ? 1 : signedPartCents / sourceCents;
   const debitAnalytics = [raw.debit_analytics_1, raw.debit_analytics_2, raw.debit_analytics_3];
   const creditAnalytics = [raw.credit_analytics_1, raw.credit_analytics_2, raw.credit_analytics_3];
   const slot = isStorno ? null : (clean(sourceLabel) ? classificationSlot(raw, sourceLabel) : null);
@@ -278,17 +268,31 @@ export function materializeExactSourceRow({ raw, operation, partCents, sourceCod
   const materializationId = stableId("MAT-R001", [decision.case_id, decision.pair_id, operation, raw.source_row_id, targetCode, signedPartCents]);
   const normalizedOutputRoute = clean(outputRoute).toUpperCase();
   const status = normalizedOutputRoute === "READY" ? "ГОТОВО" : "_СПОРНО";
-  const userAction = isStorno
-    ? `СТОРНО: снимаем ${moneyText(signedPartCents / 100)} со статьи «${clean(sourceLabel) || clean(raw.article) || "исходная статья ERP"}»`
-    : `РЕПОСТ: относим ${moneyText(signedPartCents / 100)} на статью «${clean(newTargetLabel) || "целевая статья ERP"}»`;
-  const content = [
-    userAction,
-    `Причина: ${clean(decision.reason) || `переклассификация расходов «${clean(sourceLabel)}» → «${clean(newTargetLabel)}» по сверке ОПИУ`}`,
-    `Источник Инталев: строка сверки ${clean(decision.reconciliation_row) || clean(sourceCode) || "указана в сверке"}; путь «${clean(decision.intalev_path) || "см. доказательную сверку ОПИУ"}»${clean(decision.intalev_reference) ? `; ячейка/агрегат: ${clean(decision.intalev_reference)}` : ""}`,
-    clean(raw.content) ? `Исходное содержание: ${clean(raw.content)}` : "",
-    `Источник ERP: ${clean(raw.document) || "документ не указан"}; проводка ${clean(raw.posting_no) || "не указана"}; строка ${clean(raw.source_range) || "не указана"}`,
-    `Статус: ${status}; техническая ссылка: PairID=${clean(decision.pair_id)}; SourceRowID=${raw.source_row_id}`,
-  ].filter(Boolean).join(" | ");
+  const baseContent = buildR001BusinessContent({
+    operation,
+    erp: {
+      document: raw.document,
+      date: raw.date,
+      postingNumber: raw.posting_no,
+      debit: raw.debit,
+      credit: raw.credit,
+      amount: Math.abs(signedPartCents) / 100,
+      organization: raw.organization,
+      debitDepartment: raw.debit_department,
+      creditDepartment: raw.credit_department,
+    },
+    economic: {
+      sourceArticle: sourceLabel,
+      targetArticle: isStorno ? sourceLabel : newTargetLabel,
+    },
+    decision,
+    caseId: decision.case_id,
+    pairId: decision.pair_id,
+    sourceRowId: raw.source_row_id,
+  });
+  const content = clean(decision.reason)
+    ? baseContent.replace(" | REPORT_ONLY", ` | Причина: ${clean(decision.reason)} | REPORT_ONLY`)
+    : baseContent;
   const row = [
     raw.debit, raw.credit, raw.debit_currency, raw.credit_currency, operation,
     raw.debit_department, raw.credit_department, raw.debit_direction, raw.credit_direction,
@@ -379,7 +383,7 @@ export function materializeExactSourceRow({ raw, operation, partCents, sourceCod
       activity: clean(raw.activity),
       scenario: clean(raw.scenario),
     };
-    const amount = signedPartCents / 100;
+    const amount = Math.abs(signedPartCents) / 100;
     const materializationCase = createMaterializationCase({
       ...decision.materialization_case,
       action: operation,
@@ -395,6 +399,19 @@ export function materializeExactSourceRow({ raw, operation, partCents, sourceCod
       },
       physical_source: physicalSource,
       target_accounting: resultAccounting,
+      physical_proof: {
+        source_operation_proven: true,
+        physical_source_unique: subset.unique === true,
+        target_classification_proven: isStorno || Boolean(slot),
+        pinned_source_reopened: true,
+        source_reuse_checked: true,
+      },
+      business_evidence: {
+        ...decision.materialization_case.business_evidence,
+        intalev_references: decision.intalev_references
+          ?? decision.materialization_case.business_evidence?.intalev_references,
+        intalev_technical_reference: decision.intalev_technical_reference,
+      },
       safety: REPORT_ONLY_SAFETY,
     });
     const loader = Object.fromEntries(LOADER_A_AA_FIELDS.map((field, index) => [field, row[index]]));

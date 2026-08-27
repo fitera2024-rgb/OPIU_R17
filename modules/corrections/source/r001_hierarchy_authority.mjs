@@ -74,6 +74,93 @@ function stableId(prefix, payload) {
   return `${prefix}-${crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex").slice(0, 24).toUpperCase()}`;
 }
 
+const OVERLAPPING_AUTHORITY_REVIEW_LABELS = Object.freeze([
+  "UNPROVEN",
+  "_СПОРНО",
+  "REVIEW_ONLY",
+  "NO_POSTING",
+  "NOT_RELEASE_AUTHORITY",
+]);
+
+function hierarchyEconomicBasis(decision) {
+  return [
+    text(decision?.period),
+    normalized(decision?.reconciliation_organization || decision?.organization),
+    text(decision?.analytical_basis_id || decision?.reconciliation_row).toUpperCase(),
+    normalized(decision?.intalev_path),
+    normalized(decision?.target_article),
+  ].join("\u0000");
+}
+
+function provenNonOverlappingPartition(decisions) {
+  const atoms = decisions.map((decision) => text(decision?.residual_atom_id)).filter(Boolean);
+  return atoms.length === decisions.length
+    && new Set(atoms).size === atoms.length
+    && decisions.every((decision) => [
+      decision?.allocation_status,
+      decision?.residual_allocation_status,
+    ].some((value) => text(value).toUpperCase() === "PROVEN_ALLOCATION"));
+}
+
+/**
+ * Exact-amount and paired-liability discovery are independent physical proof
+ * paths. When both paths close the same analytical residual, neither path is
+ * economic authority unless a non-overlapping residual partition is explicit.
+ * Both physical traces remain available for review, while financial authority
+ * remains fail-closed so a single residual cannot be materialized twice.
+ */
+function arbitrateOverlappingHierarchyAuthority(decisions) {
+  const byBasis = new Map();
+  for (const decision of decisions) {
+    if (!["HIERARCHY_EXACT_SOURCE", "HIERARCHY_PAIRED_LIABILITY_RECLASS"].includes(text(decision?.role))) continue;
+    const key = hierarchyEconomicBasis(decision);
+    if (!byBasis.has(key)) byBasis.set(key, []);
+    byBasis.get(key).push(decision);
+  }
+  const suppressed = new Map();
+  let overlapCases = 0;
+  for (const [basis, candidates] of byBasis) {
+    const exact = candidates.filter((decision) => text(decision?.role) === "HIERARCHY_EXACT_SOURCE");
+    const paired = candidates.filter((decision) => text(decision?.role) === "HIERARCHY_PAIRED_LIABILITY_RECLASS");
+    if (!exact.length || !paired.length || provenNonOverlappingPartition(candidates)) continue;
+    const exactSourceRowIds = new Set(exact.map((decision) => text(decision?.source_row_id).toUpperCase()).filter(Boolean));
+    const sharedPhysicalLiability = paired.some((decision) =>
+      exactSourceRowIds.has(text(decision?.paired_liability_source_row_id).toUpperCase()));
+    if (!sharedPhysicalLiability) continue;
+    const exactCents = exact.reduce((sum, decision) => sum + Math.abs(cents(decision?.correction_amount) ?? 0), 0);
+    const pairedCents = paired.reduce((sum, decision) => sum + Math.abs(cents(decision?.correction_amount) ?? 0), 0);
+    if (!exactCents || exactCents !== pairedCents) continue;
+    overlapCases += 1;
+    const arbitrationId = stableId("HIERARCHY-AUTHORITY-OVERLAP", [basis, exactCents]);
+    for (const decision of candidates) {
+      suppressed.set(decision, Object.freeze({
+        ...decision,
+        approval_state: "_СПОРНО",
+        proof_status: "UNPROVEN_OVERLAPPING_HIERARCHY_AUTHORITY",
+        classification: "REVIEW_ONLY_OVERLAPPING_HIERARCHY_AUTHORITY",
+        correction_allowed: false,
+        accepted_economic_reclass: false,
+        ECONOMIC_ROUTE_PROVEN: false,
+        ECONOMIC_CORRECTION_PROVEN: false,
+        financial_materialization_forbidden: true,
+        labels: OVERLAPPING_AUTHORITY_REVIEW_LABELS,
+        hierarchy_authority_arbitration_id: arbitrationId,
+        hierarchy_authority_arbitration_status: "OVERLAPPING_PHYSICAL_PROOFS_REVIEW_ONLY",
+        hierarchy_authority_competing_roles: Object.freeze([
+          "HIERARCHY_EXACT_SOURCE",
+          "HIERARCHY_PAIRED_LIABILITY_RECLASS",
+        ]),
+        reason: `${text(decision.reason)} | Два физических пути покрывают один остаток; экономическое распределение не доказано`,
+      }));
+    }
+  }
+  return Object.freeze({
+    decisions: Object.freeze(decisions.map((decision) => suppressed.get(decision) ?? decision)),
+    overlap_cases: overlapCases,
+    review_only_decisions: suppressed.size,
+  });
+}
+
 function targetDelta(row) {
   return amount(first(row, [
     "Дельта = Инталев − ERP",
@@ -1128,9 +1215,12 @@ export async function deriveHierarchyExactAmountAuthority({
   });
   decisions.push(...pairedAuthority.decisions);
   blockers.push(...pairedAuthority.blockers);
+  const arbitration = arbitrateOverlappingHierarchyAuthority(decisions);
+  const actionableAuthorityCount = arbitration.decisions.filter((decision) =>
+    decision?.ECONOMIC_CORRECTION_PROVEN === true && decision?.correction_allowed === true).length;
   return Object.freeze({
     schema_version: HIERARCHY_AUTHORITY_SCHEMA,
-    decisions: Object.freeze(decisions),
+    decisions: arbitration.decisions,
     blockers: Object.freeze(blockers),
     covered_economic_route_case_ids: Object.freeze([...intergroupAuthority.coveredRouteCaseIds]),
     audit: Object.freeze({
@@ -1140,7 +1230,12 @@ export async function deriveHierarchyExactAmountAuthority({
       hierarchy_residual_settlement_decisions: residualAuthority.decisions.length,
       exact_authority_decisions: exactAmountDecisionCount,
       paired_liability_decisions: pairedAuthority.decisions.length,
-      total_hierarchy_authority_decisions: decisions.length,
+      hierarchy_physical_evidence_decisions: decisions.length,
+      actionable_hierarchy_authority_decisions: actionableAuthorityCount,
+      review_only_hierarchy_authority_decisions: decisions.length - actionableAuthorityCount,
+      total_hierarchy_authority_decisions: actionableAuthorityCount,
+      overlapping_authority_cases: arbitration.overlap_cases,
+      overlapping_authority_review_only_decisions: arbitration.review_only_decisions,
       unresolved_positive_deltas: blockers.length,
     }),
   });

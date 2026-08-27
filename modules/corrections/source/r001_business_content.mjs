@@ -124,14 +124,21 @@ function formatIntalevReference(reference) {
   return `${reference.code ? `${reference.code}: ` : ""}${parts.join(", ")}`;
 }
 
+function safeBusinessReason(value) {
+  const normalized = text(value);
+  if (!normalized) return "";
+  if (/\b(?:CaseID|PairID|SourceRowID|UploadID|DraftID|AuditIdentity|Engine|JournalSHA|EffectSHA256|SHA-?256|REPORT_ONLY)\b/i.test(normalized)) return "";
+  if (/\b(?:execution_allowed|ready_to_upload|release_allowed|live_1c_allowed|live_delete_allowed|posting_rows)\s*=/i.test(normalized)) return "";
+  if (/(?:[A-Za-z]:[\\/]|\\\\)/.test(normalized)) return "";
+  return normalized;
+}
+
 export function buildR001BusinessContent({
   operation,
   erp = {},
   economic = {},
   decision = {},
-  caseId,
-  pairId,
-  sourceRowId,
+  reason,
   intalevDocumentNotPresented = false,
 } = {}) {
   const segments = [`Операция ${text(operation).toUpperCase()}`];
@@ -170,9 +177,7 @@ export function buildR001BusinessContent({
     segments.push("документ операций Инталев не представлен");
   }
 
-  const audit = ["REPORT_ONLY"];
-  if (text(caseId)) audit.push(`CaseID=${text(caseId)}`);
-  if (text(pairId)) audit.push(`PairID=${text(pairId)}`);
-  if (text(sourceRowId)) audit.push(`SourceRowID=${text(sourceRowId)}`);
-  return [...segments, ...audit].join(" | ");
+  const businessReason = safeBusinessReason(reason ?? decision?.reason);
+  if (businessReason) segments.push(`Причина: ${businessReason}`);
+  return segments.join(" | ");
 }

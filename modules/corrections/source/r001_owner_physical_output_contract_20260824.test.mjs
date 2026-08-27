@@ -110,6 +110,14 @@ function materializationCase({
     output_route: route,
     physical_source: source,
     target_accounting: accounting(source, operation),
+    physical_proof: {
+      declared: true,
+      source_operation_proven: true,
+      physical_source_unique: true,
+      pinned_source_reopened: true,
+      source_reuse_checked: true,
+      target_classification_proven: true,
+    },
     analytical_basis: {},
     economic_route: { accepted: true, proof_status: "ECONOMIC_RECLASS_PROVEN" },
     source_scope: {},
@@ -132,7 +140,7 @@ function loaderFor(materialization, operation) {
     "ПодразделениеКт": result.credit_department || null,
     "СуммаВВалютеУчета": 125,
     "СуммаВВалютеОтчетности": 125,
-    "Содержание": `REPORT_ONLY ${operation}`,
+    "Содержание": `Операция ${operation}: исправление доказанной классификации ERP`,
     "СчетДтИсточник": source.debit || null,
     "СчетКтИсточник": source.credit || null,
     "ИдентификаторФинЗаписи": source.source_row_id || null,
@@ -237,6 +245,11 @@ test("READY and SPORNO are separate canonical destinations with one immutable ro
   const sporno = canonicalSpornoRowFromMaterializationCase(materializationCase({
     operation: "REPOST",
     route: "SPORNO",
+    source: physicalSource({
+      source_range: "B13:AG13",
+      source_row_id: "ERP-ROW-13",
+      posting_number: "5",
+    }),
     id: "SPORNO",
   }));
   const output = collectCanonicalFinancialOutput([ready, sporno]);

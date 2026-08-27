@@ -55,10 +55,10 @@ const DATE_FORMAT = "dd.mm.yyyy";
 
 const LOADER_HEADERS = LOADER_A_AA_FIELDS;
 
-const OWNER_UPLOAD_TEMPLATE = "CORR_ORGANIZATION_DATE.xlsx";
-const DELETION_WORKBOOK_TEMPLATE = "Удаление_YEAR.xlsx";
-const CORRECTIONS_REGISTRY_TEMPLATE = "Реестр_YEAR.xlsx";
-const DISCREPANCY_REGISTRY_TEMPLATE = "Расхождения_PERIOD.xlsx";
+const OWNER_UPLOAD_TEMPLATE = "[ORGANIZATION][DATE]_ОПИУ_ГОТОВО.xlsx";
+const DELETION_WORKBOOK_TEMPLATE = "Удаление_операций_ОПИУ_УК_YEAR_R005.xlsx";
+const CORRECTIONS_REGISTRY_TEMPLATE = "Реестр_корректировок_ОПИУ_УК_YEAR_R005.xlsx";
+const DISCREPANCY_REGISTRY_TEMPLATE = "Реестр_проводок_расхождений_ОПИУ_PERIOD_R005.xlsx";
 
 const DECISION_FIELDS = [
   ["case_id", "CaseID"],
@@ -168,6 +168,14 @@ function clean(value) {
   return String(value ?? "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
 }
 
+function scopedManifestRunIdentity(sourceRunId, internalRunId) {
+  const engineRunId = clean(internalRunId);
+  return {
+    run_id: clean(sourceRunId) || engineRunId,
+    engine_run_id: engineRunId,
+  };
+}
+
 function normalizedApproval(value) {
   return clean(value).toUpperCase();
 }
@@ -257,6 +265,31 @@ function stableId(prefix, payload, length = 20) {
   return `${prefix}-${hash.slice(0, length)}`;
 }
 
+function stableDecisionIdentity(decision) {
+  return clean(decision?.embedded_decision_identity)
+    || [clean(decision?.case_id), clean(decision?.pair_id), clean(decision?.reconciliation_row), clean(decision?.role)]
+      .filter(Boolean).join("|")
+    || stableId("CASE", decision);
+}
+
+function mergeProvidedAndAutonomousDecisions(providedDecisions, autonomousDecisions = []) {
+  if (providedDecisions === null || providedDecisions === undefined) return null;
+  const mergedByIdentity = new Map();
+  for (const decision of providedDecisions) {
+    mergedByIdentity.set(stableDecisionIdentity(decision), decision);
+  }
+  for (const decision of autonomousDecisions) {
+    const identity = stableDecisionIdentity(decision);
+    if (!mergedByIdentity.has(identity)) mergedByIdentity.set(identity, decision);
+  }
+  return [...mergedByIdentity.values()];
+}
+
+function excludeHierarchyCoveredEconomicRows(rows, coveredEconomicRouteCaseIds = []) {
+  const covered = new Set(coveredEconomicRouteCaseIds.map((caseId) => clean(caseId)).filter(Boolean));
+  return rows.filter((row) => !covered.has(clean(row.case_id)) && !covered.has(clean(row.pair_id)));
+}
+
 async function sha256(filePath) {
   const bytes = await fs.readFile(filePath);
   return crypto.createHash("sha256").update(bytes).digest("hex").toUpperCase();
@@ -278,21 +311,17 @@ function organizationForFile(value) {
 function ownerUploadOrganizationLabel(value) {
   const text = String(value ?? "").trim();
   if (!text) return "ИСТОЧНИК НЕ ОПРЕДЕЛЕН";
-  const safe = text
+  return text
     .replace(/[«»"„“]/g, " ")
     .replace(/[<>:/\\|?*]/g, "_")
-    .replace(/\s+/g, "_")
     .trim();
-  if (safe.length <= 24) return safe;
-  const suffix = crypto.createHash("sha256").update(safe).digest("hex").slice(0, 6).toUpperCase();
-  return `${safe.slice(0, 17)}_${suffix}`;
 }
 
 function ownerUploadDateLabel(rawPeriod) {
   const text = clean(rawPeriod);
   const monthGroups = text.match(/\d{4}-(0[1-9]|1[0-2])/g);
   const lastMonth = monthGroups && monthGroups.length > 0 ? monthGroups[monthGroups.length - 1] : text;
-  return fileSafe(lastMonth || "ПЕРИОД");
+  return fileSafe(periodEndDate(lastMonth) || lastMonth || "ПЕРИОД");
 }
 
 function periodYearLabel(rawPeriod) {
@@ -2212,9 +2241,45 @@ async function buildEnrichedReconciliation(workbook, materializationRows, output
   await saveWorkbook(workbook, outputPath);
 }
 
+function exactUniqueDecisionRows(rows = []) {
+  const seen = new Set();
+  const unique = [];
+  for (const row of rows) {
+    const identity = JSON.stringify(row);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    unique.push(row);
+  }
+  return unique;
+}
+
+function canonicalLoaderContent(audit = {}) {
+  if (Array.isArray(audit.loader_values) && audit.loader_values.length > 15) {
+    return audit.loader_values[15] ?? "";
+  }
+  return audit.loader?.["Содержание"] ?? "";
+}
+
+function disputedTraceRow(audit) {
+  return [
+    audit.pair_id, audit.audit_identity, audit.operation, audit.period, audit.source_organization,
+    audit.source_range, audit.document, audit.posting_number, audit.amount,
+    canonicalLoaderContent(audit), [
+      `AuditIdentity=${audit.audit_identity}`,
+      `CaseID=${audit.case_id}`,
+      `SourceRowID=${audit.source_row_id}`,
+      `SourceArchiveSHA256=${audit.source_archive_sha256}`,
+      `JournalSHA256=${audit.journal_sha256}`,
+      `Route=${audit.output_route}`,
+      `State=${audit.materialization_state}`,
+      `Blockers=${(audit.blockers ?? []).join(",")}`,
+    ].join(" | "),
+  ];
+}
+
 async function buildMasterRegistry(decisions, actions, metadata, outputPath, disputedRows = [], reviewRows = [], analyticalPolicy = null, materializationRows = []) {
   const workbook = Workbook.create();
-  const allDecisionRows = [...actions.pairRows, ...reviewRows];
+  const allDecisionRows = exactUniqueDecisionRows([...actions.pairRows, ...reviewRows]);
   const allBlockerRows = [...actions.blockers, ...reviewRows];
   const passport = addSheet(workbook, "00_Паспорт");
   styleTitle(passport, 0, 8, "Реестр движка корректировок ОПИУ R001");
@@ -2283,20 +2348,9 @@ async function buildMasterRegistry(decisions, actions, metadata, outputPath, dis
   styleTitle(disputedTrace, 0, disputedTraceHeaders.length, "Полная трасса спорных загрузочных строк");
   writeMatrix(disputedTrace, 2, 0, [disputedTraceHeaders]);
   styleHeader(disputedTrace.getRangeByIndexes(2, 0, 1, disputedTraceHeaders.length));
-  const disputedTraceRows = materializationRows.filter((row) => row.output_route === "SPORNO").map((audit) => [
-    audit.pair_id, audit.audit_identity, audit.operation, audit.period, audit.source_organization,
-    audit.source_range, audit.document, audit.posting_number, audit.amount,
-    audit.reason, [
-      `AuditIdentity=${audit.audit_identity}`,
-      `CaseID=${audit.case_id}`,
-      `SourceRowID=${audit.source_row_id}`,
-      `SourceArchiveSHA256=${audit.source_archive_sha256}`,
-      `JournalSHA256=${audit.journal_sha256}`,
-      `Route=${audit.output_route}`,
-      `State=${audit.materialization_state}`,
-      `Blockers=${(audit.blockers ?? []).join(",")}`,
-    ].join(" | "),
-  ]);
+  const disputedTraceRows = materializationRows
+    .filter((row) => row.output_route === "SPORNO")
+    .map(disputedTraceRow);
   if (disputedTraceRows.length) {
     writeMatrix(disputedTrace, 3, 0, disputedTraceRows);
     styleBody(disputedTrace.getRangeByIndexes(3, 0, disputedTraceRows.length, disputedTraceHeaders.length));
@@ -2428,7 +2482,10 @@ async function main() {
     organization: serviceOrganizationName || reconciliation.reconciliationOrganization,
     period: requestedPeriod || reconciliation.reconciliationPeriod || "",
   });
-  const decisions = providedDecisions ?? candidates;
+  const decisions = mergeProvidedAndAutonomousDecisions(
+    providedDecisions,
+    candidates,
+  ) ?? candidates;
   const decisionSha = decisionPath ? await sha256(decisionPath) : "";
   const selectedOrganization = serviceOrganizationName || reconciliation.reconciliationOrganization || clean(discoveryPolicy.zero_sum_internal_reclassification?.organization_reference?.top_level_name);
   const selectedPeriod = requestedPeriod || reconciliation.reconciliationPeriod || clean(decisions[0]?.period);
@@ -2528,7 +2585,10 @@ async function main() {
     .filter((item) => Array.isArray(item.blockers) && item.blockers.length > 0)
     .map((item) => clean(item.case_id))
     .filter(Boolean));
-  const exactCanonicalRows = (materialization.canonical_posting_rows ?? [])
+  const exactCanonicalRows = excludeHierarchyCoveredEconomicRows(
+    materialization.canonical_posting_rows ?? [],
+    hierarchyAuthority.covered_economic_route_case_ids ?? [],
+  )
     .filter((row) => !failedExactCaseIds.has(clean(row.case_id)))
     .filter((row) => !groupScopedMaterializedCaseIds.has(clean(row.case_id)));
   const currentRunStandaloneRows = currentRunAuthority.canonical_posting_rows
@@ -2735,7 +2795,7 @@ async function main() {
   const manifest = {
     schema_version: "correction-engine-run-1.0.0",
     engine_version: ENGINE_VERSION,
-    run_id: runId,
+    ...scopedManifestRunIdentity(metadata.sourceRunId, runId),
     inputs: {
       period,
       source_run_id: metadata.sourceRunId || null,
@@ -2847,12 +2907,19 @@ export {
   buildDeletionWorkbookFileName,
   buildCorrectionsRegistryFileName,
   buildDiscrepancyRegistryFileName,
+  buildMasterRegistry,
   buildStrictUploadWorkbook,
+  canonicalLoaderContent,
   candidateActionRows,
+  disputedTraceRow,
   deletionWorkbookYearLabel,
+  exactUniqueDecisionRows,
   periodYearLabel,
   ownerUploadOrganizationLabel,
   ownerUploadDateLabel,
   isPostingAllowedForDisputedDecision,
+  excludeHierarchyCoveredEconomicRows,
+  mergeProvidedAndAutonomousDecisions,
   sidecarDisputedGroups,
+  scopedManifestRunIdentity,
 };

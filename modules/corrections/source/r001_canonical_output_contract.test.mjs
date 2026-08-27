@@ -9,6 +9,7 @@ import {
   createMaterializationCase,
 } from "./r001_materialization_contract.mjs";
 import {
+  canonicalOutputFilename,
   canonicalSpornoRowFromMaterializationCase,
   collectCanonicalFinancialOutput,
   verifyCanonicalOutputIntegrity,
@@ -116,6 +117,14 @@ function canonicalRow({
     output_route: route,
     physical_source: source,
     target_accounting: accounting,
+    physical_proof: {
+      declared: true,
+      source_operation_proven: true,
+      physical_source_unique: true,
+      pinned_source_reopened: true,
+      source_reuse_checked: true,
+      target_classification_proven: true,
+    },
     analytical_basis: {},
     economic_route: {},
     source_scope: {},
@@ -160,6 +169,19 @@ test("READY STORNO crosses createCanonicalPostingRow and exports the exact A:AA 
   assert.equal(output.counters.storno_rows, 1);
 });
 
+test("canonical filenames follow section 12.2 for proven and unknown source organizations", () => {
+  assert.equal(canonicalOutputFilename({
+    output_route: "READY",
+    source_organization: "ООО Источник",
+    period: "2025-11",
+  }), "[ООО Источник][30.11.2025]_ОПИУ_ГОТОВО.xlsx");
+  assert.equal(canonicalOutputFilename({
+    output_route: "SPORNO",
+    source_organization: "",
+    period: "2025-02",
+  }), "[ИСТОЧНИК НЕ ОПРЕДЕЛЕН][28.02.2025]_ОПИУ_ГОТОВО_СПОРНО.xlsx");
+});
+
 test("READY REPOST keeps canonical loader accounting without exporter rewrite", () => {
   const row = canonicalRow({ auditIdentity: "AUDIT-R", operation: "REPOST" });
   const output = collectCanonicalFinancialOutput([row]);
@@ -170,8 +192,8 @@ test("READY REPOST keeps canonical loader accounting without exporter rewrite", 
 
 test("explicit SPORNO STORNO and REPOST stay in SPORNO only with exact route/state", () => {
   const rows = [
-    canonicalRow({ auditIdentity: "SP-S", route: "SPORNO" }),
-    canonicalRow({ auditIdentity: "SP-P", route: "SPORNO", operation: "REPOST" }),
+    canonicalRow({ auditIdentity: "SP-S", route: "SPORNO", caseOverrides: { pair_id: "PAIR-SP" } }),
+    canonicalRow({ auditIdentity: "SP-P", route: "SPORNO", operation: "REPOST", caseOverrides: { pair_id: "PAIR-SP" } }),
   ];
   const output = collectCanonicalFinancialOutput(rows);
   assert.equal(output.counters.ready_financial_rows, 0);
@@ -215,8 +237,7 @@ test("accepted intergroup source STORNO and target REPOST remain separate canoni
   assert.ok(output.rows.every((row) => row.loader["ИдентификаторФинЗаписи"] === null));
   assert.ok(output.rows.every((row) => row.loader["Содержание"].startsWith(`Операция ${row.operation}`)));
   assert.ok(output.rows.every((row) => row.loader["Содержание"].includes("сумма 125,00")));
-  assert.ok(output.rows.every((row) => row.loader["Содержание"].includes("REPORT_ONLY")));
-  assert.ok(output.rows.every((row) => !row.loader["Содержание"].includes("SourceRowID=UNKNOWN")));
+  assert.ok(output.rows.every((row) => !/(?:REPORT_ONLY|CaseID|PairID|SourceRowID)/.test(row.loader["Содержание"])));
   assert.match(output.rows.find((row) => row.operation === "REPOST").loader["Содержание"], /Статья: «Источник» → «Назначение»/);
   assert.match(output.rows.find((row) => row.operation === "STORNO").loader["Содержание"], /Статья: «Источник»/);
 });
@@ -240,9 +261,12 @@ test("canonical SPORNO content exposes only known ERP physical fields in busines
     physical_source: source,
     target_accounting: accountingFor(source, "REPOST"),
     physical_proof: {
+      declared: true,
       source_operation_proven: true,
       physical_source_unique: true,
       target_classification_proven: true,
+      pinned_source_reopened: true,
+      source_reuse_checked: true,
     },
     analytical_basis: {},
     economic_route: { accepted: true },
@@ -255,7 +279,8 @@ test("canonical SPORNO content exposes only known ERP physical fields in busines
   const row = canonicalSpornoRowFromMaterializationCase(materialization);
   assert.match(row.loader["Содержание"], /^Операция REPOST \| ERP: документ «Документ 12»; дата 31\.01\.2026; проводка № 4; Дт 26; Кт 70\.1; сумма 125,00; организация «Физическая организация ERP»;/);
   assert.match(row.loader["Содержание"], /Статья: «Источник» → «Назначение»/);
-  assert.match(row.loader["Содержание"], /REPORT_ONLY \| CaseID=CASE-BUSINESS-CONTENT \| PairID=PAIR-BUSINESS-CONTENT \| SourceRowID=ROW-12$/);
+  assert.match(row.loader["Содержание"], /Причина: economic route accepted; physical source incomplete$/);
+  assert.doesNotMatch(row.loader["Содержание"], /REPORT_ONLY|CaseID|PairID|SourceRowID/);
 });
 
 test("canonical SPORNO column P carries only normalized verified Intalev business evidence", () => {
@@ -376,7 +401,7 @@ test("unproven SPORNO candidate analytics are suppressed from physical A:AA fiel
     "СубконтоДт1", "СубконтоДт2", "СубконтоДт3", "СубконтоКт1", "СубконтоКт2", "СубконтоКт3",
   ]) assert.equal(row.loader[field], null, field);
   assert.match(row.loader["Содержание"], /Статья: «ФЗП» → «Расходы на персонал»/);
-  assert.doesNotMatch(row.loader["Содержание"], /SourceRowID=/);
+  assert.doesNotMatch(row.loader["Содержание"], /REPORT_ONLY|CaseID|PairID|SourceRowID/);
 });
 
 test("REVIEW_ONLY, mapping-only, structural and directionless inputs create zero final financial rows", () => {
@@ -405,7 +430,11 @@ test("output grouping and registry use physical source organization and preserve
 test("independent canonical producers targeting one READY filename merge before one write", () => {
   const output = collectCanonicalFinancialOutput([
     canonicalRow({ auditIdentity: "PRODUCER-A" }),
-    canonicalRow({ auditIdentity: "PRODUCER-B", operation: "REPOST" }),
+    canonicalRow({
+      auditIdentity: "PRODUCER-B",
+      operation: "REPOST",
+      sourceOverrides: { source_row_id: "ROW-13", source_range: "B13:AG13", posting_number: "5" },
+    }),
   ]);
   assert.equal(output.groups.length, 1);
   assert.equal(output.groups[0].rows.length, 2);
@@ -415,7 +444,12 @@ test("independent canonical producers targeting one READY filename merge before 
 test("independent canonical producers targeting one SPORNO filename merge before one write", () => {
   const output = collectCanonicalFinancialOutput([
     canonicalRow({ auditIdentity: "SPORNO-A", route: "SPORNO" }),
-    canonicalRow({ auditIdentity: "SPORNO-B", route: "SPORNO", operation: "REPOST" }),
+    canonicalRow({
+      auditIdentity: "SPORNO-B",
+      route: "SPORNO",
+      operation: "REPOST",
+      sourceOverrides: { source_row_id: "ROW-13", source_range: "B13:AG13", posting_number: "5" },
+    }),
   ]);
   assert.equal(output.groups.length, 1);
   assert.equal(output.groups[0].rows.length, 2);
@@ -436,8 +470,16 @@ test("conflicting duplicate canonical audit identity fails closed while exact du
 test("manifest counters, workbook rows and registry identities reconcile to the same canonical set", () => {
   const output = collectCanonicalFinancialOutput([
     canonicalRow({ auditIdentity: "READY-S" }),
-    canonicalRow({ auditIdentity: "READY-P", operation: "REPOST" }),
-    canonicalRow({ auditIdentity: "SPORNO-S", route: "SPORNO" }),
+    canonicalRow({
+      auditIdentity: "READY-P",
+      operation: "REPOST",
+      sourceOverrides: { source_row_id: "ROW-13", source_range: "B13:AG13", posting_number: "5" },
+    }),
+    canonicalRow({
+      auditIdentity: "SPORNO-S",
+      route: "SPORNO",
+      sourceOverrides: { source_row_id: "ROW-14", source_range: "B14:AG14", posting_number: "6" },
+    }),
   ]);
   assert.deepEqual({
     total: output.counters.canonical_financial_rows_total,
@@ -464,7 +506,12 @@ test("manifest counters, workbook rows and registry identities reconcile to the 
 test("canonical integrity exposes full explicit service REPORT_ONLY safety without changing rows", () => {
   const output = collectCanonicalFinancialOutput([
     canonicalRow({ auditIdentity: "SAFETY-S" }),
-    canonicalRow({ auditIdentity: "SAFETY-P", operation: "REPOST", route: "SPORNO" }),
+    canonicalRow({
+      auditIdentity: "SAFETY-P",
+      operation: "REPOST",
+      route: "SPORNO",
+      sourceOverrides: { source_row_id: "ROW-13", source_range: "B13:AG13", posting_number: "5" },
+    }),
   ]);
   const beforeRows = structuredClone(output.rows);
   const beforeGroups = structuredClone(output.groups);
@@ -475,6 +522,48 @@ test("canonical integrity exposes full explicit service REPORT_ONLY safety witho
   assert.equal(integrity.canonical_financial_rows_total, 2);
   assert.equal(integrity.workbook_financial_rows, 2);
   assert.equal(integrity.registry_financial_rows, 2);
+});
+
+test("one physical ERP row cannot be reused across correction pairs", () => {
+  assert.throws(() => collectCanonicalFinancialOutput([
+    canonicalRow({ auditIdentity: "REUSE-A", caseOverrides: { pair_id: "PAIR-A" } }),
+    canonicalRow({ auditIdentity: "REUSE-B", operation: "REPOST", caseOverrides: { pair_id: "PAIR-B" } }),
+  ]), { code: "PHYSICAL_SOURCE_REUSED_ACROSS_PAIRS" });
+});
+
+test("paired correction rejects unequal STORNO and REPOST amounts", () => {
+  assert.throws(() => collectCanonicalFinancialOutput([
+    canonicalRow({
+      auditIdentity: "UNBALANCED-STORNO",
+      amount: 100,
+      caseOverrides: { pair_id: "PAIR-UNBALANCED" },
+    }),
+    canonicalRow({
+      auditIdentity: "UNBALANCED-REPOST",
+      operation: "REPOST",
+      amount: 80,
+      caseOverrides: { pair_id: "PAIR-UNBALANCED" },
+    }),
+  ]), (error) => error?.code === "UNBALANCED_CORRECTION_PAIR"
+    && error.details.storno_cents === 10000
+    && error.details.repost_cents === 8000
+    && error.details.signed_total_cents === -2000);
+});
+
+test("column P excludes technical audit data while registry keeps it separately", () => {
+  const output = collectCanonicalFinancialOutput([canonicalSpornoRowFromMaterializationCase(
+    createMaterializationCase({
+      ...canonicalRow({ route: "SPORNO" }).materialization_case,
+      action: "STORNO",
+      output_route: "SPORNO",
+    }),
+  )]);
+  const [row] = output.rows;
+  const [audit] = output.registry_rows;
+  assert.doesNotMatch(row.loader["Содержание"], /REPORT_ONLY|CaseID|PairID|SourceRowID|execution_allowed|ready_to_upload/);
+  assert.equal(audit.case_id, row.case_id);
+  assert.equal(audit.pair_id, row.pair_id);
+  assert.equal(audit.source_row_id, row.source.source_row_id);
 });
 
 test("integrity gate rejects loader drift, missing workbook row and missing registry row", () => {

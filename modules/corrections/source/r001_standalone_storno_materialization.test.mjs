@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  LOADER_A_AA_FIELDS,
   MaterializationContractError,
   createMaterializationCase,
 } from "./r001_materialization_contract.mjs";
@@ -141,6 +142,19 @@ function reopened(overrides = {}) {
   };
 }
 
+function assertSparsePhysicalSporno(row) {
+  assert.equal(row.output_route, "SPORNO");
+  assert.equal(row.materialization_state, "MATERIALIZED_SPORNO");
+  assert.equal(row.source_organization, "");
+  assert.equal(row.source.source_row_id, "");
+  assert.equal(row.source.source_archive_path, "");
+  assert.equal(row.source.journal_sha256, "");
+  for (const [index, field] of LOADER_A_AA_FIELDS.entries()) {
+    if ([4, 9, 10, 15].includes(index)) continue;
+    assert.equal(row.loader_values[index], null, field);
+  }
+}
+
 function hash(buffer) {
   return crypto.createHash("sha256").update(buffer).digest("hex").toUpperCase();
 }
@@ -197,7 +211,7 @@ async function buildPinnedJournalArchive(targetDir) {
   return { archivePath, archiveSha: hash(archiveBuffer), journalSha, sourceRowId };
 }
 
-test("genuine ERP-only exact source reopens to one READY canonical STORNO row", async () => {
+test("genuine ERP-only exact source remains one proven SPORNO row after reopen", async () => {
   const result = await materializeStandaloneStornoCases([decision()], {
     reopenSource: async () => reopened(),
   });
@@ -205,16 +219,45 @@ test("genuine ERP-only exact source reopens to one READY canonical STORNO row", 
   assert.equal(result.canonical_posting_rows.length, 1);
   const [row] = result.canonical_posting_rows;
   assert.equal(row.operation, "STORNO");
-  assert.equal(row.output_route, "READY");
-  assert.equal(row.materialization_state, "MATERIALIZED_READY");
+  assert.equal(row.output_route, "SPORNO");
+  assert.equal(row.materialization_state, "MATERIALIZED_SPORNO");
+  assert.equal(row.correction_allowed, false);
   assert.equal(row.source_organization, "ООО Физический источник");
   assert.notEqual(row.source_organization, row.reconciliation_organization);
   assert.equal(row.source.source_row_id, SOURCE_ROW_ID);
   assert.deepEqual(row.result_accounting.debit_analytics, ["Исходная статья", "Проект", "ЦФО"]);
   assert.equal(row.loader["Содержание"],
-    `Операция STORNO | ERP: документ «Операция МСФО 42»; дата 15.10.2025 10:00:00; проводка № 7; Дт 26; Кт 60.01; сумма 123,45; организация «ООО Физический источник»; подразделение «Администрация» | Статья: «Исходная статья» | документ операций Инталев не представлен | REPORT_ONLY | CaseID=CASE-ERP-ONLY | PairID=PAIR-ERP-ONLY | SourceRowID=${SOURCE_ROW_ID}`);
+    "Операция STORNO | ERP: документ «Операция МСФО 42»; дата 15.10.2025 10:00:00; проводка № 7; Дт 26; Кт 60.01; сумма 123,45; организация «ООО Физический источник»; подразделение «Администрация» | Статья: «Исходная статья» | документ операций Инталев не представлен | Причина: односторонний STORNO требует сбалансированной пары STORNO/REPOST для подтверждённого результата");
   assert.equal(result.case_updates[0].materialization_case.economic.source_article, "Исходная статья");
+  assert.equal(result.case_updates[0].result, "SPORNO");
+  assert.ok(result.case_updates[0].blockers.includes("BALANCED_STORNO_REPOST_PAIR_REQUIRED_FOR_READY"));
+  assert.equal(result.audit.ready_row_count, 0);
+  assert.equal(result.audit.sporno_row_count, 1);
   assert.equal(result.safety.posting_rows, 0);
+});
+
+test("standalone SPORNO materializer exposes reuse as one additional sparse row", async () => {
+  const second = decision({
+    case_id: "CASE-ERP-ONLY-SECOND",
+    pair_id: "PAIR-ERP-ONLY-SECOND",
+    materialization_case: canonicalCase({
+      case_id: "CASE-ERP-ONLY-SECOND",
+      pair_id: "PAIR-ERP-ONLY-SECOND",
+    }),
+  });
+  const result = await materializeStandaloneStornoCases([decision(), second], {
+    reopenSource: async () => reopened(),
+  });
+
+  assert.equal(result.audit.ready_row_count, 0);
+  assert.equal(result.audit.sporno_row_count, 2);
+  assert.equal(result.canonical_posting_rows.length, 2);
+  assert.equal(result.canonical_posting_rows[0].source.source_row_id, SOURCE_ROW_ID);
+  assertSparsePhysicalSporno(result.canonical_posting_rows[1]);
+  assert.equal(result.case_updates[1].result, "SPORNO");
+  assert.ok(result.case_updates[1].blockers.includes("PHYSICAL_SOURCE_ALREADY_USED"));
+  assert.ok(result.case_updates[1].blockers.includes("BALANCED_STORNO_REPOST_PAIR_REQUIRED_FOR_READY"));
+  assert.match(result.canonical_posting_rows[1].loader["Содержание"], /физическая строка ERP уже использована другой корректировкой/);
 });
 
 test("business-content enrichment leaves every standalone physical loader value unchanged except Содержание", async () => {
@@ -246,8 +289,9 @@ test("default verifier reopens the pinned ZIP/XLSX and validates the exact row",
     });
     const result = await materializeStandaloneStornoCases([input]);
     assert.equal(result.canonical_posting_rows.length, 1);
-    assert.equal(result.canonical_posting_rows[0].output_route, "READY");
+    assert.equal(result.canonical_posting_rows[0].output_route, "SPORNO");
     assert.equal(result.canonical_posting_rows[0].source.source_row_id, source.sourceRowId);
+    assert.equal(result.audit.ready_row_count, 0);
     assert.equal(result.audit.blocked_case_count, 0);
   } finally {
     await fs.rm(temporary, { recursive: true, force: true });
@@ -600,6 +644,11 @@ test("proven STORNO with incomplete physical source remains one SPORNO row with 
   assert.equal(result.canonical_posting_rows[0].output_route, "SPORNO");
   assert.equal(result.canonical_posting_rows[0].source_organization, "");
   assert.equal(result.canonical_posting_rows[0].source.source_row_id, "");
+  for (const [index, field] of LOADER_A_AA_FIELDS.entries()) {
+    if ([4, 9, 10, 15].includes(index)) continue;
+    assert.equal(result.canonical_posting_rows[0].loader_values[index], null, field);
+  }
+  assert.match(result.canonical_posting_rows[0].loader["Содержание"], /Причина: .*физическая строка ERP не доказана однозначно/);
   assert.equal(result.safety.execution_allowed, false);
   assert.equal(result.safety.ready_to_upload, false);
 });
@@ -662,36 +711,74 @@ test("report organization never fills a blank physical source organization", asy
   assert.notEqual(result.canonical_posting_rows[0].source_organization, "УК Отчётная");
 });
 
-test("Dt/Kt99 closing row cannot stand in for the economic source", async () => {
+test("claimed closing physical source remains one sparse SPORNO row without reopen", async () => {
+  let reopenCalls = 0;
+  const input = decision({
+    materialization_case: canonicalCase({ physical_source: physical({ debit: "99" }) }),
+  });
+  const result = await materializeStandaloneStornoCases([input], {
+    reopenSource: async () => { reopenCalls += 1; return reopened(); },
+  });
+
+  assert.equal(reopenCalls, 0);
+  assert.equal(result.canonical_posting_rows.length, 1);
+  assertSparsePhysicalSporno(result.canonical_posting_rows[0]);
+  assert.ok(result.case_updates[0].blockers.includes("CLOSING_ROW_NOT_ECONOMIC_SOURCE"));
+  assert.match(result.canonical_posting_rows[0].loader["Содержание"], /закрывающей и не доказывает/);
+});
+
+test("Dt/Kt99 reopen mismatch cannot stand in for the economic source and remains sparse SPORNO", async () => {
   const result = await materializeStandaloneStornoCases([decision()], {
     reopenSource: async () => reopened({ debit: "99" }),
   });
-  assert.equal(result.canonical_posting_rows.length, 0);
+  assert.equal(result.canonical_posting_rows.length, 1);
+  assertSparsePhysicalSporno(result.canonical_posting_rows[0]);
   assert.ok(result.case_updates[0].blockers.includes("CLOSING_ROW_NOT_ECONOMIC_SOURCE"));
+  assert.match(result.canonical_posting_rows[0].loader["Содержание"], /при повторной проверке не совпала/);
 });
 
-test("forged or stale pinned provenance fails closed with no row", async () => {
+test("forged or stale pinned provenance remains one sparse SPORNO row", async () => {
   const result = await materializeStandaloneStornoCases([decision()], {
     reopenSource: async () => ({ ...reopened(), archive_sha256: "D".repeat(64) }),
   });
-  assert.equal(result.canonical_posting_rows.length, 0);
+  assert.equal(result.canonical_posting_rows.length, 1);
+  assertSparsePhysicalSporno(result.canonical_posting_rows[0]);
   assert.ok(result.case_updates[0].blockers.includes("EXACT_SOURCE_MISMATCH:archive_sha256"));
+  assert.match(result.canonical_posting_rows[0].loader["Содержание"], /при повторной проверке не совпала/);
 });
 
-test("stale SourceRowID cannot bind a different exact ERP row", async () => {
+test("stale SourceRowID cannot bind a different exact ERP row and remains sparse SPORNO", async () => {
   const result = await materializeStandaloneStornoCases([decision()], {
     reopenSource: async () => reopened({ source_row_id: "D".repeat(64) }),
   });
-  assert.equal(result.canonical_posting_rows.length, 0);
+  assert.equal(result.canonical_posting_rows.length, 1);
+  assertSparsePhysicalSporno(result.canonical_posting_rows[0]);
   assert.ok(result.case_updates[0].blockers.includes("EXACT_SOURCE_MISMATCH:source_row_id"));
 });
 
-test("source amount must equal the exact standalone correction, not an ERP balance", async () => {
+test("source amount mismatch remains one sparse SPORNO row, not an ERP balance", async () => {
   const result = await materializeStandaloneStornoCases([decision()], {
     reopenSource: async () => reopened({ amount: 500 }),
   });
-  assert.equal(result.canonical_posting_rows.length, 0);
+  assert.equal(result.canonical_posting_rows.length, 1);
+  assertSparsePhysicalSporno(result.canonical_posting_rows[0]);
   assert.ok(result.case_updates[0].blockers.includes("EXACT_SOURCE_AMOUNT_MISMATCH"));
+});
+
+test("reopen error preserves the economic direction as one sparse SPORNO row", async () => {
+  const result = await materializeStandaloneStornoCases([decision()], {
+    reopenSource: async () => {
+      const error = new Error("synthetic reopen failure");
+      error.code = "PINNED_SOURCE_REOPEN_FAILED";
+      throw error;
+    },
+  });
+
+  assert.equal(result.canonical_posting_rows.length, 1);
+  assertSparsePhysicalSporno(result.canonical_posting_rows[0]);
+  assert.equal(result.case_updates[0].result, "SPORNO");
+  assert.ok(result.case_updates[0].blockers.includes("PINNED_SOURCE_REOPEN_FAILED"));
+  assert.match(result.canonical_posting_rows[0].loader["Содержание"], /не удалось повторно открыть и проверить/);
 });
 
 test("bridge requires explicit absence and defers ERP-only READY until exact reopen", async () => {
@@ -744,8 +831,9 @@ test("bridge requires explicit absence and defers ERP-only READY until exact reo
     materialization_bridge: bridge,
   }, standalone);
   assert.equal(merged.materialization_bridge.canonical_posting_rows.length, 1);
-  assert.equal(merged.materialization_bridge.audit.standalone_storno_ready_row_count, 1);
-  assert.equal(merged.decisions[0].standalone_storno_result, "READY");
+  assert.equal(merged.materialization_bridge.audit.standalone_storno_ready_row_count, 0);
+  assert.equal(merged.materialization_bridge.audit.standalone_storno_sporno_row_count, 1);
+  assert.equal(merged.decisions[0].standalone_storno_result, "SPORNO");
 });
 
 test("ERP-only label without accepted absence proof remains canonical REVIEW_ONLY", () => {

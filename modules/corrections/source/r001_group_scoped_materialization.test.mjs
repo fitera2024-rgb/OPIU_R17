@@ -64,7 +64,7 @@ const catalogNodes = [
   },
 ];
 
-test("generic group-scoped materialization creates exact STORNO and REPOST without FZP-specific code", () => {
+test("generic group-scoped materialization creates sparse SPORNO STORNO and REPOST without FZP-specific code", () => {
   const result = evaluateGroupScopedDecision({
     decision: decision(),
     catalogNodes,
@@ -73,19 +73,20 @@ test("generic group-scoped materialization creates exact STORNO and REPOST witho
   });
   assert.equal(result.status, "MATERIALIZED_GROUP_SCOPED_STORNO_REPOST");
   assert.deepEqual(result.canonical_posting_rows.map((row) => row.operation), ["STORNO", "REPOST"]);
-  assert.equal(result.canonical_posting_rows[0].loader["СчетДт"], "44.1");
-  assert.equal(result.canonical_posting_rows[1].loader["СчетДт"], "26");
-  assert.equal(result.canonical_posting_rows[1].loader["СубконтоДт1"], "Командировочные");
+  assert.ok(result.canonical_posting_rows.every((row) => row.output_route === "SPORNO"));
+  assert.ok(result.canonical_posting_rows.every((row) => row.loader["СчетДт"] === null));
+  assert.ok(result.canonical_posting_rows.every((row) => row.loader["СчетКт"] === null));
+  assert.ok(result.canonical_posting_rows.every((row) => row.loader["СубконтоДт1"] === null));
   assert.deepEqual(
     result.canonical_posting_rows.map((row) => row.loader["СуммаВВалютеОтчетности"]),
     [-125, 125],
   );
-  assert.equal(result.canonical_posting_rows[0].loader["ПравилоДт"], null);
-  assert.equal(result.canonical_posting_rows[1].loader["ПравилоДт"], "ADMIN-TRAVEL");
+  assert.ok(result.canonical_posting_rows.every((row) => row.loader["ПравилоДт"] === null));
   assert.match(result.canonical_posting_rows[0].loader["Содержание"], /^Операция STORNO \| ERP:/);
   assert.match(result.canonical_posting_rows[1].loader["Содержание"], /^Операция REPOST \| ERP:/);
-  assert.ok(result.canonical_posting_rows.every((row) => row.loader["Содержание"].includes("REPORT_ONLY")));
-  assert.ok(result.canonical_posting_rows.every((row) => row.source.source_row_id === "ERP-20"));
+  assert.ok(result.canonical_posting_rows.every((row) => row.loader["Содержание"].includes("документ операций Инталев не представлен")));
+  assert.ok(result.canonical_posting_rows.every((row) => row.loader["Содержание"].includes("Причина:")));
+  assert.ok(result.canonical_posting_rows.every((row) => row.source.source_row_id === ""));
 });
 
 test("resolved target remains review-only when exact physical authority is absent", () => {
@@ -119,7 +120,7 @@ test("amount mismatch and wrong block fail closed with zero A:AA rows", () => {
   assert.equal(wrongBlock.canonical_posting_rows.length, 0);
 });
 
-test("paired liability proof permits an exact partial reclass while retaining the full physical source identity", () => {
+test("paired liability proof permits a sparse partial reclass without claiming un-reopened physical identity", () => {
   const result = evaluateGroupScopedDecision({
     decision: decision({
       target_article: "Командировочные",
@@ -133,5 +134,6 @@ test("paired liability proof permits an exact partial reclass while retaining th
   });
   assert.equal(result.status, "MATERIALIZED_GROUP_SCOPED_STORNO_REPOST");
   assert.deepEqual(result.canonical_posting_rows.map((row) => row.amount), [25, 25]);
-  assert.ok(result.canonical_posting_rows.every((row) => row.source.amount === 125));
+  assert.ok(result.canonical_posting_rows.every((row) => row.output_route === "SPORNO"));
+  assert.ok(result.canonical_posting_rows.every((row) => row.source.amount === null));
 });

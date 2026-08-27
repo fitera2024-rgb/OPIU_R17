@@ -5,6 +5,7 @@ import {
   REPORT_ONLY_SAFETY,
   createCanonicalPostingRow,
 } from "./r001_materialization_contract.mjs";
+import { buildR001BusinessContent } from "./r001_business_content.mjs";
 
 export const R001_CANONICAL_OUTPUT_SCHEMA = "opiu-r001-canonical-output.v1";
 
@@ -54,19 +55,33 @@ function userIntalevSource(materializationCase) {
 }
 
 function userLoaderContent(materializationCase, operation, source) {
-  const sourceArticle = text(materializationCase?.economic?.source_article) || "исходная статья ERP";
-  const targetArticle = text(materializationCase?.economic?.target_article) || "целевая статья ERP";
-  const action = operation === "STORNO"
-    ? `СТОРНО: снимаем ${moneyText(materializationCase.correction_amount)} со статьи «${sourceArticle}»`
-    : `РЕПОСТ: относим ${moneyText(materializationCase.correction_amount)} на статью «${targetArticle}»`;
-  return [
-    action,
-    `Причина: ${text(materializationCase.reason) || `переклассификация расходов «${sourceArticle}» → «${targetArticle}» по сверке ОПИУ`}`,
-    userIntalevSource(materializationCase),
-    text(source?.content) ? `Исходное содержание: ${text(source.content)}` : "",
-    `Источник ERP: ${text(source?.document) || "документ не указан"}; проводка ${text(source?.posting_number || source?.posting_no) || "не указана"}; строка ${text(source?.source_range) || "не указана"}`,
-    `Техническая ссылка: PairID=${text(materializationCase.pair_id)}; SourceRowID=${text(source?.source_row_id) || "UNKNOWN"}`,
-  ].filter(Boolean).join(" | ");
+  const evidence = materializationCase?.business_evidence ?? {};
+  const reason = text(materializationCase?.reason)
+    || (materializationCase?.output_route === "SPORNO"
+      ? "требуется ручная проверка: физическая строка ERP не доказана однозначно"
+      : "");
+  return buildR001BusinessContent({
+    operation,
+    erp: {
+      document: source?.document,
+      date: source?.date,
+      postingNumber: source?.posting_number || source?.posting_no,
+      debit: source?.debit,
+      credit: source?.credit,
+      amount: materializationCase?.correction_amount,
+      organization: source?.source_organization,
+      debitDepartment: source?.debit_department,
+      creditDepartment: source?.credit_department,
+    },
+    economic: {
+      sourceArticle: materializationCase?.economic?.source_article,
+      targetArticle: materializationCase?.economic?.target_article,
+    },
+    decision: evidence,
+    reason,
+    intalevDocumentNotPresented: evidence.intalev_document_absent === true
+      && materializationCase?.source_scope?.relevant_intalev_absence_proven === true,
+  });
 }
 
 function stableValue(value) {
@@ -107,9 +122,10 @@ function shortOrganizationLabel(value) {
 }
 
 export function canonicalOutputFilename({ output_route: outputRoute, source_organization: sourceOrganization, period }) {
-  periodEndDate(period);
-  const route = outputRoute === "SPORNO" ? "СПОРНО" : "ГОТОВО";
-  return `CORR_${period}_${shortOrganizationLabel(sourceOrganization)}_${route}.xlsx`;
+  const outputDate = periodEndDate(period);
+  const organization = safeOrganizationLabel(sourceOrganization);
+  const disputedSuffix = outputRoute === "SPORNO" ? "_СПОРНО" : "";
+  return `[${organization}][${outputDate}]_ОПИУ_ГОТОВО${disputedSuffix}.xlsx`;
 }
 
 function revalidateCanonicalRow(row) {
@@ -276,6 +292,37 @@ function sortRows(rows) {
   ].join("\u0000"), "en"));
 }
 
+function assertBalancedCorrectionPairs(rows) {
+  const byPair = new Map();
+  for (const row of rows) {
+    const pairId = text(row.pair_id);
+    if (!byPair.has(pairId)) byPair.set(pairId, []);
+    byPair.get(pairId).push(row);
+  }
+  for (const [pairId, pairRows] of byPair) {
+    const operations = new Set(pairRows.map((row) => text(row.operation).toUpperCase()));
+    const explicitlyPaired = operations.has("STORNO") && operations.has("REPOST")
+      || pairRows.some((row) => text(row.materialization_case?.action).toUpperCase() === "STORNO_REPOST");
+    if (!explicitlyPaired) continue;
+
+    const stornoCents = pairRows
+      .filter((row) => row.operation === "STORNO")
+      .reduce((sum, row) => sum + Math.round(Number(row.amount) * 100), 0);
+    const repostCents = pairRows
+      .filter((row) => row.operation === "REPOST")
+      .reduce((sum, row) => sum + Math.round(Number(row.amount) * 100), 0);
+    const signedTotalCents = repostCents - stornoCents;
+    if (stornoCents <= 0 || repostCents <= 0 || stornoCents !== repostCents || signedTotalCents !== 0) {
+      fail("UNBALANCED_CORRECTION_PAIR", "Paired correction requires equal absolute STORNO/REPOST amounts and zero signed total", {
+        pair_id: pairId,
+        storno_cents: stornoCents,
+        repost_cents: repostCents,
+        signed_total_cents: signedTotalCents,
+      });
+    }
+  }
+}
+
 export function collectCanonicalFinancialOutput(rows = [], { filenameForRow = canonicalOutputFilename } = {}) {
   if (!Array.isArray(rows)) fail("INVALID_CANONICAL_ROW_SET", "Canonical output input must be an array");
   if (typeof filenameForRow !== "function") fail("INVALID_FILENAME_ROUTER", "filenameForRow must be a function");
@@ -299,6 +346,27 @@ export function collectCanonicalFinancialOutput(rows = [], { filenameForRow = ca
   }
 
   const canonicalRows = Object.freeze(sortRows([...byIdentity.values()].map((item) => item.row)));
+  const physicalSourcePairs = new Map();
+  for (const row of canonicalRows) {
+    if (!text(row.source?.source_row_id)) continue;
+    const sourceKey = [
+      row.source.source_archive_sha256,
+      row.source.journal_sha256,
+      row.source.source_sheet,
+      row.source.source_range,
+      row.source.source_row_id,
+    ].map(text).join("\u0000");
+    const previousPair = physicalSourcePairs.get(sourceKey);
+    if (previousPair && previousPair !== row.pair_id) {
+      fail("PHYSICAL_SOURCE_REUSED_ACROSS_PAIRS", "One physical ERP row cannot be materialized in more than one correction pair", {
+        source_row_id: row.source.source_row_id,
+        first_pair_id: previousPair,
+        second_pair_id: row.pair_id,
+      });
+    }
+    physicalSourcePairs.set(sourceKey, row.pair_id);
+  }
+  assertBalancedCorrectionPairs(canonicalRows);
   const canonicalRowSetSha256 = sha256Fingerprint(canonicalRows);
   const groupsByKey = new Map();
   for (const row of canonicalRows) {
@@ -430,6 +498,7 @@ export function verifyCanonicalOutputIntegrity(output, { workbook_records: workb
     workbook_financial_rows: actualWorkbook.size,
     registry_financial_rows: actualRegistry.size,
     canonical_row_set_sha256: expectedRowSetSha256,
+    ...REPORT_ONLY_SAFETY,
     safety: REPORT_ONLY_SAFETY,
   });
 }

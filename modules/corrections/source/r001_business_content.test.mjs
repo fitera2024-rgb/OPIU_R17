@@ -38,8 +38,9 @@ test("complete ERP and proven Intalev references produce deterministic Russian b
   });
 
   assert.equal(content,
-    "Операция REPOST | ERP: документ «Операция МСФО 1»; дата 30.11.2025 23:59:59; проводка № 7; Дт 26; Кт 70.1; сумма 8 000,00; организация «ООО Источник»; подразделение «Администрация» | Статья: «ФЗП» → «НДФЛ» | Инталев: R036: файл «INTALEV_OPIU_2025-11.xlsx», лист «TDSheet», ячейка E113, путь «Расходы на персонал / ФЗП» | REPORT_ONLY | CaseID=CASE-1 | PairID=PAIR-1 | SourceRowID=ROW-1");
+    "Операция REPOST | ERP: документ «Операция МСФО 1»; дата 30.11.2025 23:59:59; проводка № 7; Дт 26; Кт 70.1; сумма 8 000,00; организация «ООО Источник»; подразделение «Администрация» | Статья: «ФЗП» → «НДФЛ» | Инталев: R036: файл «INTALEV_OPIU_2025-11.xlsx», лист «TDSheet», ячейка E113, путь «Расходы на персонал / ФЗП»");
   assert.doesNotMatch(content, /C:\\evidence|A{64}|sha/i);
+  assert.doesNotMatch(content, /REPORT_ONLY|CaseID|PairID|SourceRowID/);
 });
 
 test("aggregate Intalev without operation registrar is stated explicitly and optional data is not invented", () => {
@@ -54,11 +55,11 @@ test("aggregate Intalev without operation registrar is stated explicitly and opt
   });
 
   assert.equal(content,
-    "Операция STORNO | ERP: сумма 123,45 | Статья: «Исходная статья» | документ операций Инталев не представлен | REPORT_ONLY | CaseID=CASE-2");
+    "Операция STORNO | ERP: сумма 123,45 | Статья: «Исходная статья» | документ операций Инталев не представлен");
   assert.doesNotMatch(content, /не определ|организация|подразделение|SourceRowID=|PairID=/);
 });
 
-test("audit suffix contains only known exact tokens and remains at the end", () => {
+test("technical audit identifiers never enter user-facing business content", () => {
   const content = buildR001BusinessContent({
     operation: "REPOST",
     erp: { debit: "26", credit: "70", amount: 1.5 },
@@ -67,7 +68,7 @@ test("audit suffix contains only known exact tokens and remains at the end", () 
     sourceRowId: "ROW-3",
   });
   assert.match(content, /документ операций Инталев не представлен/);
-  assert.match(content, /\| REPORT_ONLY \| CaseID=CASE-3 \| PairID=PAIR-3 \| SourceRowID=ROW-3$/);
+  assert.doesNotMatch(content, /REPORT_ONLY|CaseID|PairID|SourceRowID/);
 });
 
 test("missing proven Intalev operation reference is stated explicitly without inventing a document", () => {
@@ -80,7 +81,7 @@ test("missing proven Intalev operation reference is stated explicitly without in
   });
 
   assert.equal(content,
-    "Операция REPOST | ERP: документ «Операция МСФО 9»; сумма 10,00 | Статья: «ФЗП» → «НДФЛ» | документ операций Инталев не представлен | REPORT_ONLY | CaseID=CASE-NO-INTALEV-DOCUMENT");
+    "Операция REPOST | ERP: документ «Операция МСФО 9»; сумма 10,00 | Статья: «ФЗП» → «НДФЛ» | документ операций Инталев не представлен");
 });
 
 test("filesystem-like Intalev hierarchy paths and unverified references are not disclosed", () => {
@@ -112,37 +113,18 @@ test("the production decision technical-reference form yields safe file, sheet, 
   assert.doesNotMatch(content, /JournalSHA|B{64}/);
 });
 
-test("owner contract and exact R001 CR bind presentation-only content to the frozen physical baseline", () => {
-  const repositoryRoot = path.resolve(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "../../../../../",
-  );
-  const ownerContract = fs.readFileSync(path.join(
-    repositoryRoot,
-    "governance/changes/CR-OWNER-20260824-ORDERED-RECLASS-PHYSICAL-PROOF-CONTRACT.md",
-  ), "utf8");
-  const exactCr = fs.readFileSync(path.join(
-    repositoryRoot,
-    "governance/changes/CR-R001-20260825-ECONOMIC-RECLASS-SPORNO-MATERIALIZATION-001.md",
-  ), "utf8");
-  const engineContract = fs.readFileSync(path.join(
-    repositoryRoot,
-    "development/OPIU_1.9.4/modules/corrections/source/КОНТРАКТ_ДВИЖКА_R001.md",
-  ), "utf8");
+test("local R001 description binds presentation content to business-only evidence", () => {
+  const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const engineContractPath = fs.readdirSync(sourceDirectory)
+    .map((name) => path.join(sourceDirectory, name))
+    .find((candidate) => candidate.endsWith("_R001.md")
+      && fs.readFileSync(candidate, "utf8").includes("# Движок корректировок ОПИУ R001"));
+  assert.ok(engineContractPath, "R001 engine contract must be discoverable inside the current repository");
+  const engineContract = fs.readFileSync(engineContractPath, "utf8");
 
-  for (const required of [
-    "документ операций Инталев не представлен",
-    "A:O и Q:AA обязаны остаться идентичными",
-    "неизменяемым точным\nphysical baseline",
-    "ADC8463708A3E4E39FCF64513D6CC2B6E732DCD038556AE9E1C603C3BE902FE8",
-    "E1720A6D0385B8A7272DA24E8EE4C539A735F3BB660D84F8F704B275F296477B",
-    "6378CBE0D763AFDE6897EBFF5FD85022E33CEE0ECF5AF5B35F1C1FA38914BC50",
-  ]) assert.match(ownerContract, new RegExp(required));
-
-  assert.match(exactCr, /Deterministic business `Содержание` follow-up/);
-  assert.match(exactCr, /Future deterministic content is\nvalidated separately and grants no authority for physical row, pair or amount\ndrift\./);
+  assert.match(engineContract, /только реально известные реквизиты ERP/);
+  assert.match(engineContract, /Локальные пути и SHA-256 в `Содержание` запрещены/);
+  assert.match(engineContract, /не заменяют понятное содержание/);
   assert.match(engineContract, /экономическая операция `STORNO` или `REPOST`/);
-  assert.match(engineContract, /audit-хвостом `REPORT_ONLY`/);
-  assert.match(engineContract, /`CaseID`, `PairID` и `SourceRowID`/);
   assert.doesNotMatch(engineContract, /Содержание` начинается с `Причина корректировки:/);
 });

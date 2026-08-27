@@ -74,6 +74,7 @@ def synthetic_policy() -> dict[str, object]:
 def audit_evidence(policy: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
     privacy = {
         "local_customer_build_paths_absent": True, "local_customer_build_path_hits": 0,
+        "exact_inventory_node_modules_generic_profile_scan_exempt": True,
         "only_allowed_upstream_debug_exception_present": True,
         "allowed_upstream_debug_exception": {
             "path": policy["privacy"]["allowed_upstream_debug_exception"]["path"],
@@ -485,6 +486,20 @@ def test_utf16be_local_profile_path_is_rejected_with_honest_inventories() -> Non
         write_archive(archive, payloads, policy)
         with pytest.raises(VERIFIER.VerificationError, match="LOCAL_CUSTOMER_BUILD_PATH_LEAK"):
             VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
+
+
+def test_privacy_generic_profile_scan_exempts_only_exact_inventory_node_modules() -> None:
+    policy = synthetic_policy()
+    exception = policy["privacy"]["allowed_upstream_debug_exception"]
+    payloads = {
+        exception["path"]: policy["_fixture"]["exception"],
+        "runtime/node_modules/pkg/virtual.js": b'const home = "/home/web_user";\n',
+    }
+    evidence = VERIFIER._verify_privacy(payloads, policy)
+    assert evidence["exact_inventory_node_modules_generic_profile_scan_exempt"] is True
+    payloads["runtime/modules/reconciliation/source/leak.mjs"] = b'const home = "/home/customer";\n'
+    with pytest.raises(VERIFIER.VerificationError, match="LOCAL_CUSTOMER_BUILD_PATH_LEAK"):
+        VERIFIER._verify_privacy(payloads, policy)
 
 
 @pytest.mark.parametrize(

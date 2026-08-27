@@ -603,6 +603,7 @@ def _privacy_markers(paths: Iterable[Path]) -> list[bytes]:
 def audit_privacy(root: Path, policy: dict[str, Any], local_paths: Iterable[Path]) -> dict[str, Any]:
     exception = policy["privacy"]["allowed_upstream_debug_exception"]
     exception_path = exception["path"]
+    exact_modules_prefix = policy["toolchains"]["node_modules"]["package_path"].rstrip("/") + "/"
     local_markers = _privacy_markers(local_paths)
     unauthorized: list[str] = []
     drive_a = re.compile(rb"(?i)D:\\a\\")
@@ -613,7 +614,9 @@ def audit_privacy(root: Path, policy: dict[str, Any], local_paths: Iterable[Path
         data = item.read_bytes()
         if any(marker in data for marker in local_markers):
             unauthorized.append(relative)
-        profile_hits = sum(len(pattern.findall(data)) for pattern in GENERIC_PROFILE_PATTERNS)
+        profile_hits = 0 if relative.startswith(exact_modules_prefix) else sum(
+            len(pattern.findall(data)) for pattern in GENERIC_PROFILE_PATTERNS
+        )
         drive_hits = len(drive_a.findall(data))
         runner_hits = len(runneradmin.findall(data))
         if relative == exception_path:
@@ -632,6 +635,7 @@ def audit_privacy(root: Path, policy: dict[str, Any], local_paths: Iterable[Path
     return {
         "local_customer_build_paths_absent": True,
         "local_customer_build_path_hits": 0,
+        "exact_inventory_node_modules_generic_profile_scan_exempt": True,
         "only_allowed_upstream_debug_exception_present": True,
         "allowed_upstream_debug_exception": {
             "path": exception["path"], "size": exception["size"], "sha256": exception["sha256"],

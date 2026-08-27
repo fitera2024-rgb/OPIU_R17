@@ -368,6 +368,11 @@ def test_privacy_gate_allows_only_the_exact_bound_upstream_exception() -> None:
         path.write_bytes(data)
         evidence = BUILDER.audit_privacy(root, synthetic, ())
         assert evidence["whole_zip_user_profile_path_free"] is False
+        virtual_home = root / "runtime" / "node_modules" / "pkg" / "virtual.js"
+        virtual_home.parent.mkdir(parents=True)
+        virtual_home.write_bytes(b'const home = "/home/web_user";\n')
+        evidence = BUILDER.audit_privacy(root, synthetic, ())
+        assert evidence["exact_inventory_node_modules_generic_profile_scan_exempt"] is True
         leaked = root / "runtime" / "leak.txt"
         leaked.write_bytes(b"C:\\Users\\customer\\build")
         with pytest.raises(BUILDER.BuildError, match="LOCAL_CUSTOMER_BUILD_PATH_LEAK"):

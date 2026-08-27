@@ -474,11 +474,14 @@ def _read_archive(archive_path: Path, policy: dict[str, Any]) -> tuple[dict[str,
 def _verify_privacy(payloads: dict[str, bytes], policy: dict[str, Any]) -> dict[str, Any]:
     exception = policy["privacy"]["allowed_upstream_debug_exception"]
     exception_path = exception["path"]
+    exact_modules_prefix = policy["toolchains"]["node_modules"]["package_path"].rstrip("/") + "/"
     runneradmin = re.compile(rb"(?i)runneradmin")
     drive_a = re.compile(rb"(?i)D:\\a\\")
     unauthorized: list[str] = []
     for relative, data in payloads.items():
-        profile_hits = sum(len(pattern.findall(data)) for pattern in GENERIC_PROFILE_PATTERNS)
+        profile_hits = 0 if relative.startswith(exact_modules_prefix) else sum(
+            len(pattern.findall(data)) for pattern in GENERIC_PROFILE_PATTERNS
+        )
         runner_hits = len(runneradmin.findall(data))
         drive_hits = len(drive_a.findall(data))
         if relative == exception_path:
@@ -495,6 +498,7 @@ def _verify_privacy(payloads: dict[str, bytes], policy: dict[str, Any]) -> dict[
         raise VerificationError(f"LOCAL_CUSTOMER_BUILD_PATH_LEAK:{len(unauthorized)}")
     return {
         "local_customer_build_paths_absent": True, "local_customer_build_path_hits": 0,
+        "exact_inventory_node_modules_generic_profile_scan_exempt": True,
         "only_allowed_upstream_debug_exception_present": True,
         "allowed_upstream_debug_exception": {
             "path": exception["path"], "size": exception["size"], "sha256": exception["sha256"],

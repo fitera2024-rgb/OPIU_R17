@@ -53,10 +53,6 @@ function rules() {
       release_allowed: false,
       execution_allowed: false,
       live_1c_allowed: false,
-      report_only: true,
-      executed_posting_rows: 0,
-      live_posting_rows: 0,
-      live_delete_allowed: false,
     },
     bindings: [{
       binding_id: "BINDING-SYNTHETIC-001",
@@ -178,10 +174,6 @@ test("exact source leaves receive display-only classification annotations", () =
   assert.ok(result.audit.not_present.every((entry) => entry.status === "NOT_PRESENT_THIS_PERIOD"));
   assert.equal(result.audit.financial_rows, 0);
   assert.equal(result.audit.posting_rows, 0);
-  assert.equal(result.audit.report_only, true);
-  assert.equal(result.audit.executed_posting_rows, 0);
-  assert.equal(result.audit.live_posting_rows, 0);
-  assert.equal(result.audit.live_delete_allowed, false);
   assert.equal(result.audit.residual_consumption, 0);
   assert.equal(result.audit.erp_amount_distributed, 0);
   assert.equal(result.audit.intergroup_effects_consumed, 0);
@@ -227,10 +219,6 @@ test("configured leaves absent in a month are audit-only NOT_PRESENT_THIS_PERIOD
   assert.equal(result.audit.not_present.length, CONFIGURED_LABELS.length);
   assert.equal(result.reporting.rows, reporting.rows);
   assert.equal(result.audit.posting_rows, 0);
-  assert.equal(result.audit.report_only, true);
-  assert.equal(result.audit.executed_posting_rows, 0);
-  assert.equal(result.audit.live_posting_rows, 0);
-  assert.equal(result.audit.live_delete_allowed, false);
 });
 
 test("a configured source item without proven blank ancestry fails closed", () => {

@@ -10,9 +10,11 @@ import {
   hasIntalevParentChildEdge,
   intalevCatalogSourcesStatus,
   parseIntalevArticleCatalog,
+  parseConfiguredIntalevArticleCatalogIfPresent,
   parseIntalevDeletionMark,
   selectIntalevWorkbookCatalogSheet,
 } from "./opiu_reconcile.mjs";
+import { isIntalevCatalogPlaceholderRow } from "./intalev_catalog_parser.mjs";
 
 function validSheet(sheet, sheetIndex, extra = {}) {
   return {
@@ -190,6 +192,68 @@ test("deletion status accepts explicit boolean conventions and rejects unknown v
   assert.deepEqual(parseIntalevDeletionMark("не определено"), {
     valid: false,
     deleted: null,
+  });
+});
+
+test("normalizer recognizes only an explicit empty Intalev placeholder", () => {
+  assert.equal(isIntalevCatalogPlaceholderRow({
+    identity: "c35671d1-d86f-11e7-8e03-001ec9dde64f",
+    parentIdentity: "",
+    label: "",
+    fullPath: "<>",
+  }), true);
+  assert.equal(isIntalevCatalogPlaceholderRow({
+    identity: "ROW",
+    parentIdentity: "ROOT",
+    label: "",
+    fullPath: "<>",
+  }), false);
+  assert.equal(isIntalevCatalogPlaceholderRow({
+    identity: "ROW",
+    parentIdentity: "",
+    label: "",
+    fullPath: "Расходы / ФЗП",
+  }), false);
+});
+
+test("parser quarantines the explicit empty placeholder without rejecting the classifier", async () => {
+  await withWorkbook(async (directory) => {
+    const workbook = Workbook.create();
+    const sheet = workbook.worksheets.add("Статьи БДР");
+    sheet.getRange("A1:E4").values = [
+      ["UUID", "UUIDРодителя", "Наименование", "ПометкаУдаления", "ПолныйПуть"],
+      ["ROOT", "", "Расходы", false, "Расходы"],
+      ["CHILD", "ROOT", "Расходы ИТ", false, "Расходы / Расходы ИТ"],
+      ["PLACEHOLDER", "", "", false, "<>"],
+    ];
+    const filePath = path.join(directory, "classifier-placeholder.xlsx");
+    await saveWorkbook(workbook, filePath);
+
+    const parsed = await parseIntalevArticleCatalog(directory, filePath, "placeholder");
+    assert.equal(parsed.structured_parent_export, true, JSON.stringify(parsed, null, 2));
+    assert.equal(parsed.hierarchy_tree.status, "PASS");
+    assert.equal(parsed.excluded_placeholder_rows, 1);
+    assert.deepEqual(parsed.entries.map((entry) => entry.identity), ["ROOT", "CHILD"]);
+  });
+});
+
+test("missing optional legacy classifier remains report-only instead of throwing ENOENT", async () => {
+  await withWorkbook(async (directory) => {
+    const missingPath = path.join(directory, "external_reference", "intalev_articles.xlsx");
+    const result = await parseConfiguredIntalevArticleCatalogIfPresent(
+      directory,
+      missingPath,
+      "missing_optional_fallback",
+    );
+    assert.equal(result.status, "MISSING_OPTIONAL_FALLBACK_REPORT_ONLY");
+    assert.equal(result.catalog.structured_parent_export, false);
+    assert.equal(
+      result.catalog.hierarchy_tree.status,
+      "BLOCKED_INTALEV_CATALOG_NOT_EXPORTED",
+    );
+    assert.ok(result.catalog.hierarchy_tree.blockers.some(
+      (item) => item.code === "BLOCKED_INTALEV_CATALOG_OPTIONAL_FALLBACK_MISSING",
+    ));
   });
 });
 

@@ -239,14 +239,16 @@ test("fully verified exact hierarchy creates canonical v3 candidate inventory wi
   });
 });
 
-test("missing exact organization identity is honestly blocked with no selectable members", () => {
+test("missing exact organization identity is blocked while observed members remain diagnostic-only", () => {
   const input = verifiedInput();
   input.organization = { name: input.organization.name, path: input.organization.path };
   const result = buildStructuralControlInventoryV3(input);
 
   assert.equal(result.status, "BLOCKED");
-  assert.deepEqual(result.inventory.intalev_members, []);
-  assert.deepEqual(result.inventory.erp_members, []);
+  assert.equal(result.inventory.intalev_members.length, 1);
+  assert.equal(result.inventory.erp_members.length, 1);
+  assert.equal(result.inventory.correction_authority, false);
+  assert.equal(result.inventory.safety.posting_rows, 0);
   assert.ok(result.inventory.blockers.some((item) =>
     item.code === "STRUCTURAL_INVENTORY_ORGANIZATION_ID_MISSING"));
   assert.equal(result.inventory.default_behavior, "PROCESS_ALL_DISCREPANCIES");
@@ -281,24 +283,26 @@ test("a year command cannot create one cross-month inventory", () => {
   assert.equal(result.inventory.default_behavior, "PROCESS_ALL_DISCREPANCIES");
 });
 
-test("duplicate exact hierarchy identity is blocked without deduplication or inference", () => {
+test("duplicate exact hierarchy identity is blocked while unique observed members remain diagnostic-only", () => {
   const input = verifiedInput();
   input.hierarchyPeriods[0].erp_tree.nodes.push({ ...input.hierarchyPeriods[0].erp_tree.nodes[0] });
   const result = buildStructuralControlInventoryV3(input);
 
   assert.equal(result.status, "BLOCKED");
-  assert.deepEqual(result.inventory.erp_members, []);
+  assert.equal(result.inventory.erp_members.length, 1);
+  assert.equal(result.inventory.correction_authority, false);
   assert.ok(result.inventory.blockers.some((item) =>
     item.code === "STRUCTURAL_INVENTORY_NODE_ID_DUPLICATE" && item.side === "ERP"));
 });
 
-test("conflicting source scope hashes are blocked rather than merged", () => {
+test("conflicting source scope hashes are blocked while observed members remain diagnostic-only", () => {
   const input = verifiedInput();
   input.hierarchyPeriods[0].erp_tree.nodes[1].source.sha256 = "D".repeat(64);
   const result = buildStructuralControlInventoryV3(input);
 
   assert.equal(result.status, "BLOCKED");
-  assert.deepEqual(result.inventory.erp_members, []);
+  assert.equal(result.inventory.erp_members.length, 1);
+  assert.equal(result.inventory.correction_authority, false);
   assert.ok(result.inventory.blockers.some((item) =>
     item.code === "STRUCTURAL_INVENTORY_SOURCE_FILE_HASH_CONFLICT" && item.side === "ERP"));
 });

@@ -8,6 +8,8 @@ import {
   bindTemplateRowsToTrees,
   buildErpOutlineTree,
   buildIntalevParentTree,
+  resolveHierarchyNodeFromPath,
+  selectHierarchyTracePathForLabel,
 } from "./hierarchy_tree.mjs";
 import {
   attachCanonicalBindingStatuses,
@@ -84,6 +86,73 @@ test("approved Intalev graph is pinned by config and contains no ERP authority",
   assert.equal(approvedIntalevTemplateGraphAppliesToProfile({ id: "SAKHALIN" }), false);
 });
 
+test("user hierarchy selects the business row instead of a common technical wrapper", () => {
+  const trace = [
+    { full_path: "Расходы / _Статьи ОПиУ 2025 / Административные расходы / Прочие административные расходы" },
+    { full_path: "Расходы / _Статьи ОПиУ 2025 / Административные расходы / Прочие административные расходы / _Допаналитика 2025" },
+    { full_path: "Расходы / _Статьи ОПиУ 2025 / Административные расходы / Прочие административные расходы / Статьи расходов / Прочие административные расходы" },
+  ];
+  assert.equal(
+    selectHierarchyTracePathForLabel(
+      trace,
+      "Прочие административные расходы",
+    ),
+    "Расходы / _Статьи ОПиУ 2025 / Административные расходы / Прочие административные расходы",
+  );
+});
+
+test("duplicate mapped subtotal uses the stronger structural role as parent anchor", () => {
+  const intalevTree = buildErpOutlineTree([
+    { label: "Расходы", outline_level: 0 },
+    { label: "Административные расходы", outline_level: 1 },
+    { label: "Расходы ИТ", outline_level: 2 },
+  ], { requireAmounts: false, system: "INTALEV" });
+  const rows = [
+    { code: "R001", type: "БЛОК", intalev_node_path: "Расходы / Административные расходы" },
+    { code: "R050", type: "ПОДБЛОК", intalev_node_path: "Расходы / Административные расходы" },
+    { code: "R019", type: "СТАТЬЯ", intalev_node_path: "Расходы / Административные расходы / Расходы ИТ" },
+  ];
+  const result = bindTemplateRowsToTrees(rows, {
+    intalevTree,
+    erpTree: intalevTree,
+    canonicalSystem: "INTALEV",
+  });
+  assert.equal(result.rows[2].hierarchy_parent_code, "R001");
+  assert.equal(
+    resolveHierarchyNodeFromPath(
+      "Расходы / Административные расходы / Расходы ИТ",
+      intalevTree,
+    ).status,
+    "PROVEN_EXACT_PRESENTATION_PATH",
+  );
+});
+
+test("ambiguous amount match may still prove an exact business hierarchy node", () => {
+  const rows = fixtureRows();
+  const row = rows.find((item) => item.code === "R012");
+  row.intalev.status = "AMBIGUOUS";
+  row.intalev_label = "Прочие административные расходы";
+  row.hierarchy_path = [
+    "Расходы по основной деятельности ИТОГО",
+    "_Статьи ОПиУ 2025",
+    "2_Административные расходы",
+    "Прочие административные расходы",
+  ];
+  row.hierarchy_level = 3;
+  row.hierarchy_parent_code = "R001";
+  row.hierarchy_node_id = "INTALEV:R012";
+  row.hierarchy_parent_node_id = "INTALEV:R001";
+  row.intalev_hierarchy = { mapped: true };
+  row.hierarchy_source_system = "INTALEV";
+
+  const presented = buildHierarchyPresentationRows(rows).find(
+    (item) => item.code === "R012",
+  );
+  assert.equal(presented.presentation_parent_code, "R001");
+  assert.equal(presented.presentation_hierarchy_status, "HIERARCHY_PROVEN");
+  assert.equal(presented.presentation_structural_proof.status, "PROVEN_LIVE_INTALEV");
+});
+
 test("approved graph parent and path are derived independently from source indentation", () => {
   const tampered = structuredClone(graphDocument);
   const r014 = tampered.nodes.find((node) => node.code === "R014");
@@ -117,7 +186,7 @@ test("owner eight parents come from approved source cells, not R-code logic", ()
     assert.equal(row.presentation_parent_code, expected.parent);
     assert.equal(row.presentation_parent_basis, "APPROVED_INTALEV_TEMPLATE_GRAPH");
     assert.equal(row.presentation_source_outline_level, 4);
-    assert.equal(row.presentation_outline_level, 4);
+    assert.equal(row.presentation_outline_level, row.presentation_depth);
     assert.equal(row.presentation_hierarchy_status, "HIERARCHY_PROVEN");
     assert.equal(row.presentation_structural_proof.status, "PROVEN_APPROVED_TEMPLATE_GRAPH");
     assert.equal(row.presentation_structural_proof.source_cell, expected.cell);
@@ -332,7 +401,11 @@ test("approved Intalev graph proves canonical hierarchy while ERP binding stays 
     assert.equal(row.presentation_structural_proof.erp_used, false);
   }
   assert.equal(byCode.get("R024").presentation_parent_code, "R023");
-  assert.equal(byCode.get("R024").presentation_outline_level, 4);
+  assert.equal(byCode.get("R024").presentation_source_outline_level, 4);
+  assert.equal(
+    byCode.get("R024").presentation_outline_level,
+    byCode.get("R024").presentation_depth,
+  );
   assert.equal(byCode.get("R031").presentation_parent_code, "R029");
   assert.deepEqual(
     new Map([...byCode].map(([code, row]) => [code, [row.amount, row.formula]])),

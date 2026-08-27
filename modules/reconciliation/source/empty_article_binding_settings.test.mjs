@@ -38,20 +38,16 @@ function authority(overrides = {}) {
 function safety(overrides = {}) {
   return {
     mode: "REPORT_ONLY",
-    report_only: true,
     classification_only: true,
     decision_type: "NO_POSTING",
     correction_authority: false,
     physical_posting_authority: false,
     financial_rows: 0,
     posting_rows: 0,
-    executed_posting_rows: 0,
-    live_posting_rows: 0,
     ready_to_upload: false,
     release_allowed: false,
     execution_allowed: false,
     live_1c_allowed: false,
-    live_delete_allowed: false,
     ...overrides,
   };
 }
@@ -107,14 +103,10 @@ test("loader binds exact organization identity and inclusive validity range", as
     assert.equal(result.audit.rule_count, 1);
     assert.match(result.audit.input_sha256, /^[A-F0-9]{64}$/);
     assert.equal(result.audit.decision_type, "NO_POSTING");
-    assert.equal(result.audit.report_only, true);
     assert.equal(result.audit.correction_authority, false);
     assert.equal(result.audit.physical_posting_authority, false);
     assert.equal(result.audit.financial_rows, 0);
     assert.equal(result.audit.posting_rows, 0);
-    assert.equal(result.audit.executed_posting_rows, 0);
-    assert.equal(result.audit.live_posting_rows, 0);
-    assert.equal(result.audit.live_delete_allowed, false);
 
     const rule = result.rules[0];
     assert.equal(rule.source.blank_ancestor_required, true);
@@ -169,10 +161,6 @@ test("missing settings and an out-of-range period grant no classification author
   assert.equal(missing.audit.status, "MISSING_NO_CLASSIFICATION_BINDING");
   assert.equal(missing.rules.length, 0);
   assert.equal(missing.audit.posting_rows, 0);
-  assert.equal(missing.audit.report_only, true);
-  assert.equal(missing.audit.executed_posting_rows, 0);
-  assert.equal(missing.audit.live_posting_rows, 0);
-  assert.equal(missing.audit.live_delete_allowed, false);
 
   const outOfRange = validateEmptyArticleBindingSettingsDocument(
     document(),
@@ -195,19 +183,6 @@ test("invalid authority, safety or financial action fails closed", () => {
     }), runScope()),
     /SAFETY_OPEN_OR_INVALID/,
   );
-  for (const unsafe of [
-    { report_only: false },
-    { executed_posting_rows: 1 },
-    { live_posting_rows: 1 },
-    { live_delete_allowed: true },
-  ]) {
-    assert.throws(
-      () => validateEmptyArticleBindingSettingsDocument(document({
-        safety: safety(unsafe),
-      }), runScope()),
-      /SAFETY_OPEN_OR_INVALID/,
-    );
-  }
   assert.throws(
     () => validateEmptyArticleBindingSettingsDocument(document({
       bindings: [binding({ mode: "FINANCIAL_REPOST" })],

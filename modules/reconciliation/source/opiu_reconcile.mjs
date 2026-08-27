@@ -122,8 +122,17 @@ import {
   structuralControlGroupsFromConfig,
 } from "./structural_control_groups.mjs";
 import { loadStructuralControlSettingsDocument } from "./structural_control_settings_binding.mjs";
+import {
+  buildStructuralControlReportDetail,
+  STRUCTURAL_CONTROL_REPORT_DETAIL_HEADERS,
+} from "./structural_control_report_detail.mjs";
 import { loadEmptyArticleBindingSettingsDocument } from "./empty_article_binding_settings.mjs";
 import { applyEmptyArticleBindingsToBlankArticleReporting } from "./empty_article_binding_application.mjs";
+import {
+  applyArticleApprovalRules,
+  buildArticleApprovalSheet,
+  loadArticleApprovalDocument,
+} from "./article_approval_core.mjs";
 import {
   materializeStructuralControlInventoryV3,
   planStructuralControlInventoryV3,
@@ -214,6 +223,7 @@ const structuralControlSettingsBinding = await loadStructuralControlSettingsDocu
 const activeStructuralControlGroups = structuralControlSettingsBinding.document
   ? structuralControlSettingsBinding.groups
   : structuralControlGroupsFromConfig(config, { organization: args.organization });
+const structuralControlSettingsAudit = structuralControlSettingsBinding.audit;
 const organizationProfileRegistry = JSON.parse(
   await fs.readFile(organizationProfilesPath, "utf8"),
 );
@@ -291,6 +301,9 @@ Owner-approved economic route proof (run-bound, REPORT_ONLY):
 
 Настройки классификации пустых статей (по организации, только UPDATE_MAPPING / NO_POSTING):
    --empty-article-binding-settings "C:\\путь\\empty-article-bindings.json"
+
+Утверждённая область статей (по организации и месяцу, REPORT_ONLY):
+   --article-approval-settings "C:\\путь\\article_registry_<organization_slug>_vNNN.approved.json"
 `);
 }
 
@@ -7611,7 +7624,7 @@ async function buildReportWorkbook(context) {
     periodLabel,
     periods,
     snapshot,
-    aggregateRows,
+    aggregateRows: sourceAggregateRows,
     monthly,
     intalevParsed,
     erpParsed,
@@ -7631,6 +7644,35 @@ async function buildReportWorkbook(context) {
     workDir,
     render,
   } = context;
+  let aggregateRows = (sourceAggregateRows ?? []).map((row) => ({ ...row }));
+  let articleApprovalDocument = null;
+  const articleApprovalSettingsPath = normalizeText(args["article-approval-settings"]);
+  if (articleApprovalSettingsPath) {
+    try {
+      articleApprovalDocument = await loadArticleApprovalDocument(articleApprovalSettingsPath, {
+        organizationId: structuralInventoryScope?.organization_id || profile.organizationCode,
+        organizationName: organization,
+        organizationHierarchyPath: structuralInventoryScope?.organization_path,
+        period: periodLabel,
+        erpCatalog,
+      });
+    } catch (error) {
+      fail(`ARTICLE_APPROVAL_SETTINGS_REJECTED:${error.message}`);
+    }
+  }
+  if (articleApprovalDocument) {
+    aggregateRows = applyArticleApprovalRules(
+      aggregateRows,
+      articleApprovalDocument,
+      {
+        organizationId: structuralInventoryScope?.organization_id || profile.organizationCode,
+        organizationName: organization,
+        organizationHierarchyPath: structuralInventoryScope?.organization_path,
+        period: periodLabel,
+        erpCatalog,
+      },
+    );
+  }
   const tolerance = Number(config.tolerance ?? 0.01);
   const intalevSourceScopes = intalevParsed
     .map((parsed) => parsed?.source_scope_diagnostics)
@@ -7823,6 +7865,7 @@ async function buildReportWorkbook(context) {
   const workbook = Workbook.create();
   workbook.comments.setSelf({ displayName: "Codex — сверка ОПИУ" });
   const passport = workbook.worksheets.add("00_Паспорт");
+  const articleApprovalSheet = workbook.worksheets.add("01_Правила");
   const hierarchySheet = workbook.worksheets.add("01_Сверка_дерево");
   const summary = workbook.worksheets.add("01_Сверка_ОПИУ");
   const monthlySheet = workbook.worksheets.add("02_Помесячно");
@@ -7849,6 +7892,19 @@ async function buildReportWorkbook(context) {
   for (const sheet of workbook.worksheets.items) sheet.showGridLines = false;
 
   buildPassport();
+  const articleApprovalAudit = buildArticleApprovalSheet(articleApprovalSheet, {
+    organization,
+    organizationId: structuralInventoryScope?.organization_id || profile.organizationCode,
+    organizationCode: profile.organizationCode,
+    organizationName: organization,
+    organizationHierarchyPath: structuralInventoryScope?.organization_path,
+    periodLabel,
+    aggregateRows,
+    monthly,
+    erpCatalog,
+    sourceProvenance,
+    articleApprovalDocument,
+  });
   const hierarchyEndRow = buildHierarchyTree();
   const summaryEndRow = buildSummary();
   const monthlyEndRow = buildMonthly();
@@ -7916,6 +7972,7 @@ async function buildReportWorkbook(context) {
     await fs.mkdir(previewDir, { recursive: true });
     const specs = [
       ["00_Паспорт", "A1:D22"],
+      ["01_Правила", `A1:U${Math.min(5 + articleApprovalAudit.row_count, 28)}`],
       ["01_Сверка_дерево", `A1:AD${Math.min(hierarchyEndRow, 28)}`],
       ["01_Сверка_ОПИУ", "A1:R25"],
       ["02_Помесячно", `A1:P${Math.min(monthlyEndRow, 28)}`],
@@ -7924,7 +7981,7 @@ async function buildReportWorkbook(context) {
       ["04_ERP_статьи", `A1:L${Math.min(erpEndRow, 28)}`],
       ["05_Несопоставленные", `A1:I${Math.min(issuesEndRow, 28)}`],
       ["06_Источники", `A1:J${Math.min(sourcesEndRow, 24)}`],
-      ["07_Контроли", `A1:D${Math.min(controlsEndRow, 24)}`],
+      ["07_Контроли", `A1:O${controlsEndRow}`],
     ];
     if (crossJournalSheet) {
       specs.splice(7, 0, [
@@ -7967,7 +8024,7 @@ async function buildReportWorkbook(context) {
     dataStartRow: 7,
     outlineLevels: treeOutlineLevels,
     rowKinds: treeDisplayRows.map((row) => row.kind),
-    activeTabIndex: 1,
+    activeTabIndex: 2,
     freezeRows: 6,
     freezeColumns: 3,
   });
@@ -8041,6 +8098,7 @@ async function buildReportWorkbook(context) {
     schema: "opiu-auto-reconciliation-run-v3",
     generated_at: generatedAt,
     organization,
+    article_approval: articleApprovalAudit,
     organization_code: profile.organizationCode,
     profile_id: profile.id,
     mode,
@@ -10498,10 +10556,24 @@ async function buildReportWorkbook(context) {
         "structural_control_financial_posting_rows=0",
       ].join("; "),
     ]);
+    const structuralControlDetail = buildStructuralControlReportDetail({
+      controls: reportStructuralControlResults,
+      settingsAudit: structuralControlSettingsAudit,
+    });
+    if (structuralControlDetail.financial_rows !== 0 || structuralControlDetail.posting_rows !== 0) {
+      fail("BLOCKED_STRUCTURAL_CONTROL_REPORT_DETAIL_FINANCIAL_AUTHORITY");
+    }
+    const summaryEndRow = 25 + structuralControlRows.length;
+    const detailTitleRow = summaryEndRow + 2;
+    const detailHeaderRow = detailTitleRow + 1;
+    const detailStartRow = detailHeaderRow + 1;
+    const detailEndRow = structuralControlDetail.row_count > 0
+      ? detailStartRow + structuralControlDetail.row_count - 1
+      : detailHeaderRow;
+    const endRow = detailEndRow;
     const journalPairCounts = crossJournalEvidence?.counts ?? {};
     const journalReuseCount = Number(journalPairCounts.reused_intalev_rows ?? 0) +
       Number(journalPairCounts.reused_erp_rows ?? 0);
-    const endRow = 25 + structuralControlRows.length;
     const operationEvidenceStatus = String(operationEvidence?.status ?? "NOT_APPLICABLE");
     const operationEvidenceControlStatus = crossJournalEvidence?.applicable === true
       ? "INFO"
@@ -10616,20 +10688,50 @@ async function buildReportWorkbook(context) {
       [`=COUNTIF('04_ERP_статьи'!$H$5:$H$${erpEnd},"UNMAPPED")+COUNTIF('04_ERP_статьи'!$H$5:$H$${erpEnd},"CATALOG_*")`, `=IF(B10=0,"PASS","BLOCKED")`],
       [erpHierarchyBlockedControlFormula(5, erpEnd), `=IF(B11=0,"PASS","BLOCKED")`],
     ]);
-    styleData(controlsSheet.getRange(`A5:D${endRow}`));
-    controlsSheet.getRange(`C5:C${endRow}`).conditionalFormats.add("containsText", {
+    styleData(controlsSheet.getRange(`A5:D${summaryEndRow}`));
+    controlsSheet.getRange(`C5:C${summaryEndRow}`).conditionalFormats.add("containsText", {
       text: "PASS",
       format: { fill: colors.green, font: { color: "#006100", bold: true } },
     });
-    controlsSheet.getRange(`C5:C${endRow}`).conditionalFormats.add("containsText", {
+    controlsSheet.getRange(`C5:C${summaryEndRow}`).conditionalFormats.add("containsText", {
       text: "BLOCKED",
       format: { fill: colors.red, font: { color: "#9C0006", bold: true } },
     });
-    controlsSheet.getRange(`A${endRow}:D${endRow}`).format = {
+    controlsSheet.getRange(`A${summaryEndRow}:D${summaryEndRow}`).format = {
       fill: colors.red,
       font: { bold: true, color: "#9C0006" },
     };
-    setColumnWidths(controlsSheet, [38, 30, 22, 70], endRow);
+    controlsSheet.getRange(`A${detailTitleRow}:O${detailTitleRow}`).merge();
+    controlsSheet.getRange(`A${detailTitleRow}`).values = [[
+      "Детали структурных групп — выбранные блоки Инталев и ERP",
+    ]];
+    controlsSheet.getRange(`A${detailTitleRow}:O${detailTitleRow}`).format = {
+      fill: colors.blueLight,
+      font: { bold: true, color: "#17365D" },
+    };
+    writeValues(controlsSheet, detailHeaderRow, 1, [
+      [...STRUCTURAL_CONTROL_REPORT_DETAIL_HEADERS],
+    ]);
+    styleHeader(controlsSheet.getRange(`A${detailHeaderRow}:O${detailHeaderRow}`));
+    if (structuralControlDetail.row_count > 0) {
+      writeValues(controlsSheet, detailStartRow, 1, structuralControlDetail.rows);
+      styleData(controlsSheet.getRange(`A${detailStartRow}:O${detailEndRow}`));
+      controlsSheet.getRange(`H${detailStartRow}:M${detailEndRow}`).format.numberFormat =
+        '#,##0.00;[Red](#,##0.00);-';
+      controlsSheet.getRange(`N${detailStartRow}:N${detailEndRow}`).conditionalFormats.add("containsText", {
+        text: "CLOSED",
+        format: { fill: colors.green, font: { color: "#006100", bold: true } },
+      });
+      controlsSheet.getRange(`N${detailStartRow}:N${detailEndRow}`).conditionalFormats.add("containsText", {
+        text: "BLOCK",
+        format: { fill: colors.red, font: { color: "#9C0006", bold: true } },
+      });
+    }
+    setColumnWidths(
+      controlsSheet,
+      [38, 30, 22, 18, 14, 34, 58, 18, 18, 18, 18, 18, 18, 30, 48],
+      endRow,
+    );
     controlsSheet.freezePanes.freezeRows(4);
     return endRow;
   }

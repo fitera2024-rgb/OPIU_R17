@@ -248,6 +248,11 @@ func (p *Pipeline) executeExternal(run Run, contextValue Context, erpPath, intal
 		finish(RunFailed, "R005_SETTINGS", "Настройка привязки пустых статей недоступна или повреждена")
 		return
 	}
+	articleApprovalSettingsPath, err := p.materializeActiveArticleApprovalSettings(run, contextValue, runDir)
+	if err != nil {
+		finish(RunFailed, "R005_SETTINGS", "Утверждённые статьи недоступны или повреждены")
+		return
+	}
 	structuralControlSettingsPath, structuralControlAudit, err := p.materializeActiveStructuralControlSettings(run, contextValue, runDir)
 	if err != nil {
 		finish(RunFailed, "R005_SETTINGS", "Настройка группировки блоков недоступна или повреждена")
@@ -281,6 +286,7 @@ func (p *Pipeline) executeExternal(run Run, contextValue Context, erpPath, intal
 		command := p.commands[stage]
 		if stage == "R005" {
 			command = appendEmptyArticleBindingSettingsArgument(command, emptyArticleBindingSettingsPath)
+			command = appendArticleApprovalSettingsArgument(command, articleApprovalSettingsPath)
 			if structuralControlSettingsPath != "" && hasStructuralControlSettingsArgument(command) {
 				finish(RunFailed, "R005_SETTINGS", "Команда сверки содержит повторную настройку группировки блоков")
 				return
@@ -356,6 +362,11 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 		finish(RunFailed, "R005_SETTINGS", "Настройка привязки пустых статей недоступна или повреждена")
 		return
 	}
+	articleApprovalSettingsPath, err := p.materializeActiveArticleApprovalSettings(run, contextValue, runDir)
+	if err != nil {
+		finish(RunFailed, "R005_SETTINGS", "Утверждённые статьи недоступны или повреждены")
+		return
+	}
 	structuralControlSettingsPath, structuralControlAudit, err := p.materializeActiveStructuralControlSettings(run, contextValue, runDir)
 	if err != nil {
 		finish(RunFailed, "R005_SETTINGS", "Настройка группировки блоков недоступна или повреждена")
@@ -386,6 +397,7 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 		"--output", r005Report,
 	}
 	r005Command = appendEmptyArticleBindingSettingsArgument(r005Command, emptyArticleBindingSettingsPath)
+	r005Command = appendArticleApprovalSettingsArgument(r005Command, articleApprovalSettingsPath)
 	if structuralControlSettingsPath != "" && hasStructuralControlSettingsArgument(r005Command) {
 		finish(RunFailed, "R005_SETTINGS", "Команда сверки содержит повторную настройку группировки блоков")
 		return

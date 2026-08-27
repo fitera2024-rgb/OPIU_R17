@@ -51,7 +51,7 @@
 ### APPROVAL-001 — пользовательские решения по статьям не загружаются обратно в движок
 
 - Дата: `27.08.2026`
-- Статус: `CONTRACTED`
+- Статус: `IMPLEMENTED`
 - Сообщил: пользователь
 - Наблюдаемое поведение: R16 формирует Excel-реестр предположений, но утверждения пользователя из него ещё не фиксируются как версионированный вход следующего запуска.
 - Ожидаемое поведение: движок максимально заполняет лист `01_Правила`, пользователь проверяет только остаток `НУЖНА ПРОВЕРКА`, выбирает одно из пяти решений и фиксирует решения кнопкой интерфейса; после проверок создаётся версионированный approved-файл для точной организации и периода действия.
@@ -349,8 +349,8 @@
 - Затронутые пункты контракта: §§4–7, 10, 12–14; A01–A12, A15.
 - Допустимый scope: удалить вычитание НДФЛ из исходного контейнера R036 и сохранить доказанный `exact_parent_component` через presentation rollup/coverage; никаких ручных сумм, Rules или бизнес-fixtures.
 - Обязательный регрессионный тест: точные physical row identities и суммы пяти операций, source SHA/scope/profile; current R005 восстанавливает golden при неизменных входах либо fail-closed фиксирует доказанный input drift.
-- Реализация: диагностика exact detached `4e34cc9` доказала две регрессии commit `8a63606`: `R036=fzpContainer−NDFL` и потерю physical proof через `normalization_trace`; исправление выполняется отдельно.
-- Протокол проверки: journal SHA и source inputs совпали; идентифицированы ровно пять physical rows, экономически `19 623,00` consumed once, closing `19 623,00` non-additive; ожидается post-fix real run.
+- Реализация: удалено ошибочное вычитание НДФЛ из исходного контейнера `R036`. До presentation rollup добавлено fail-closed восстановление exact ERP parent/alias composition: уникальный summary, единый catalog prefix, полный source-tree proof, одинаковые period/source scope и additive closure; исходный proven trace сохраняется при rollup. `normalization_trace` не получает classifier authority, а доказанные literal ERP totals не переопределяются.
+- Протокол проверки: real October golden/current — `2/2 PASS`; финансовая signature `65/65`, `R036 Инталев = 10 756 935,99`, ERP `9 925 681,99`, delta `+831 254,00`, status `MATCHED`; exact operations `21`, восстановлены 5 unique physical rows, reuse `0`, operational/consumed once `19 623,00`, closing excluded `19 623,00`. Полный R005 исполнителя — `209 PASS`, `0 FAIL`, `1` ожидаемый skip; независимый post-patch review: все локальные `*r005*.test.mjs` `57 PASS`, `0 FAIL`, `1` ожидаемый skip, focused artifact `2/2 PASS`, syntax/diff-check PASS.
 
 ### R005-010 — итоговая книга не соблюдает обязательный состав и порядок листов §12.1
 

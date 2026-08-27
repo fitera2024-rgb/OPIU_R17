@@ -3739,7 +3739,7 @@ function resolveIntalevDiagnosticValue(
     : { amount: null, trace: candidates };
 }
 
-function resolveIntalevRow(templateRow, parsed, profile, intalevCatalog) {
+export function resolveIntalevRow(templateRow, parsed, profile, intalevCatalog) {
   const code = templateRow.code;
   let expectedLabel = templateRow.intalev_label;
   let pathIncludes = [];
@@ -3995,42 +3995,6 @@ function resolveIntalevRow(templateRow, parsed, profile, intalevCatalog) {
         topmostCandidates.length === 1 ? "MATCHED" : "AGGREGATED_RULE",
         topmostCandidates,
         "Прямой НДФЛ в ветке ФЗП отсутствует; использованы верхние видимые узлы НДФЛ внутри этой ветки.",
-      );
-    }
-  }
-  if (
-    code === "R036" &&
-    candidates.length === 1 &&
-    typeof candidates[0].value === "number"
-  ) {
-    const fzpContainer = candidates[0];
-    const normalizedNdfLabel = normalizeLabel("НДФЛ");
-    const ndfDescendants = parsed.nodes.filter(
-      (node) =>
-        node.normalized_label === normalizedNdfLabel &&
-        node.normalized_path.startsWith(`${fzpContainer.normalized_path} / `),
-    );
-    const topmostNdfDescendants = ndfDescendants.filter(
-      (candidate) =>
-        !ndfDescendants.some(
-          (other) =>
-            other !== candidate &&
-            candidate.normalized_path.startsWith(`${other.normalized_path} / `),
-        ),
-    );
-    if (
-      topmostNdfDescendants.length > 0 &&
-      topmostNdfDescendants.every((candidate) => typeof candidate.value === "number")
-    ) {
-      const ndfAmount = topmostNdfDescendants.reduce(
-        (sum, candidate) => sum + candidate.value,
-        0,
-      );
-      return resolvedResult(
-        roundMoney(fzpContainer.value - ndfAmount),
-        "DERIVED_RESIDUAL",
-        [fzpContainer, ...topmostNdfDescendants],
-        "ФЗП сравнивается без НДФЛ: в дереве Инталев НДФЛ является дочерней строкой контейнера ФЗП, а в ERP выведен отдельной статьёй.",
       );
     }
   }
@@ -4644,7 +4608,188 @@ function resolveErpCatalogLeaf(leaf, parsed) {
   );
 }
 
-function resolveErpRows(templateRows, parsed, profile = null, catalogCoverage = null) {
+function catalogPathAlternatives(value) {
+  return normalizeText(value)
+    .split(/\s*\|\s*/u)
+    .map((alternative) => normalizeText(alternative))
+    .filter(Boolean)
+    .map((alternative) => ({
+      raw: alternative,
+      parts: normalizeText(alternative)
+        .split(/\s+\/\s+/u)
+        .map((part) => normalizeText(part))
+        .filter(Boolean),
+    }));
+}
+
+function normalizedCatalogParts(parts = []) {
+  return parts.map(normalizeLabel).filter(Boolean);
+}
+
+function catalogPathDescendsFrom(alternative, prefixParts) {
+  const candidate = normalizedCatalogParts(alternative?.parts);
+  const prefix = normalizedCatalogParts(prefixParts);
+  return prefix.length > 0 && candidate.length > prefix.length &&
+    prefix.every((part, index) => candidate[index] === part);
+}
+
+function pathEndsWithNormalizedLabels(value, labels = []) {
+  const actual = pathParts(value);
+  const expected = labels.map(normalizeLabel).filter(Boolean);
+  return expected.length > 0 && expected.length <= actual.length &&
+    actual.slice(-expected.length).every((part, index) => part === expected[index]);
+}
+
+function exactComponentSourceTreeProven(row) {
+  const proof = row?.source_tree_proof;
+  return proof?.complete === true && ["LEAF", "PASS"].includes(normalizeText(proof?.status));
+}
+
+/**
+ * Catalog binding can expose one physical catalog path as a single path or as
+ * several alternatives.  Normalize that representation before presentation
+ * rollup, but only when every alternative remains inside one exact source
+ * prefix and the unique physical component set closes the source summary.
+ */
+function resolveProvenErpParentCompositionBeforePresentation(templateRow, parsed) {
+  const direct = resolveProvenErpTemplateParentComposition(templateRow, parsed, {
+    tolerance: 0.01,
+  });
+  if (direct.status === "PROVEN_ERP_PARENT_COMPOSITION") return direct;
+
+  const label = normalizeLabel(templateRow?.erp_label || templateRow?.intalev_label);
+  const ancestorLabels = (Array.isArray(templateRow?.intalev_reference_path_labels)
+    ? templateRow.intalev_reference_path_labels
+    : []).slice(0, -1);
+  const expectedPathLabels = [...ancestorLabels, label];
+  const rows = Array.isArray(parsed?.rows) ? parsed.rows : [];
+  const summaries = rows.flatMap((row) => {
+    if (
+      normalizeLabel(row?.article) !== label ||
+      typeof row?.amount !== "number" ||
+      !pathEndsWithNormalizedLabels(row?.full_path, expectedPathLabels)
+    ) {
+      return [];
+    }
+    const alternatives = catalogPathAlternatives(row?.catalog_path)
+      .filter((alternative) =>
+        alternative.parts.length >= 2 &&
+        normalizeLabel(alternative.parts.at(-1)) === label);
+    if (alternatives.length === 0) return [];
+    const deepestLength = Math.max(...alternatives.map((alternative) => alternative.parts.length));
+    const deepest = alternatives.filter((alternative) => alternative.parts.length === deepestLength);
+    const prefixes = unique(
+      deepest.map((alternative) =>
+        normalizedCatalogParts(alternative.parts.slice(0, -1)).join(" / ")),
+    );
+    return prefixes.length === 1
+      ? [{ row, summary_path: deepest[0], prefix_parts: deepest[0].parts.slice(0, -1) }]
+      : [];
+  });
+  if (summaries.length !== 1 || summaries[0].prefix_parts.length === 0) return direct;
+
+  const { row: summary, summary_path: summaryPath, prefix_parts: prefixParts } = summaries[0];
+  const summaryParentPath = normalizeText(summary.full_path)
+    .split(/\s+\/\s+/u)
+    .slice(0, -1)
+    .map(normalizeLabel)
+    .join(" / ");
+  const componentPathByRow = new Map();
+  for (const row of rows) {
+    if (row === summary || typeof row?.amount !== "number" || !exactComponentSourceTreeProven(row)) {
+      continue;
+    }
+    const rowParentPath = normalizeText(row?.full_path)
+      .split(/\s+\/\s+/u)
+      .slice(0, -1)
+      .map(normalizeLabel)
+      .join(" / ");
+    if (rowParentPath !== summaryParentPath) continue;
+    const alternatives = catalogPathAlternatives(row?.catalog_path);
+    if (
+      alternatives.length === 0 ||
+      !alternatives.every((alternative) => catalogPathDescendsFrom(alternative, prefixParts))
+    ) {
+      continue;
+    }
+    const deepestLength = Math.max(...alternatives.map((alternative) => alternative.parts.length));
+    const deepest = alternatives.filter((alternative) => alternative.parts.length === deepestLength);
+    const deepestIdentities = unique(
+      deepest.map((alternative) => normalizedCatalogParts(alternative.parts).join(" / ")),
+    );
+    if (deepestIdentities.length !== 1) continue;
+    const terminal = deepest[0].parts;
+    if (
+      terminal.length >= 2 &&
+      normalizeLabel(terminal.at(-1)) === normalizeLabel(terminal.at(-2))
+    ) {
+      continue;
+    }
+    componentPathByRow.set(row, deepest[0].raw);
+  }
+  if (componentPathByRow.size === 0) return direct;
+
+  const prefix = prefixParts.join(" / ");
+  const normalizedRows = rows.map((row) => {
+    if (row === summary) {
+      return { ...row, catalog_path: `${prefix} | ${summaryPath.raw}` };
+    }
+    const componentPath = componentPathByRow.get(row);
+    if (componentPath) return { ...row, catalog_path: componentPath };
+    const sameParent = normalizeText(row?.full_path)
+      .split(/\s+\/\s+/u)
+      .slice(0, -1)
+      .map(normalizeLabel)
+      .join(" / ") === summaryParentPath;
+    const insidePrefix = catalogPathAlternatives(row?.catalog_path)
+      .some((alternative) => catalogPathDescendsFrom(alternative, prefixParts));
+    return sameParent && insidePrefix
+      ? { ...row, catalog_path: `${prefix} | ${normalizeText(row?.catalog_path)}` }
+      : row;
+  });
+  return resolveProvenErpTemplateParentComposition(
+    templateRow,
+    { ...parsed, rows: normalizedRows },
+    { tolerance: 0.01 },
+  );
+}
+
+function resolveProvenErpCompositionAliasBeforePresentation(templateRow, parsed, parentResult) {
+  const direct = resolveProvenErpCompositionAlias(templateRow, parsed, parentResult);
+  if (direct.status === "PROVEN_ERP_PARENT_COMPOSITION_ALIAS") return direct;
+  const parentSummary = (parentResult?.trace ?? [])
+    .find((row) => row?.exact_parent_summary === true);
+  const prefix = normalizeText(parentSummary?.catalog_path).split(/\s*\|\s*/u)[0];
+  const prefixParts = prefix.split(/\s+\/\s+/u).map(normalizeText).filter(Boolean);
+  const label = normalizeLabel(templateRow?.erp_label || templateRow?.intalev_label);
+  if (!parentSummary || prefixParts.length === 0 || !label) return direct;
+  const normalizedRows = (parsed?.rows ?? []).map((row) => {
+    if (
+      normalizeLabel(row?.article) !== label ||
+      typeof row?.amount !== "number" ||
+      Math.abs(row.amount - parentResult.amount) > 0.01 ||
+      row?.parent_index !== parentSummary?.parent_index ||
+      normalizeText(row?.source_identity_scope) !== normalizeText(parentSummary?.source_identity_scope)
+    ) {
+      return row;
+    }
+    const alternatives = catalogPathAlternatives(row?.catalog_path);
+    if (
+      alternatives.length === 0 ||
+      !alternatives.every((alternative) => catalogPathDescendsFrom(alternative, prefixParts))
+    ) {
+      return row;
+    }
+    return { ...row, catalog_path: `${prefix} | ${normalizeText(row.catalog_path)}` };
+  });
+  return resolveProvenErpCompositionAlias(
+    templateRow,
+    { ...parsed, rows: normalizedRows },
+    parentResult,
+  );
+}
+
+export function resolveErpRows(templateRows, parsed, profile = null, catalogCoverage = null) {
   const results = new Map(
     templateRows.map((row) => [row.code, resolveErpDirect(row, parsed)]),
   );
@@ -4698,9 +4843,7 @@ function resolveErpRows(templateRows, parsed, profile = null, catalogCoverage = 
   for (const templateRow of templateRows) {
     const current = results.get(templateRow.code);
     if (typeof current?.amount === "number") continue;
-    const composition = resolveProvenErpTemplateParentComposition(templateRow, parsed, {
-      tolerance: 0.01,
-    });
+    const composition = resolveProvenErpParentCompositionBeforePresentation(templateRow, parsed);
     if (composition.status !== "PROVEN_ERP_PARENT_COMPOSITION") continue;
     const candidate = resolvedResult(
       composition.amount,
@@ -4708,11 +4851,23 @@ function resolveErpRows(templateRows, parsed, profile = null, catalogCoverage = 
       composition.trace,
       composition.note,
     );
+    const currentComponentCells = (current?.trace ?? [])
+      .filter((item) => item?.exact_parent_component === true)
+      .map((item) => normalizeText(item?.source_cell))
+      .filter(Boolean)
+      .sort();
+    const provenComponentCells = [...composition.component_source_cells]
+      .map(normalizeText)
+      .filter(Boolean)
+      .sort();
     candidate.proven_parent_composition = {
       status: composition.status,
       component_source_cells: composition.component_source_cells,
       catalog_prefix: composition.catalog_prefix,
-      binding_repair_required: true,
+      binding_repair_required:
+        typeof current?.amount !== "number" ||
+        Math.abs(current.amount - composition.amount) > 0.01 ||
+        JSON.stringify(currentComponentCells) !== JSON.stringify(provenComponentCells),
       correction_authority: false,
       posting_rows: 0,
     };
@@ -4728,7 +4883,7 @@ function resolveErpRows(templateRows, parsed, profile = null, catalogCoverage = 
       templateRow?.parent_code,
     );
     if (!parentCode) continue;
-    const compositionAlias = resolveProvenErpCompositionAlias(
+    const compositionAlias = resolveProvenErpCompositionAliasBeforePresentation(
       templateRow,
       parsed,
       results.get(parentCode),
@@ -4740,11 +4895,23 @@ function resolveErpRows(templateRows, parsed, profile = null, catalogCoverage = 
       compositionAlias.trace,
       compositionAlias.note,
     );
+    const currentComponentCells = (current?.trace ?? [])
+      .filter((item) => item?.exact_parent_component === true)
+      .map((item) => normalizeText(item?.source_cell))
+      .filter(Boolean)
+      .sort();
+    const provenComponentCells = [...compositionAlias.component_source_cells]
+      .map(normalizeText)
+      .filter(Boolean)
+      .sort();
     candidate.proven_parent_composition_alias = {
       status: compositionAlias.status,
       alias_source_cell: compositionAlias.alias_source_cell,
       component_source_cells: compositionAlias.component_source_cells,
-      binding_repair_required: true,
+      binding_repair_required:
+        typeof current?.amount !== "number" ||
+        Math.abs(current.amount - compositionAlias.amount) > 0.01 ||
+        JSON.stringify(currentComponentCells) !== JSON.stringify(provenComponentCells),
       correction_authority: false,
       posting_rows: 0,
     };
@@ -5004,7 +5171,10 @@ export function applyVisibleHierarchyGroupRollups(rows = []) {
             `дети ${childCodes.join(", ")}; исходный статус ${originalStatus}.`,
           "Корректировочная и загрузочная полномочность не создаётся.",
         ].filter(Boolean).join(" "),
-        trace: children.flatMap((child) => child?.[system]?.trace ?? []),
+        trace: deduplicateTrace([
+          ...(side?.trace ?? []),
+          ...children.flatMap((child) => child?.[system]?.trace ?? []),
+        ]),
         presentation_group_rollup: {
           schema: "opiu-presentation-group-rollup.v1",
           code,

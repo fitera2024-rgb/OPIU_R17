@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -85,6 +86,98 @@ func TestVisibleReportPackageIsDeterministicAndImmutable(t *testing.T) {
 	after, err := sha256File(manifestPath)
 	if err != nil || before != after {
 		t.Fatalf("direct visible package is not deterministic: before=%s after=%s err=%v", before, after, err)
+	}
+}
+
+func TestNonFinancialReviewIsVisibleAndImmutable(t *testing.T) {
+	_, run, contextValue, runDir, _ := buildVerifiedServiceHandoffFixture(t)
+	r001Dir := filepath.Join(runDir, "r001")
+	writeFailSoftR001PackageFixtureForRun(t, r001Dir, run, contextValue)
+	manifestPath, err := findR001Manifest(r001Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err := readJSONFile(manifestPath, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	reportOnly, correctionAllowed, zero := true, false, 0
+	reviews := []r001NonFinancialReview{{
+		SchemaVersion: "opiu-r001-non-financial-review.v1", PairID: "PAIR-UNBALANCED", SourceRowID: "ROW-12",
+		Operations: []string{"STORNO", "REPOST"}, Amounts: []float64{100, 80},
+		BlockerCodes: []string{"SERVICE_HANDOFF_PAIR_UNBALANCED_NON_FINANCIAL"}, Reason: "Суммы STORNO и REPOST не равны",
+		ReportOnly: &reportOnly, CorrectionAllowed: &correctionAllowed, CanonicalFinancialRows: &zero,
+	}}
+	reviewSHA256, err := nonFinancialReviewSetSHA256(reviews)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviewSHA256 != "6C6BFD0FC2A7A27DA041C85CA2790ED41D812BC145A8C70E4EE7460609DF1661" {
+		t.Fatalf("cross-runtime non-financial review digest drifted: %s", reviewSHA256)
+	}
+	results := manifest["results"].(map[string]any)
+	results["non_financial_review_count"] = 1
+	results["non_financial_review_row_count"] = 1
+	results["non_financial_review_set_sha256"] = reviewSHA256
+	results["non_financial_reviews"] = reviews
+	integrity := results["canonical_output_integrity"].(map[string]any)
+	integrity["non_financial_review_rows"] = 1
+	integrity["non_financial_review_set_sha256"] = reviewSHA256
+	writeOrchestrationJSON(t, manifestPath, manifest)
+	if err := validateR001ReportOnlyPackageForRun(r001Dir, run, contextValue); err != nil {
+		t.Fatalf("non-financial review package rejected: %v", err)
+	}
+	for _, field := range []string{"non_financial_review_count", "non_financial_review_row_count", "non_financial_review_set_sha256", "non_financial_reviews"} {
+		original := results[field]
+		delete(results, field)
+		writeOrchestrationJSON(t, manifestPath, manifest)
+		if err := validateR001ReportOnlyPackageForRun(r001Dir, run, contextValue); err == nil {
+			t.Fatalf("R001 manifest without mandatory %s was accepted", field)
+		}
+		results[field] = original
+	}
+	writeOrchestrationJSON(t, manifestPath, manifest)
+	if err := materializeVisibleReportPackage(run, contextValue, runDir, r001Dir, "R001", "PASS_R001", "Direct handoff complete"); err != nil {
+		t.Fatal(err)
+	}
+	technicalDir := filepath.Join(r001Dir, "service-report-package", "technical")
+	for _, name := range []string{"diagnostics.json", "action-journal.json", "artifact-registry.json", "report-package.manifest.json"} {
+		var document map[string]any
+		if err := readJSONFile(filepath.Join(technicalDir, name), &document); err != nil {
+			t.Fatal(err)
+		}
+		if document["non_financial_review_count"] != float64(1) || document["non_financial_review_row_count"] != float64(1) ||
+			document["non_financial_review_set_sha256"] != reviewSHA256 {
+			t.Fatalf("%s lost non-financial review summary: %#v", name, document)
+		}
+		visibleReviews, ok := document["non_financial_reviews"].([]any)
+		if !ok || len(visibleReviews) != 1 {
+			t.Fatalf("%s lost the exact non-financial review: %#v", name, document)
+		}
+		visible := visibleReviews[0].(map[string]any)
+		if visible["pair_id"] != "PAIR-UNBALANCED" || visible["source_row_id"] != "ROW-12" ||
+			visible["reason"] != "Суммы STORNO и REPOST не равны" || visible["canonical_financial_rows"] != float64(0) ||
+			visible["report_only"] != true || visible["correction_allowed"] != false || document["route_rows"] != float64(0) {
+			t.Fatalf("%s changed the visible non-financial review: %#v", name, visible)
+		}
+		if !reflect.DeepEqual(visible["operations"], []any{"STORNO", "REPOST"}) ||
+			!reflect.DeepEqual(visible["amounts"], []any{float64(100), float64(80)}) ||
+			!reflect.DeepEqual(visible["blocker_codes"], []any{"SERVICE_HANDOFF_PAIR_UNBALANCED_NON_FINANCIAL"}) {
+			t.Fatalf("%s lost non-financial review operations, amounts or blockers: %#v", name, visible)
+		}
+	}
+	if err := validateVisibleReportPackage(r001Dir, run, contextValue); err != nil {
+		t.Fatalf("visible non-financial review package rejected: %v", err)
+	}
+	diagnosticsPath := filepath.Join(technicalDir, "diagnostics.json")
+	var diagnostics map[string]any
+	if err := readJSONFile(diagnosticsPath, &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics["non_financial_reviews"].([]any)[0].(map[string]any)["amounts"] = []any{100.0, 100.0}
+	writeOrchestrationJSON(t, diagnosticsPath, diagnostics)
+	if err := validateVisibleReportPackage(r001Dir, run, contextValue); err == nil {
+		t.Fatal("tampered visible non-financial review was accepted")
 	}
 }
 
@@ -308,6 +401,11 @@ func writeFailSoftR001PackageFixtureForRun(t *testing.T, r001Dir string, run Run
 		}
 		serviceHandoff = map[string]any{"path": handoffPath, "sha256": strings.ToUpper(handoffSHA)}
 	}
+	emptyNonFinancialReviews := []r001NonFinancialReview{}
+	emptyNonFinancialReviewSHA256, err := nonFinancialReviewSetSHA256(emptyNonFinancialReviews)
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeOrchestrationJSON(t, filepath.Join(packageDir, "technical", "manifest.json"), map[string]any{
 		"schema_version": "correction-engine-run-1.0.0", "run_id": run.ID,
 		"inputs": map[string]any{
@@ -317,12 +415,15 @@ func writeFailSoftR001PackageFixtureForRun(t *testing.T, r001Dir string, run Run
 		},
 		"results": map[string]any{
 			"canonical_financial_rows_total": 0, "ready_financial_rows": 0, "sporno_financial_rows": 0,
+			"non_financial_review_count": 0, "non_financial_review_row_count": 0,
+			"non_financial_review_set_sha256": emptyNonFinancialReviewSHA256, "non_financial_reviews": emptyNonFinancialReviews,
 			"report_only": true, "posting_rows": 0, "executed_posting_rows": 0, "live_posting_rows": 0,
 			"execution_allowed": false, "ready_to_upload": false, "release_allowed": false,
 			"live_1c_allowed": false, "live_delete_allowed": false, "output_file_row_counts": []any{},
 			"canonical_output_integrity": map[string]any{
 				"result": "PASS", "canonical_financial_rows_total": 0, "workbook_financial_rows": 0, "registry_financial_rows": 0,
 				"canonical_row_set_sha256": strings.Repeat("A", 64), "report_only": true,
+				"non_financial_review_rows": 0, "non_financial_review_set_sha256": emptyNonFinancialReviewSHA256,
 				"posting_rows": 0, "executed_posting_rows": 0, "live_posting_rows": 0,
 				"execution_allowed": false, "ready_to_upload": false, "release_allowed": false, "live_1c_allowed": false, "live_delete_allowed": false,
 			},
@@ -423,6 +524,7 @@ func writePhysicalRoutingFixture(t *testing.T, r001Dir string, run Run, contextV
 	results["canonical_output_integrity"] = map[string]any{
 		"result": "PASS", "canonical_financial_rows_total": 1, "workbook_financial_rows": 1, "registry_financial_rows": 1,
 		"canonical_row_set_sha256": strings.Repeat("C", 64), "report_only": true,
+		"non_financial_review_rows": 0, "non_financial_review_set_sha256": results["non_financial_review_set_sha256"],
 		"posting_rows": 0, "executed_posting_rows": 0, "live_posting_rows": 0,
 		"execution_allowed": false, "ready_to_upload": false, "release_allowed": false, "live_1c_allowed": false, "live_delete_allowed": false,
 	}

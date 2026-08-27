@@ -14,7 +14,10 @@ import {
   collectCanonicalFinancialOutput,
   verifyCanonicalOutputIntegrity,
 } from "./r001_canonical_output_contract.mjs";
-import { enforceServiceHandoffReadyAuthority } from "./service_r001_ready_authority.mjs";
+import {
+  enforceServiceHandoffReadyAuthority,
+  nonFinancialReviewSetSHA256,
+} from "./service_r001_ready_authority.mjs";
 
 const SHA_A = "A".repeat(64);
 const SHA_B = "B".repeat(64);
@@ -555,7 +558,7 @@ test("invalid full-pair shapes and SourceRowID bindings demote every READY leg",
     },
     { name: "one leg", rows: readyPair("PAIR-ONE", "ONE").slice(0, 1), allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID", expectedRows: 0 },
     { name: "three legs", rows: [...readyPair("PAIR-THREE", "THREE"), canonicalRow({ auditIdentity: "THREE-X", caseOverrides: { pair_id: "PAIR-THREE" } })], allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID", expectedRows: 0 },
-    { name: "four legs", rows: [...readyPair("PAIR-FOUR", "FOUR-A"), ...readyPair("PAIR-FOUR", "FOUR-B")], allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID" },
+    { name: "four legs", rows: [...readyPair("PAIR-FOUR", "FOUR-A"), ...readyPair("PAIR-FOUR", "FOUR-B")], allowed: ["ROW-12"], blocker: "SERVICE_HANDOFF_PAIR_LEG_COUNT_INVALID", expectedRows: 0 },
     {
       name: "duplicate operation",
       rows: [
@@ -605,6 +608,21 @@ test("invalid full-pair shapes and SourceRowID bindings demote every READY leg",
     assert.equal(output.counters.sporno_financial_rows, expectedRows, scenario.name);
     assert.ok(gate.audit.blocker_codes.includes(scenario.blocker), scenario.name);
     assert.ok(output.rows.every((row) => row.output_route === "SPORNO"), scenario.name);
+    if (expectedRows === 0) {
+      assert.equal(gate.audit.non_financial_reviews.length, 1, scenario.name);
+      assert.equal(gate.audit.non_financial_review_row_count, 1, scenario.name);
+      const [review] = gate.audit.non_financial_reviews;
+      assert.equal(review.pair_id, scenario.rows[0].pair_id, scenario.name);
+      assert.equal(review.source_row_id, "ROW-12", scenario.name);
+      assert.deepEqual(review.operations, scenario.rows.map((row) => row.operation), scenario.name);
+      assert.deepEqual(review.amounts, scenario.rows.map((row) => row.amount), scenario.name);
+      assert.ok(review.blocker_codes.includes(scenario.blocker), scenario.name);
+      assert.ok(review.reason.length > 0, scenario.name);
+      assert.equal(review.report_only, true, scenario.name);
+      assert.equal(review.correction_allowed, false, scenario.name);
+      assert.equal(review.canonical_financial_rows, 0, scenario.name);
+      assert.equal(gate.audit.non_financial_review_set_sha256, nonFinancialReviewSetSHA256([review]), scenario.name);
+    }
   }
 });
 
@@ -628,26 +646,31 @@ test("universal zero-sum rejects unequal pairs and authority quarantine emits ze
   const gate = enforceServiceHandoffReadyAuthority([
     canonicalRow({
       auditIdentity: "QUARANTINE-STORNO", amount: 100,
-      sourceOverrides: { source_row_id: "ROW-OUTSIDE" },
-      caseOverrides: { pair_id: "PAIR-QUARANTINE" },
+      caseOverrides: { pair_id: "PAIR-UNBALANCED" },
     }),
     canonicalRow({
       auditIdentity: "QUARANTINE-REPOST", operation: "REPOST", amount: 80,
-      sourceOverrides: { source_row_id: "ROW-OUTSIDE" },
-      caseOverrides: { pair_id: "PAIR-QUARANTINE" },
+      caseOverrides: { pair_id: "PAIR-UNBALANCED" },
     }),
   ], ["ROW-12"]);
   const output = collectCanonicalFinancialOutput(gate.rows);
   assert.equal(output.counters.canonical_financial_rows_total, 0);
   assert.equal(gate.audit.non_financial_pair_count, 1);
   assert.deepEqual(gate.audit.non_financial_reviews[0], {
-    pair_id: "PAIR-QUARANTINE",
-    blocker_codes: [
-      "SERVICE_HANDOFF_SOURCE_ROW_ID_OUTSIDE_EXACT_SET",
-      "SERVICE_HANDOFF_PAIR_UNBALANCED_NON_FINANCIAL",
-    ],
+    schema_version: "opiu-r001-non-financial-review.v1",
+    pair_id: "PAIR-UNBALANCED",
+    source_row_id: "ROW-12",
+    operations: ["STORNO", "REPOST"],
+    amounts: [100, 80],
+    blocker_codes: ["SERVICE_HANDOFF_PAIR_UNBALANCED_NON_FINANCIAL"],
+    reason: "Суммы STORNO и REPOST не равны",
+    report_only: true,
+    correction_allowed: false,
     canonical_financial_rows: 0,
   });
+  assert.equal(gate.audit.non_financial_review_row_count, 1);
+  assert.equal(gate.audit.non_financial_review_set_sha256, nonFinancialReviewSetSHA256(gate.audit.non_financial_reviews));
+  assert.equal(gate.audit.non_financial_review_set_sha256, "6C6BFD0FC2A7A27DA041C85CA2790ED41D812BC145A8C70E4EE7460609DF1661");
 });
 
 test("column P excludes technical audit data while registry keeps it separately", () => {

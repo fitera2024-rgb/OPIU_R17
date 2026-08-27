@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,64 @@ type reportOnlyArtifactSafety struct {
 	ReleaseAllowed    *bool `json:"release_allowed"`
 	Live1CAllowed     *bool `json:"live_1c_allowed"`
 	LiveDeleteAllowed *bool `json:"live_delete_allowed"`
+}
+
+type r001NonFinancialReview struct {
+	SchemaVersion          string    `json:"schema_version"`
+	PairID                 string    `json:"pair_id"`
+	SourceRowID            string    `json:"source_row_id"`
+	Operations             []string  `json:"operations"`
+	Amounts                []float64 `json:"amounts"`
+	BlockerCodes           []string  `json:"blocker_codes"`
+	Reason                 string    `json:"reason"`
+	ReportOnly             *bool     `json:"report_only"`
+	CorrectionAllowed      *bool     `json:"correction_allowed"`
+	CanonicalFinancialRows *int      `json:"canonical_financial_rows"`
+}
+
+func nonFinancialReviewSetSHA256(reviews []r001NonFinancialReview) (string, error) {
+	data, err := json.Marshal(reviews)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(data)
+	return fmt.Sprintf("%X", digest), nil
+}
+
+func validateNonFinancialReviewSet(reviews []r001NonFinancialReview, expectedCount, expectedRows *int, expectedSHA256 string) error {
+	if reviews == nil || expectedCount == nil || expectedRows == nil || *expectedCount < 0 || *expectedRows < 0 ||
+		*expectedCount != len(reviews) || *expectedRows != len(reviews) || !validSHA256(expectedSHA256) {
+		return errors.New("R001 non-financial review count or digest is missing or inconsistent")
+	}
+	pairs := map[string]bool{}
+	for _, review := range reviews {
+		pairID := strings.TrimSpace(review.PairID)
+		if review.SchemaVersion != "opiu-r001-non-financial-review.v1" || pairID == "" || pairs[pairID] ||
+			len(review.Operations) == 0 || len(review.Operations) != len(review.Amounts) || len(review.BlockerCodes) == 0 ||
+			strings.TrimSpace(review.Reason) == "" || review.ReportOnly == nil || !*review.ReportOnly ||
+			review.CorrectionAllowed == nil || *review.CorrectionAllowed || review.CanonicalFinancialRows == nil || *review.CanonicalFinancialRows != 0 {
+			return errors.New("R001 non-financial review is malformed or claims financial authority")
+		}
+		for _, operation := range review.Operations {
+			if strings.TrimSpace(operation) == "" {
+				return errors.New("R001 non-financial review operation is missing")
+			}
+		}
+		blockers := map[string]bool{}
+		for _, blocker := range review.BlockerCodes {
+			blocker = strings.TrimSpace(blocker)
+			if blocker == "" || blockers[blocker] {
+				return errors.New("R001 non-financial review blocker set is not exact unique")
+			}
+			blockers[blocker] = true
+		}
+		pairs[pairID] = true
+	}
+	actualSHA256, err := nonFinancialReviewSetSHA256(reviews)
+	if err != nil || !strings.EqualFold(actualSHA256, expectedSHA256) {
+		return errors.New("R001 non-financial review digest mismatch")
+	}
+	return nil
 }
 
 type r005ReportOnlyManifest struct {
@@ -50,18 +109,24 @@ type r001ReportOnlyManifest struct {
 	} `json:"inputs"`
 	Results struct {
 		reportOnlyArtifactSafety
-		CanonicalRows   *int `json:"canonical_financial_rows_total"`
-		ReadyRows       *int `json:"ready_financial_rows"`
-		SpornoRows      *int `json:"sporno_financial_rows"`
-		OutputRowCounts []struct {
+		CanonicalRows            *int                     `json:"canonical_financial_rows_total"`
+		ReadyRows                *int                     `json:"ready_financial_rows"`
+		SpornoRows               *int                     `json:"sporno_financial_rows"`
+		NonFinancialReviewCount  *int                     `json:"non_financial_review_count"`
+		NonFinancialReviewRows   *int                     `json:"non_financial_review_row_count"`
+		NonFinancialReviewSHA256 string                   `json:"non_financial_review_set_sha256"`
+		NonFinancialReviews      []r001NonFinancialReview `json:"non_financial_reviews"`
+		OutputRowCounts          []struct {
 			FinancialRows int `json:"financial_rows"`
 		} `json:"output_file_row_counts"`
 		CanonicalOutputIntegrity struct {
-			Result          string `json:"result"`
-			CanonicalRows   *int   `json:"canonical_financial_rows_total"`
-			WorkbookRows    *int   `json:"workbook_financial_rows"`
-			RegistryRows    *int   `json:"registry_financial_rows"`
-			CanonicalSHA256 string `json:"canonical_row_set_sha256"`
+			Result                   string `json:"result"`
+			CanonicalRows            *int   `json:"canonical_financial_rows_total"`
+			WorkbookRows             *int   `json:"workbook_financial_rows"`
+			RegistryRows             *int   `json:"registry_financial_rows"`
+			CanonicalSHA256          string `json:"canonical_row_set_sha256"`
+			NonFinancialReviewRows   *int   `json:"non_financial_review_rows"`
+			NonFinancialReviewSHA256 string `json:"non_financial_review_set_sha256"`
 			reportOnlyArtifactSafety
 		} `json:"canonical_output_integrity"`
 	} `json:"results"`
@@ -194,6 +259,14 @@ func validateR001ReportOnlyPackage(r001Dir string) error {
 		*manifest.Results.ReadyRows+*manifest.Results.SpornoRows != *manifest.Results.CanonicalRows {
 		return errors.New("R001 route counts are inconsistent")
 	}
+	if err := validateNonFinancialReviewSet(
+		manifest.Results.NonFinancialReviews,
+		manifest.Results.NonFinancialReviewCount,
+		manifest.Results.NonFinancialReviewRows,
+		manifest.Results.NonFinancialReviewSHA256,
+	); err != nil {
+		return err
+	}
 	if len(manifest.Outputs) == 0 {
 		return errors.New("R001 output registry is empty")
 	}
@@ -234,7 +307,9 @@ func validateR001ReportOnlyPackage(r001Dir string) error {
 	integrity := manifest.Results.CanonicalOutputIntegrity
 	if integrity.Result != "PASS" || integrity.CanonicalRows == nil || integrity.WorkbookRows == nil || integrity.RegistryRows == nil ||
 		*integrity.CanonicalRows != *manifest.Results.CanonicalRows || *integrity.WorkbookRows != *manifest.Results.CanonicalRows ||
-		*integrity.RegistryRows != *manifest.Results.CanonicalRows || !validSHA256(integrity.CanonicalSHA256) {
+		*integrity.RegistryRows != *manifest.Results.CanonicalRows || !validSHA256(integrity.CanonicalSHA256) ||
+		integrity.NonFinancialReviewRows == nil || *integrity.NonFinancialReviewRows != *manifest.Results.NonFinancialReviewRows ||
+		!strings.EqualFold(integrity.NonFinancialReviewSHA256, manifest.Results.NonFinancialReviewSHA256) {
 		return errors.New("R001 canonical output integrity proof is missing or inconsistent")
 	}
 	if err := validateReportOnlySafety(integrity.reportOnlyArtifactSafety); err != nil {
@@ -519,10 +594,15 @@ func materializeVisibleReportPackage(run Run, contextValue Context, runDir, r001
 	diagnostics := map[string]any{
 		"schema_version": "opiu-report-only-diagnostics.v1", "generated_at": generatedAt,
 		"run_id": run.ID, "context_id": contextValue.ID,
-		"organization": map[string]any{"id": contextValue.OrganizationID, "name": contextValue.OrganizationName, "path": contextValue.OrganizationPath},
-		"period":       contextValue.Period,
-		"blocker":      map[string]any{"stage": blockerStage, "status": blockerStatus, "message": blockerMessage},
-		"route_rows":   results["canonical_financial_rows_total"], "safety": completeReportOnlySafety(),
+		"organization":                    map[string]any{"id": contextValue.OrganizationID, "name": contextValue.OrganizationName, "path": contextValue.OrganizationPath},
+		"period":                          contextValue.Period,
+		"blocker":                         map[string]any{"stage": blockerStage, "status": blockerStatus, "message": blockerMessage},
+		"route_rows":                      results["canonical_financial_rows_total"],
+		"non_financial_review_count":      results["non_financial_review_count"],
+		"non_financial_review_row_count":  results["non_financial_review_row_count"],
+		"non_financial_review_set_sha256": results["non_financial_review_set_sha256"],
+		"non_financial_reviews":           results["non_financial_reviews"],
+		"safety":                          completeReportOnlySafety(),
 	}
 	if err := writeImmutableJSON(diagnosticsPath, diagnostics); err != nil {
 		return err
@@ -536,6 +616,10 @@ func materializeVisibleReportPackage(run Run, contextValue Context, runDir, r001
 		"materialization_cases":                results["materialization_cases"],
 		"canonical_financial_audit_identities": results["canonical_financial_audit_identities"],
 		"disputed_blockers":                    results["disputed_blockers"],
+		"non_financial_review_count":           results["non_financial_review_count"],
+		"non_financial_review_row_count":       results["non_financial_review_row_count"],
+		"non_financial_review_set_sha256":      results["non_financial_review_set_sha256"],
+		"non_financial_reviews":                results["non_financial_reviews"],
 		"route_rows":                           results["canonical_financial_rows_total"], "safety": completeReportOnlySafety(),
 	}
 	if err := writeImmutableJSON(journalPath, journal); err != nil {
@@ -601,6 +685,11 @@ func materializeVisibleReportPackage(run Run, contextValue Context, runDir, r001
 		"organization": map[string]any{"id": contextValue.OrganizationID, "name": contextValue.OrganizationName, "path": contextValue.OrganizationPath},
 		"period":       contextValue.Period, "artifacts": artifacts,
 		"correction_registries": correctionRegistries, "safety": completeReportOnlySafety(),
+		"route_rows":                      results["canonical_financial_rows_total"],
+		"non_financial_review_count":      results["non_financial_review_count"],
+		"non_financial_review_row_count":  results["non_financial_review_row_count"],
+		"non_financial_review_set_sha256": results["non_financial_review_set_sha256"],
+		"non_financial_reviews":           results["non_financial_reviews"],
 	}
 	if err := writeImmutableJSON(registryPath, registry); err != nil {
 		return err
@@ -613,17 +702,21 @@ func materializeVisibleReportPackage(run Run, contextValue Context, runDir, r001
 	packageManifest := map[string]any{
 		"schema_version": "opiu-report-only-visible-package.v1", "generated_at": generatedAt,
 		"run_id": run.ID, "context_id": contextValue.ID,
-		"organization":          map[string]any{"id": contextValue.OrganizationID, "name": contextValue.OrganizationName, "path": contextValue.OrganizationPath},
-		"period":                contextValue.Period,
-		"blocker_status":        blockerStatus,
-		"route_rows":            results["canonical_financial_rows_total"],
-		"loader_workbook_count": loaderWorkbookCount,
-		"correction_registries": correctionRegistries,
-		"diagnostics":           diagnosticsArtifact,
-		"journal":               journalArtifact,
-		"artifact_registry":     registryArtifact,
-		"engine_manifest":       engineManifestArtifact,
-		"safety":                completeReportOnlySafety(),
+		"organization":                    map[string]any{"id": contextValue.OrganizationID, "name": contextValue.OrganizationName, "path": contextValue.OrganizationPath},
+		"period":                          contextValue.Period,
+		"blocker_status":                  blockerStatus,
+		"route_rows":                      results["canonical_financial_rows_total"],
+		"non_financial_review_count":      results["non_financial_review_count"],
+		"non_financial_review_row_count":  results["non_financial_review_row_count"],
+		"non_financial_review_set_sha256": results["non_financial_review_set_sha256"],
+		"non_financial_reviews":           results["non_financial_reviews"],
+		"loader_workbook_count":           loaderWorkbookCount,
+		"correction_registries":           correctionRegistries,
+		"diagnostics":                     diagnosticsArtifact,
+		"journal":                         journalArtifact,
+		"artifact_registry":               registryArtifact,
+		"engine_manifest":                 engineManifestArtifact,
+		"safety":                          completeReportOnlySafety(),
 	}
 	return writeImmutableJSON(manifestPath, packageManifest)
 }
@@ -677,6 +770,35 @@ func validateVisibleDocumentScope(value map[string]any, schema string, run Run, 
 	return validateReportOnlySafety(safety)
 }
 
+func validateVisibleNonFinancialReviewProjection(value map[string]any, engineManifest r001ReportOnlyManifest) error {
+	countValue, countOK := value["non_financial_review_count"].(float64)
+	rowCountValue, rowCountOK := value["non_financial_review_row_count"].(float64)
+	digest, digestOK := value["non_financial_review_set_sha256"].(string)
+	rawReviews, reviewsOK := value["non_financial_reviews"]
+	if !countOK || !rowCountOK || !digestOK || !reviewsOK || countValue < 0 || rowCountValue < 0 ||
+		countValue != float64(int(countValue)) || rowCountValue != float64(int(rowCountValue)) {
+		return errors.New("visible non-financial review projection is missing")
+	}
+	reviewData, err := json.Marshal(rawReviews)
+	if err != nil {
+		return err
+	}
+	var reviews []r001NonFinancialReview
+	if err := json.Unmarshal(reviewData, &reviews); err != nil {
+		return errors.New("visible non-financial review projection is malformed")
+	}
+	count, rowCount := int(countValue), int(rowCountValue)
+	if err := validateNonFinancialReviewSet(reviews, &count, &rowCount, digest); err != nil {
+		return fmt.Errorf("invalid visible non-financial review projection: %w", err)
+	}
+	if engineManifest.Results.NonFinancialReviewCount == nil || engineManifest.Results.NonFinancialReviewRows == nil ||
+		count != *engineManifest.Results.NonFinancialReviewCount || rowCount != *engineManifest.Results.NonFinancialReviewRows ||
+		!strings.EqualFold(digest, engineManifest.Results.NonFinancialReviewSHA256) {
+		return errors.New("visible non-financial review projection drifted from the immutable R001 manifest")
+	}
+	return nil
+}
+
 func validateVisibleReportPackage(r001Dir string, run Run, contextValue Context) error {
 	if err := validateR001ReportOnlyPackageForRun(r001Dir, run, contextValue); err != nil {
 		return err
@@ -718,6 +840,9 @@ func validateVisibleReportPackage(r001Dir string, run Run, contextValue Context)
 	if !routeRowsOK || engineManifest.Results.CanonicalRows == nil || int(routeRows) != *engineManifest.Results.CanonicalRows || !loaderCountOK {
 		return errors.New("visible report manifest route counts are missing or inconsistent")
 	}
+	if err := validateVisibleNonFinancialReviewProjection(packageManifest, engineManifest); err != nil {
+		return err
+	}
 	for field, expected := range map[string]struct{ name, kind string }{
 		"diagnostics":       {filepath.ToSlash(filepath.Join("r001", "service-report-package", "technical", "diagnostics.json")), "diagnostics"},
 		"journal":           {filepath.ToSlash(filepath.Join("r001", "service-report-package", "technical", "action-journal.json")), "journal"},
@@ -738,6 +863,9 @@ func validateVisibleReportPackage(r001Dir string, run Run, contextValue Context)
 			return err
 		}
 		if err := validateVisibleDocumentScope(document, schema, run, contextValue); err != nil {
+			return err
+		}
+		if err := validateVisibleNonFinancialReviewProjection(document, engineManifest); err != nil {
 			return err
 		}
 	}

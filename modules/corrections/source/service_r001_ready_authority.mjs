@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { createCanonicalPostingRow } from "./r001_materialization_contract.mjs";
 
 const BLOCKER_MISSING = "SERVICE_HANDOFF_SOURCE_ROW_ID_MISSING";
@@ -8,6 +9,18 @@ const BLOCKER_MIXED_ROUTE = "SERVICE_HANDOFF_PAIR_MIXED_OUTPUT_ROUTE";
 const BLOCKER_OPERATIONS = "SERVICE_HANDOFF_PAIR_OPERATIONS_INVALID";
 const BLOCKER_MULTIPLE_IDS = "SERVICE_HANDOFF_PAIR_MULTIPLE_SOURCE_ROW_IDS";
 const BLOCKER_UNBALANCED = "SERVICE_HANDOFF_PAIR_UNBALANCED_NON_FINANCIAL";
+const NON_FINANCIAL_REVIEW_SCHEMA = "opiu-r001-non-financial-review.v1";
+
+const BLOCKER_REASONS = Object.freeze({
+  [BLOCKER_MISSING]: "Не указан точный SourceRowID физической строки ERP",
+  [BLOCKER_OUTSIDE]: "SourceRowID отсутствует в точном Service handoff",
+  [BLOCKER_REUSED]: "SourceRowID повторно использован другой парой",
+  [BLOCKER_LEG_COUNT]: "Пара не содержит ровно две канонические строки",
+  [BLOCKER_MIXED_ROUTE]: "Строки пары имеют смешанные маршруты READY и СПОРНО",
+  [BLOCKER_OPERATIONS]: "Пара не содержит ровно одну операцию STORNO и одну REPOST",
+  [BLOCKER_MULTIPLE_IDS]: "Пара ссылается более чем на один SourceRowID",
+  [BLOCKER_UNBALANCED]: "Суммы STORNO и REPOST не равны",
+});
 
 function clean(value) {
   return String(value ?? "").replace(/\u00A0/g, " ").trim();
@@ -20,6 +33,43 @@ function unique(values) {
 function economicInputSourceRowID(row) {
   return clean(row?.materialization_case?.physical_source?.source_row_id)
     || clean(row?.source?.source_row_id);
+}
+
+function reviewReason(blockers) {
+  return unique(blockers.map((blocker) => BLOCKER_REASONS[blocker] || blocker)).join("; ");
+}
+
+function nonFinancialReview(pairID, pairRows, blockers) {
+  const sourceRowIDs = unique(pairRows.map(economicInputSourceRowID));
+  return Object.freeze({
+    schema_version: NON_FINANCIAL_REVIEW_SCHEMA,
+    pair_id: pairID,
+    source_row_id: sourceRowIDs.join("; "),
+    operations: Object.freeze(pairRows.map((row) => clean(row?.operation).toUpperCase())),
+    amounts: Object.freeze(pairRows.map((row) => Number(row?.amount ?? 0))),
+    blocker_codes: Object.freeze([...blockers]),
+    reason: reviewReason(blockers),
+    report_only: true,
+    correction_allowed: false,
+    canonical_financial_rows: 0,
+  });
+}
+
+export function nonFinancialReviewSetSHA256(reviews = []) {
+  if (!Array.isArray(reviews)) throw new Error("NON_FINANCIAL_REVIEWS_INVALID_INPUT");
+  const canonical = reviews.map((review) => ({
+    schema_version: review.schema_version,
+    pair_id: review.pair_id,
+    source_row_id: review.source_row_id,
+    operations: review.operations,
+    amounts: review.amounts,
+    blocker_codes: review.blocker_codes,
+    reason: review.reason,
+    report_only: review.report_only,
+    correction_allowed: review.correction_allowed,
+    canonical_financial_rows: review.canonical_financial_rows,
+  }));
+  return crypto.createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex").toUpperCase();
 }
 
 function quarantinePairRow(row, blockers) {
@@ -93,15 +143,15 @@ export function enforceServiceHandoffReadyAuthority(rows = [], sourceRowIDs = []
     if (sourceRowIDsForPair.some((sourceRowID) => (pairsBySourceRowID.get(sourceRowID)?.size ?? 0) !== 1)) {
       blockers.push(BLOCKER_REUSED);
     }
+    const stornoCents = pairRows
+      .filter((row) => clean(row?.operation).toUpperCase() === "STORNO")
+      .reduce((sum, row) => sum + Math.round(Number(row?.amount ?? 0) * 100), 0);
+    const repostCents = pairRows
+      .filter((row) => clean(row?.operation).toUpperCase() === "REPOST")
+      .reduce((sum, row) => sum + Math.round(Number(row?.amount ?? 0) * 100), 0);
+    if (stornoCents <= 0 || repostCents <= 0 || stornoCents !== repostCents) blockers.push(BLOCKER_UNBALANCED);
     if (blockers.length) {
-      const stornoCents = pairRows
-        .filter((row) => clean(row?.operation).toUpperCase() === "STORNO")
-        .reduce((sum, row) => sum + Math.round(Number(row?.amount ?? 0) * 100), 0);
-      const repostCents = pairRows
-        .filter((row) => clean(row?.operation).toUpperCase() === "REPOST")
-        .reduce((sum, row) => sum + Math.round(Number(row?.amount ?? 0) * 100), 0);
-      if (stornoCents <= 0 || repostCents <= 0 || stornoCents !== repostCents) {
-        blockers.push(BLOCKER_UNBALANCED);
+      if (blockers.some((blocker) => [BLOCKER_LEG_COUNT, BLOCKER_OPERATIONS, BLOCKER_UNBALANCED].includes(blocker))) {
         nonFinancialPairIDs.add(pairID);
       }
       blockersByPair.set(pairID, unique(blockers));
@@ -114,11 +164,12 @@ export function enforceServiceHandoffReadyAuthority(rows = [], sourceRowIDs = []
     if (nonFinancialPairIDs.has(pairID)) return [];
     return [blockers ? quarantinePairRow(row, blockers) : row];
   });
-  const nonFinancialReviews = [...nonFinancialPairIDs].map((pairID) => Object.freeze({
-    pair_id: pairID,
-    blocker_codes: Object.freeze([...(blockersByPair.get(pairID) ?? [])]),
-    canonical_financial_rows: 0,
-  }));
+  const nonFinancialReviews = [...nonFinancialPairIDs].map((pairID) => nonFinancialReview(
+    pairID,
+    rowsByPair.get(pairID) ?? [],
+    blockersByPair.get(pairID) ?? [],
+  ));
+  const nonFinancialReviewSHA256 = nonFinancialReviewSetSHA256(nonFinancialReviews);
   return Object.freeze({
     rows: Object.freeze(gatedRows),
     audit: Object.freeze({
@@ -127,6 +178,8 @@ export function enforceServiceHandoffReadyAuthority(rows = [], sourceRowIDs = []
       ready_rows_after_gate: gatedRows.filter((row) => row.output_route === "READY").length,
       blocked_pair_count: blockersByPair.size,
       non_financial_pair_count: nonFinancialReviews.length,
+      non_financial_review_row_count: nonFinancialReviews.length,
+      non_financial_review_set_sha256: nonFinancialReviewSHA256,
       non_financial_reviews: Object.freeze(nonFinancialReviews),
       blocker_codes: Object.freeze(unique([...blockersByPair.values()].flat())),
     }),

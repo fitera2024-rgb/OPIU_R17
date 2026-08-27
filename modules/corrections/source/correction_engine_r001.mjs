@@ -2280,10 +2280,23 @@ function disputedTraceRow(audit) {
   ];
 }
 
-async function buildMasterRegistry(decisions, actions, metadata, outputPath, disputedRows = [], reviewRows = [], analyticalPolicy = null, materializationRows = []) {
+function nonFinancialReviewRegistryRow(review) {
+  const operationAmounts = review.operations
+    .map((operation, index) => `${operation || "НЕ УКАЗАНО"}=${review.amounts[index] ?? ""}`)
+    .join("; ");
+  return [
+    `NONFINANCIAL:${review.pair_id}`, "NON_FINANCIAL_REVIEW", "АВТОМАТИЧЕСКИ", review.pair_id,
+    "", "", review.source_row_id ? `SourceRowID=${review.source_row_id}` : "SourceRowID не указан",
+    "", "", "", operationAmounts, review.reason,
+    "Проверить состав и суммы пары; финансовые строки не сформированы",
+    "NON_FINANCIAL_REVIEW", review.blocker_codes.join("; "), false, false, false,
+  ];
+}
+
+async function buildMasterRegistry(decisions, actions, metadata, outputPath, disputedRows = [], reviewRows = [], analyticalPolicy = null, materializationRows = [], nonFinancialReviews = []) {
   const workbook = Workbook.create();
   const allDecisionRows = exactUniqueDecisionRows([...actions.pairRows, ...reviewRows]);
-  const allBlockerRows = [...actions.blockers, ...reviewRows];
+  const allBlockerRows = [...actions.blockers, ...reviewRows, ...nonFinancialReviews.map(nonFinancialReviewRegistryRow)];
   const passport = addSheet(workbook, "00_Паспорт");
   styleTitle(passport, 0, 8, "Реестр движка корректировок ОПИУ R001");
   styleNotice(passport, 1, 8, "Артефакт QA, не разрешение на загрузку или удаление. execution_allowed=false; ready_to_upload=false; release_allowed=false.", COLORS.paleRed, COLORS.red);
@@ -2295,8 +2308,9 @@ async function buildMasterRegistry(decisions, actions, metadata, outputPath, dis
     ["execution_allowed", false, "ready_to_upload", false, "release_allowed", false, "1С", "НЕ ЗАГРУЖАТЬ"],
     ["Сверка SHA256", metadata.reconciliationSha, "Решения SHA256", metadata.decisionSha || "ВНУТРЕННИЙ АВТОПОИСК", "Автопоиск SHA256", metadata.discoveryPolicySha, "Статус", "REPORT_ONLY"],
     ["Analytical drafts", analyticalPolicy?.counts?.analytical_draft_corrections ?? 0, "Review required", analyticalPolicy?.counts?.review_required ?? 0, "Live rows", 0, "Analytical gate", "REPORT_ONLY"],
+    ["Non-financial reviews", nonFinancialReviews.length, "Review rows", nonFinancialReviews.length, "Review SHA256", metadata.serviceHandoffReadyAuthority?.non_financial_review_set_sha256 ?? "", "Financial authority", false],
   ]);
-  styleBody(passport.getRange("A5:H9"));
+  styleBody(passport.getRange("A5:H10"));
   passport.getRange("A7:H8").format.fill = COLORS.paleRed;
   setWidths(passport, { 0: 24, 1: 44, 2: 24, 3: 44, 4: 24, 5: 44, 6: 24, 7: 32 });
   passport.freezePanes.freezeRows(4);
@@ -2780,14 +2794,19 @@ async function main() {
     annualSummaryRequested,
   );
   analyticalPolicy.counts.structurally_generated_loader_draft_rows = canonicalOutput.counters.canonical_financial_rows_total;
-  await buildMasterRegistry(outputDecisions, actions, metadata, correctionsRegistryFile, disputedRowsForRegistry, disputedSidecar.reviewRows, analyticalPolicy, canonicalOutput.registry_rows);
-  await buildMasterRegistry(outputDecisions, actions, metadata, discrepancyRegistryFile, disputedRowsForRegistry, disputedSidecar.reviewRows, analyticalPolicy, canonicalOutput.registry_rows);
+  const nonFinancialReviews = serviceHandoffAuthority.audit.non_financial_reviews;
+  await buildMasterRegistry(outputDecisions, actions, metadata, correctionsRegistryFile, disputedRowsForRegistry, disputedSidecar.reviewRows, analyticalPolicy, canonicalOutput.registry_rows, nonFinancialReviews);
+  await buildMasterRegistry(outputDecisions, actions, metadata, discrepancyRegistryFile, disputedRowsForRegistry, disputedSidecar.reviewRows, analyticalPolicy, canonicalOutput.registry_rows, nonFinancialReviews);
   const enrichedReconciliationFile = path.join(runDir, "Сверка.xlsx");
   await buildEnrichedReconciliation(reconciliation.workbook, canonicalOutput.registry_rows, enrichedReconciliationFile);
-  const canonicalOutputIntegrity = verifyCanonicalOutputIntegrity(canonicalOutput, {
-    workbook_records: canonicalWorkbookRecords,
-    registry_rows: canonicalOutput.registry_rows,
-  });
+  const canonicalOutputIntegrity = {
+    ...verifyCanonicalOutputIntegrity(canonicalOutput, {
+      workbook_records: canonicalWorkbookRecords,
+      registry_rows: canonicalOutput.registry_rows,
+    }),
+    non_financial_review_rows: serviceHandoffAuthority.audit.non_financial_review_row_count,
+    non_financial_review_set_sha256: serviceHandoffAuthority.audit.non_financial_review_set_sha256,
+  };
 
   const outputFiles = [
     decisionFile,
@@ -2832,6 +2851,10 @@ async function main() {
       repost_rows: canonicalOutput.counters.repost_rows,
       canonical_row_set_sha256: canonicalOutput.canonical_row_set_sha256,
       canonical_financial_audit_identities: canonicalOutput.registry_rows.map((row) => row.audit_identity),
+      non_financial_review_count: serviceHandoffAuthority.audit.non_financial_pair_count,
+      non_financial_review_row_count: serviceHandoffAuthority.audit.non_financial_review_row_count,
+      non_financial_review_set_sha256: serviceHandoffAuthority.audit.non_financial_review_set_sha256,
+      non_financial_reviews: serviceHandoffAuthority.audit.non_financial_reviews,
       output_file_row_counts: canonicalOutput.groups.map((group) => ({
         output_route: group.output_route,
         source_organization: group.source_organization,
@@ -2921,6 +2944,7 @@ export {
   canonicalLoaderContent,
   candidateActionRows,
   disputedTraceRow,
+  nonFinancialReviewRegistryRow,
   deletionWorkbookYearLabel,
   exactUniqueDecisionRows,
   periodYearLabel,

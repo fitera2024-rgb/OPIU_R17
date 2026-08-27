@@ -251,15 +251,15 @@
 ### TEST-001 — fixture empty-article binding отстал от строгой схемы safety
 
 - Дата: `27.08.2026`
-- Статус: `NEW`
+- Статус: `IMPLEMENTED`
 - Сообщил: полный post-commit regression.
 - Наблюдаемое поведение: `empty_article_binding_application.test.mjs` передаёт 11 safety-ключей; строгий production-loader после `R005-007` требует 15 и блокирует шесть тестов кодом `BLOCKED_EMPTY_ARTICLE_BINDING_SETTINGS_SAFETY_KEYS_INVALID`.
 - Ожидаемое поведение: test fixture содержит ровно 15 безопасных ключей, включая `report_only`, `executed_posting_rows`, `live_posting_rows`, `live_delete_allowed`; production-validator не ослабляется.
 - Затронутые пункты контракта: §§3.1, 9.5–9.6, 13–14; A06, A10, A17–A22.
 - Допустимый scope: только `modules/reconciliation/source/empty_article_binding_application.test.mjs`.
 - Обязательный регрессионный тест: targeted `7/7`, полный reconciliation `198/198`, corrections `256/256`.
-- Реализация: ожидается.
-- Протокол проверки: ожидается.
+- Реализация: test-only fixture дополнен четырьмя строгими запретительными полями; production-validator не изменён.
+- Протокол проверки: targeted `empty_article_binding_application.test.mjs` — `7/7 PASS`; полный reconciliation/C02 выполняется после объединения параллельных непересекающихся исправлений.
 
 ### APPROVAL-002 — API не отдаёт authoritative очередь `01_Правила` текущего запуска
 

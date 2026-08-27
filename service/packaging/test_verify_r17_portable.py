@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -16,6 +17,11 @@ SPEC = importlib.util.spec_from_file_location("r17_portable_verifier", SCRIPT)
 VERIFIER = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(VERIFIER)
+BUILDER_SCRIPT = Path(__file__).with_name("build_r17_portable.py")
+BUILDER_SPEC = importlib.util.spec_from_file_location("r17_portable_builder_for_e2e", BUILDER_SCRIPT)
+BUILDER = importlib.util.module_from_spec(BUILDER_SPEC)
+assert BUILDER_SPEC.loader is not None
+BUILDER_SPEC.loader.exec_module(BUILDER)
 
 POLICY_SHA = "A" * 64
 SOURCE_HEAD = "b" * 40
@@ -85,6 +91,48 @@ def audit_evidence(policy: dict[str, object]) -> tuple[dict[str, object], dict[s
     return privacy, legacy
 
 
+def git_blob_row(path: str, data: bytes) -> dict[str, object]:
+    digest = hashlib.sha1()
+    digest.update(f"blob {len(data)}\0".encode("ascii"))
+    digest.update(data)
+    return {
+        "path": path, "size": len(data), "sha256": VERIFIER.sha256_bytes(data),
+        "git_blob": digest.hexdigest(), "git_mode": "100644",
+    }
+
+
+def source_binding(payloads: dict[str, bytes], policy: dict[str, object]) -> dict[str, object]:
+    service_rows = [git_blob_row("service/source/main.go", b"package main\nfunc main() {}\n")]
+    runtime_rows = [
+        git_blob_row(path.removeprefix("runtime/"), data)
+        for path, data in payloads.items()
+        if any(
+            path.startswith("runtime/" + root.rstrip("/") + "/")
+            for root in policy["runtime_source_roots"]
+        )
+    ]
+    bound_rows = [
+        git_blob_row(policy["contract"]["source"], payloads[policy["contract"]["package_path"]]),
+        *(
+            git_blob_row(row["path"], payloads[row["path"]])
+            for row in policy["unicode_settings"]
+        ),
+    ]
+    complete_rows = service_rows + runtime_rows + bound_rows
+    runtime_record = VERIFIER._git_inventory_record_from_rows(runtime_rows)
+    service_record = VERIFIER._git_inventory_record_from_rows(service_rows)
+    complete_record = VERIFIER._git_inventory_record_from_rows(complete_rows)
+    complete_record.update({
+        "source_head": SOURCE_HEAD, "git_object_format": "sha1",
+        "scopes": VERIFIER._source_scope_paths(policy),
+        "exact_git_blobs": True, "ignored_injection_checked": True,
+    })
+    return {
+        "status": "EXACT_GIT_BLOB_EXTRACTION", **runtime_record,
+        "service_source": service_record, "complete_source_scope": complete_record,
+    }
+
+
 def rebuild_manifests(
     payloads: dict[str, bytes], policy: dict[str, object], *,
     closure_override: dict[str, object] | None = None,
@@ -95,6 +143,7 @@ def rebuild_manifests(
         if closure_override is not None
         else VERIFIER.verify_runtime_dependency_closure(payloads)
     )
+    binding = source_binding(payloads, policy)
     runtime_record = VERIFIER.inventory_record(payloads, prefix="runtime/", excluded=("runtime/MANIFEST.json",))
     payloads["runtime/MANIFEST.json"] = json_bytes({
         "schema_version": VERIFIER.RUNTIME_SCHEMA, "source_head": SOURCE_HEAD,
@@ -122,6 +171,7 @@ def rebuild_manifests(
             },
             "privacy": privacy, "legacy_rules_gate": legacy,
             "dependency_closure": dependency_closure,
+            "source_binding": binding,
         })
     package_record = VERIFIER.inventory_record(payloads, excluded=("R17_PACKAGE_MANIFEST.json",))
     payloads["R17_PACKAGE_MANIFEST.json"] = json_bytes({
@@ -227,6 +277,58 @@ def test_positive_static_verification_and_identical_pair() -> None:
         assert pair["release_approved"] is False
 
 
+def test_builder_closure_round_trips_through_independent_verifier_with_real_import() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        policy = synthetic_policy()
+        payloads = valid_payloads(policy)
+        runtime = root / "runtime"
+        for relative, data in payloads.items():
+            if not relative.startswith("runtime/"):
+                continue
+            target = runtime / Path(relative.removeprefix("runtime/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        builder_closure = BUILDER.verify_runtime_dependency_closure(runtime)
+        verifier_closure = VERIFIER.verify_runtime_dependency_closure(payloads)
+        assert builder_closure == verifier_closure == {
+            "status": "PASS", "logical_root": "runtime",
+            "edge_paths": "POSIX_RELATIVE_TO_LOGICAL_ROOT",
+            "relative_dependency_count": 1,
+            "edges": [{
+                "source": "modules/corrections/source/safe.mjs",
+                "specifier": "./dependency.mjs",
+                "target": "modules/corrections/source/dependency.mjs",
+            }],
+        }
+        payloads.pop("R17_BUILD_PROVENANCE.json")
+        rebuild_manifests(payloads, policy, closure_override=builder_closure)
+        archive = root / "OPIU_R17.zip"
+        write_archive(archive, payloads, policy)
+        binding_sha = json.loads(payloads["R17_BUILD_PROVENANCE.json"])[
+            "source_binding"
+        ]["complete_source_scope"]["inventory_sha256"]
+        report = BUILDER.verify_with_independent_verifier(
+            archive, policy, POLICY_SHA, SOURCE_HEAD, binding_sha,
+        )
+        assert report["dependency_closure"] == builder_closure
+        assert report["source_binding"]["inventory_sha256"] == binding_sha
+
+        forged_closure = copy.deepcopy(builder_closure)
+        forged_closure["edges"][0]["source"] = "runtime/modules/corrections/source/safe.mjs"
+        payloads.pop("R17_BUILD_PROVENANCE.json")
+        rebuild_manifests(payloads, policy, closure_override=forged_closure)
+        rejected = root / "rejected" / "OPIU_R17.zip"
+        write_archive(rejected, payloads, policy)
+        rejected_binding_sha = json.loads(payloads["R17_BUILD_PROVENANCE.json"])[
+            "source_binding"
+        ]["complete_source_scope"]["inventory_sha256"]
+        with pytest.raises(BUILDER.BuildError, match="INDEPENDENT_ARCHIVE_VERIFICATION_FAILED"):
+            BUILDER.verify_with_independent_verifier(
+                rejected, policy, POLICY_SHA, SOURCE_HEAD, rejected_binding_sha,
+            )
+
+
 @pytest.mark.parametrize("mutation", ["contract", "unicode", "safety", "privacy", "toolchain"])
 def test_manifest_and_payload_mutations_fail_closed(mutation: str) -> None:
     with tempfile.TemporaryDirectory() as raw:
@@ -281,6 +383,84 @@ def test_missing_relative_import_is_rejected_with_honest_inventories() -> None:
             VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
 
 
+@pytest.mark.parametrize(
+    "mutation", ["missing", "forged_count", "forged_inventory", "forged_source_head"],
+)
+def test_missing_or_forged_provenance_source_binding_is_rejected(mutation: str) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        _, policy, payloads = make_valid(root / "seed")
+        provenance = json.loads(payloads["R17_BUILD_PROVENANCE.json"])
+        if mutation == "missing":
+            provenance.pop("source_binding")
+            message = "SOURCE_BINDING_MISSING_OR_STATUS_INVALID"
+        elif mutation == "forged_count":
+            provenance["source_binding"]["complete_source_scope"]["file_count"] += 1
+            message = "SOURCE_BINDING_INVENTORY_MISMATCH"
+        elif mutation == "forged_inventory":
+            provenance["source_binding"]["complete_source_scope"]["inventory_sha256"] = "F" * 64
+            message = "SOURCE_BINDING_INVENTORY_MISMATCH"
+        else:
+            provenance["source_binding"]["complete_source_scope"]["source_head"] = "c" * 40
+            message = "SOURCE_BINDING_COMPLETE_CLAIMS_INVALID"
+        payloads["R17_BUILD_PROVENANCE.json"] = json_bytes(provenance)
+        rebuild_manifests(payloads, policy)
+        archive = root / mutation / "OPIU_R17.zip"
+        write_archive(archive, payloads, policy)
+        with pytest.raises(VERIFIER.VerificationError, match=message):
+            VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"expected_source_head": "c" * 40}, "EXPECTED_SOURCE_HEAD_MISMATCH"),
+        ({"expected_source_inventory_sha256": "F" * 64}, "SOURCE_BINDING_EXPECTED_INVENTORY_MISMATCH"),
+    ],
+)
+def test_expected_source_head_and_inventory_bindings_are_enforced(
+    kwargs: dict[str, str], message: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        archive, policy, _ = make_valid(Path(raw))
+        with pytest.raises(VERIFIER.VerificationError, match=message):
+            VERIFIER.verify_archive(
+                archive, policy, policy_sha256=POLICY_SHA, **kwargs,
+            )
+
+
+def test_self_consistent_forged_git_inventory_is_rejected_against_expected_binding() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        _, policy, payloads = make_valid(root / "seed")
+        provenance = json.loads(payloads["R17_BUILD_PROVENANCE.json"])
+        binding = provenance["source_binding"]
+        complete = binding["complete_source_scope"]
+        expected_inventory = complete["inventory_sha256"]
+        forged_service_row = git_blob_row("service/source/main.go", b"package main\n// forged\n")
+        service_record = VERIFIER._git_inventory_record_from_rows([forged_service_row])
+        complete_rows = [
+            forged_service_row if row["path"] == "service/source/main.go" else row
+            for row in complete["files"]
+        ]
+        complete_record = VERIFIER._git_inventory_record_from_rows(complete_rows)
+        for field in ("file_count", "total_size", "inventory_sha256", "files"):
+            binding["service_source"][field] = service_record[field]
+            complete[field] = complete_record[field]
+        payloads["R17_BUILD_PROVENANCE.json"] = json_bytes(provenance)
+        rebuild_manifests(payloads, policy)
+        archive = root / "forged" / "OPIU_R17.zip"
+        write_archive(archive, payloads, policy)
+        with pytest.raises(
+            VERIFIER.VerificationError, match="SOURCE_BINDING_EXPECTED_INVENTORY_MISMATCH",
+        ):
+            VERIFIER.verify_archive(
+                archive, policy, policy_sha256=POLICY_SHA,
+                expected_source_head=SOURCE_HEAD,
+                expected_source_inventory_sha256=expected_inventory,
+            )
+
+
 def test_utf16be_local_profile_path_is_rejected_with_honest_inventories() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
@@ -327,6 +507,40 @@ def test_relocation_smoke_api_fails_closed_for_synthetic_non_executables() -> No
             )
 
 
+def test_synthetic_smoke_api_requires_two_distinct_relocation_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        archive, policy, _ = make_valid(root)
+        parents: list[Path | None] = []
+
+        def fake_smoke(
+            _archive: Path, _policy: dict[str, object], *,
+            smoke_parent: Path | None, timeout: float,
+        ) -> dict[str, object]:
+            assert timeout == 3.0
+            parents.append(smoke_parent)
+            return {
+                "status": "PASS", "relocated": True, "node_version_verified": True,
+                "jszip_loaded": True, "artifact_tool_loaded": True,
+                "skia_canvas_loaded": True, "skia_canvas_constructed": True,
+                "health_verified": True, "bootstrap_verified": True,
+                "port_released": True, "all_outputs_under_extracted_root": True,
+                "output_file_count": 1, "localhost_only": True,
+                "release_approved": False,
+            }
+
+        monkeypatch.setattr(VERIFIER, "_run_relocation_smoke_after_static", fake_smoke)
+        report = VERIFIER.verify_archive_relocation_smoke(
+            archive, policy, policy_sha256=POLICY_SHA,
+            smoke_parent=root / "short", timeout=3.0,
+        )
+        assert report["relocation_root_count"] == 2
+        assert report["skia_canvas_constructed_in_both"] is True
+        assert parents == [root / "short" / "relocation-a", root / "short" / "relocation-b"]
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows relocation integration")
 def test_public_relocation_smoke_api_runs_after_static_verification() -> None:
     with tempfile.TemporaryDirectory() as raw:
@@ -348,14 +562,12 @@ def test_real_windows_archive_relocation_smoke() -> None:
     report = VERIFIER.verify_archive_relocation_smoke(
         archive, policy, policy_sha256=VERIFIER.sha256_file(VERIFIER.POLICY_PATH), timeout=30.0,
     )
-    assert report == {
-        "status": "PASS", "relocated": True, "node_version_verified": True,
-        "jszip_loaded": True, "artifact_tool_loaded": True, "skia_canvas_loaded": True,
-        "health_verified": True, "bootstrap_verified": True, "port_released": True,
-        "all_outputs_under_extracted_root": True,
-        "output_file_count": report["output_file_count"],
-        "localhost_only": True, "release_approved": False,
-    }
+    assert report["status"] == "PASS"
+    assert report["relocation_root_count"] == 2
+    assert report["skia_canvas_constructed_in_both"] is True
+    assert report["port_released_in_both"] is True
+    assert len(report["relocations"]) == 2
+    assert all(item["skia_canvas_constructed"] is True for item in report["relocations"])
 
 
 @pytest.mark.parametrize("kind", ["traversal", "casefold", "collision", "timestamp", "mode"])

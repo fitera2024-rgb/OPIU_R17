@@ -25,7 +25,9 @@ PACKAGE_SCHEMA = "opiu-r17-package-manifest.v1"
 PROVENANCE_SCHEMA = "opiu-r17-build-provenance.v1"
 RUNTIME_SCHEMA = "opiu-r17-runtime-manifest.v1"
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
-EXPECTED_POLICY_VALUE_SHA256 = "71400B25F1F765597E33D7F84EBF1C08E1C9BC41DEA52E92AEBEFAA2EA75169E"
+RUNTIME_LOGICAL_ROOT = "runtime"
+RUNTIME_EDGE_PATH_FORMAT = "POSIX_RELATIVE_TO_LOGICAL_ROOT"
+EXPECTED_POLICY_VALUE_SHA256 = "26A3B809C1B1D77E56C293BEB5287A4771590D96BC690636DAC678FEA3685576"
 RELATIVE_IMPORT_PATTERNS = (
     re.compile(r'''(?:from\s+|import\s*\(\s*|require\s*\(\s*|new\s+URL\s*\(\s*)["'](\.[^"']+)["']'''),
     re.compile(r'''\bimport\s*["'](\.[^"']+)["']'''),
@@ -87,6 +89,7 @@ def validate_policy(policy: dict[str, Any], *, enforce_canonical: bool = True) -
         "fixed_zip_time", "contract", "required_metadata", "safety", "toolchains",
         "unicode_settings", "legacy_rules_gate", "privacy", "path_limits",
         "source_integrity", "runtime_dependency_closure", "relocation_smoke",
+        "build_verification",
     }
     if not required.issubset(policy):
         raise VerificationError("POLICY_FIELDS_MISSING")
@@ -183,6 +186,163 @@ def inventory_record(payloads: dict[str, bytes], *, prefix: str = "", excluded: 
     }
 
 
+def _git_inventory_record_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized = sorted((dict(row) for row in rows), key=lambda row: row["path"])
+    encoded = (
+        json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    return {
+        "file_count": len(normalized),
+        "total_size": sum(row["size"] for row in normalized),
+        "inventory_sha256": sha256_bytes(encoded), "files": normalized,
+    }
+
+
+def _git_blob_id(data: bytes, object_format: str) -> str:
+    digest = hashlib.new(object_format)
+    digest.update(f"blob {len(data)}\0".encode("ascii"))
+    digest.update(data)
+    return digest.hexdigest()
+
+
+def _validate_git_inventory(value: Any, label: str, object_format: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not isinstance(value.get("files"), list):
+        raise VerificationError(f"SOURCE_BINDING_INVENTORY_INVALID:{label}")
+    rows = value["files"]
+    if not rows:
+        raise VerificationError(f"SOURCE_BINDING_INVENTORY_EMPTY:{label}")
+    expected_blob_length = 40 if object_format == "sha1" else 64
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"path", "size", "sha256", "git_blob", "git_mode"}:
+            raise VerificationError(f"SOURCE_BINDING_ROW_INVALID:{label}")
+        path = row.get("path")
+        if not isinstance(path, str):
+            raise VerificationError(f"SOURCE_BINDING_PATH_INVALID:{label}")
+        try:
+            validate_relative_path(path, {
+                "path_limits": {"component_max": 255, "relative_max": 4096,
+                                "full_path_prefix": "C:\\S", "full_path_max": 8192},
+                "archive_root": "source",
+            })
+        except VerificationError as error:
+            raise VerificationError(f"SOURCE_BINDING_PATH_INVALID:{label}") from error
+        if path in seen:
+            raise VerificationError(f"SOURCE_BINDING_PATH_DUPLICATE:{label}")
+        seen.add(path)
+        if (
+            not isinstance(row.get("size"), int) or isinstance(row.get("size"), bool)
+            or row["size"] < 0
+            or not isinstance(row.get("sha256"), str)
+            or not re.fullmatch(r"[0-9A-F]{64}", row["sha256"])
+            or not isinstance(row.get("git_blob"), str)
+            or not re.fullmatch(rf"[0-9a-f]{{{expected_blob_length}}}", row["git_blob"])
+            or row.get("git_mode") not in {"100644", "100755"}
+        ):
+            raise VerificationError(f"SOURCE_BINDING_ROW_INVALID:{label}")
+    calculated = _git_inventory_record_from_rows(rows)
+    for field in ("file_count", "total_size", "inventory_sha256", "files"):
+        if value.get(field) != calculated[field]:
+            raise VerificationError(f"SOURCE_BINDING_INVENTORY_MISMATCH:{label}:{field}")
+    return calculated
+
+
+def _source_scope_paths(policy: dict[str, Any]) -> list[str]:
+    return sorted(set([
+        "service/source", *policy["runtime_source_roots"], policy["contract"]["source"],
+        *(row["path"] for row in policy["unicode_settings"]),
+    ]))
+
+
+def _source_excluded(relative: str, policy: dict[str, Any]) -> bool:
+    pure = PurePosixPath(relative)
+    if any(part in set(policy["runtime_excluded_names"]) for part in pure.parts):
+        return True
+    return any(relative.endswith(suffix) for suffix in policy["runtime_excluded_suffixes"])
+
+
+def _verify_source_binding(
+    value: Any, payloads: dict[str, bytes], policy: dict[str, Any], source_head: str,
+    expected_inventory_sha256: str | None,
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("status") != "EXACT_GIT_BLOB_EXTRACTION":
+        raise VerificationError("SOURCE_BINDING_MISSING_OR_STATUS_INVALID")
+    complete = value.get("complete_source_scope")
+    if not isinstance(complete, dict):
+        raise VerificationError("SOURCE_BINDING_COMPLETE_INVENTORY_MISSING")
+    object_format = complete.get("git_object_format")
+    if object_format not in {"sha1", "sha256"}:
+        raise VerificationError("SOURCE_BINDING_OBJECT_FORMAT_INVALID")
+    if (
+        complete.get("source_head") != source_head
+        or complete.get("scopes") != _source_scope_paths(policy)
+        or complete.get("exact_git_blobs") is not True
+        or complete.get("ignored_injection_checked") is not True
+    ):
+        raise VerificationError("SOURCE_BINDING_COMPLETE_CLAIMS_INVALID")
+    complete_record = _validate_git_inventory(complete, "complete_source_scope", object_format)
+    if (
+        expected_inventory_sha256 is not None
+        and complete_record["inventory_sha256"] != expected_inventory_sha256
+    ):
+        raise VerificationError("SOURCE_BINDING_EXPECTED_INVENTORY_MISMATCH")
+    runtime_record = _validate_git_inventory(value, "runtime_sources", object_format)
+    service_record = _validate_git_inventory(value.get("service_source"), "service_source", object_format)
+    complete_by_path = {row["path"]: row for row in complete_record["files"]}
+    expected_runtime_rows = sorted([
+        row for row in complete_record["files"]
+        if any(
+            row["path"].startswith(prefix.rstrip("/") + "/")
+            for prefix in policy["runtime_source_roots"]
+        ) and not _source_excluded(row["path"], policy)
+    ], key=lambda row: row["path"])
+    expected_service_rows = sorted([
+        row for row in complete_record["files"]
+        if row["path"].startswith("service/source/")
+    ], key=lambda row: row["path"])
+    if runtime_record["files"] != expected_runtime_rows:
+        raise VerificationError("SOURCE_BINDING_RUNTIME_SET_NOT_EXACT")
+    if service_record["files"] != expected_service_rows:
+        raise VerificationError("SOURCE_BINDING_SERVICE_SET_NOT_EXACT")
+    for label, record, prefixes in (
+        ("runtime_sources", runtime_record, policy["runtime_source_roots"]),
+        ("service_source", service_record, ["service/source"]),
+    ):
+        for row in record["files"]:
+            if not any(row["path"].startswith(prefix.rstrip("/") + "/") for prefix in prefixes):
+                raise VerificationError(f"SOURCE_BINDING_SCOPE_INVALID:{label}")
+            if complete_by_path.get(row["path"]) != row:
+                raise VerificationError(f"SOURCE_BINDING_SUBSET_MISMATCH:{label}")
+    for row in runtime_record["files"]:
+        packaged = RUNTIME_LOGICAL_ROOT + "/" + row["path"]
+        if (
+            packaged not in payloads or len(payloads[packaged]) != row["size"]
+            or sha256_bytes(payloads[packaged]) != row["sha256"]
+            or _git_blob_id(payloads[packaged], object_format) != row["git_blob"]
+        ):
+            raise VerificationError(f"SOURCE_BINDING_PACKAGED_RUNTIME_MISMATCH:{row['path']}")
+    bound_files = [
+        (policy["contract"]["source"], policy["contract"]["package_path"]),
+        *((row["path"], row["path"]) for row in policy["unicode_settings"]),
+    ]
+    for source_path, package_path in bound_files:
+        row = complete_by_path.get(source_path)
+        if row is None or package_path not in payloads:
+            raise VerificationError(f"SOURCE_BINDING_PACKAGED_FILE_MISSING:{source_path}")
+        if (
+            len(payloads[package_path]) != row["size"]
+            or sha256_bytes(payloads[package_path]) != row["sha256"]
+            or _git_blob_id(payloads[package_path], object_format) != row["git_blob"]
+        ):
+            raise VerificationError(f"SOURCE_BINDING_PACKAGED_FILE_MISMATCH:{source_path}")
+    return {
+        "status": "PASS", "source_head": source_head,
+        "file_count": complete_record["file_count"],
+        "inventory_sha256": complete_record["inventory_sha256"],
+        "exact_git_blobs": True,
+    }
+
+
 def _resolve_relative_dependency(source: str, specifier: str) -> list[str]:
     clean = specifier.split("?", 1)[0].split("#", 1)[0]
     raw_parts = [*PurePosixPath(source).parent.parts, *PurePosixPath(clean).parts]
@@ -207,14 +367,20 @@ def _resolve_relative_dependency(source: str, specifier: str) -> list[str]:
 
 
 def verify_runtime_dependency_closure(payloads: dict[str, bytes]) -> dict[str, Any]:
-    paths = set(payloads)
+    prefix = RUNTIME_LOGICAL_ROOT + "/"
+    runtime_payloads = {
+        relative[len(prefix):]: data
+        for relative, data in payloads.items()
+        if relative.startswith(prefix)
+    }
+    paths = set(runtime_payloads)
     checked = 0
     edges: list[dict[str, str]] = []
     for relative in sorted(paths):
-        if not relative.startswith("runtime/") or PurePosixPath(relative).suffix.lower() not in {".mjs", ".js", ".cjs"}:
+        if PurePosixPath(relative).suffix.lower() not in {".mjs", ".js", ".cjs"}:
             continue
         try:
-            text = payloads[relative].decode("utf-8-sig")
+            text = runtime_payloads[relative].decode("utf-8-sig")
         except UnicodeDecodeError as error:
             raise VerificationError(f"RUNTIME_SOURCE_ENCODING_INVALID:{relative}") from error
         specifiers = []
@@ -227,7 +393,11 @@ def verify_runtime_dependency_closure(payloads: dict[str, bytes]) -> dict[str, A
             if matched is None:
                 raise VerificationError(f"RUNTIME_RELATIVE_IMPORT_MISSING:{relative}:{specifier}")
             edges.append({"source": relative, "specifier": specifier, "target": matched})
-    return {"status": "PASS", "relative_dependency_count": checked, "edges": edges}
+    return {
+        "status": "PASS", "logical_root": RUNTIME_LOGICAL_ROOT,
+        "edge_paths": RUNTIME_EDGE_PATH_FORMAT,
+        "relative_dependency_count": checked, "edges": edges,
+    }
 
 
 def _read_archive(archive_path: Path, policy: dict[str, Any]) -> tuple[dict[str, bytes], dict[str, zipfile.ZipInfo]]:
@@ -349,6 +519,8 @@ def _verify_legacy(payloads: dict[str, bytes], policy: dict[str, Any]) -> dict[s
 
 def verify_archive(
     archive_path: Path, policy: dict[str, Any], *, policy_sha256: str | None = None,
+    expected_source_head: str | None = None,
+    expected_source_inventory_sha256: str | None = None,
     run_smoke: bool = False, smoke_parent: Path | None = None, smoke_timeout: float = 20.0,
 ) -> dict[str, Any]:
     payloads, _ = _read_archive(archive_path, policy)
@@ -381,8 +553,21 @@ def verify_archive(
     source_head = manifest.get("source_head")
     if not isinstance(source_head, str) or not re.fullmatch(r"[0-9a-f]{40}", source_head):
         raise VerificationError("SOURCE_HEAD_INVALID")
+    if expected_source_head is not None and not re.fullmatch(r"[0-9a-fA-F]{40}", expected_source_head):
+        raise VerificationError("EXPECTED_SOURCE_HEAD_INVALID")
+    if expected_source_head is not None and source_head != expected_source_head.lower():
+        raise VerificationError("EXPECTED_SOURCE_HEAD_MISMATCH")
+    if (
+        expected_source_inventory_sha256 is not None
+        and not re.fullmatch(r"[0-9A-F]{64}", expected_source_inventory_sha256)
+    ):
+        raise VerificationError("EXPECTED_SOURCE_INVENTORY_SHA256_INVALID")
     if provenance.get("source_head") != source_head or runtime_manifest.get("source_head") != source_head:
         raise VerificationError("SOURCE_HEAD_BINDING_MISMATCH")
+    source_binding = _verify_source_binding(
+        provenance.get("source_binding"), payloads, policy, source_head,
+        expected_source_inventory_sha256,
+    )
     for document in (manifest, provenance, runtime_manifest):
         assert_safety(document.get("safety"), policy["safety"])
         if document.get("release_approved") not in {None, False}:
@@ -494,9 +679,10 @@ def verify_archive(
         "release_approved": False, "safety": policy["safety"],
         "legacy_rules_gate": legacy, "privacy": privacy,
         "dependency_closure": dependency_closure,
+        "source_binding": source_binding,
     }
     if run_smoke:
-        report["relocation_smoke"] = _run_relocation_smoke_after_static(
+        report["relocation_smoke"] = _run_two_relocation_smokes_after_static(
             archive_path, policy, smoke_parent=smoke_parent, timeout=smoke_timeout,
         )
     return report
@@ -613,11 +799,20 @@ const localRequire = createRequire(path.join(modules, "__opiu_smoke__.cjs"));
     "@oai/artifact-tool",
     path.join(modules, "@oai", "artifact-tool", "node_modules", "skia-canvas"),
   ];
+  let skia;
   for (const spec of specs) {
     const resolved = localRequire.resolve(spec);
-    await import(pathToFileURL(resolved).href);
+    const loaded = await import(pathToFileURL(resolved).href);
+    if (spec === specs[2]) skia = loaded;
   }
-  process.stdout.write("NODE_RUNTIME_LOAD_PASS");
+  const Canvas = skia.Canvas || (skia.default && skia.default.Canvas);
+  if (typeof Canvas !== "function") throw new Error("skia Canvas export missing");
+  const canvas = new Canvas(2, 2);
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("skia Canvas context unavailable");
+  context.fillStyle = "#123456";
+  context.fillRect(0, 0, 2, 2);
+  process.stdout.write("NODE_RUNTIME_LOAD_AND_CANVAS_PASS");
 })().catch((error) => { process.stderr.write(String(error)); process.exit(9); });
 '''
         try:
@@ -628,7 +823,7 @@ const localRequire = createRequire(path.join(modules, "__opiu_smoke__.cjs"));
             )
         except (OSError, subprocess.SubprocessError) as error:
             raise VerificationError("SMOKE_NODE_RUNTIME_LOAD_FAILED") from error
-        if loaded.returncode != 0 or loaded.stdout.strip() != "NODE_RUNTIME_LOAD_PASS":
+        if loaded.returncode != 0 or loaded.stdout.strip() != "NODE_RUNTIME_LOAD_AND_CANVAS_PASS":
             raise VerificationError("SMOKE_NODE_RUNTIME_LOAD_INVALID")
 
         port = _free_loopback_port()
@@ -694,27 +889,76 @@ const localRequire = createRequire(path.join(modules, "__opiu_smoke__.cjs"));
         return {
             "status": "PASS", "relocated": True, "node_version_verified": True,
             "jszip_loaded": True, "artifact_tool_loaded": True, "skia_canvas_loaded": True,
+            "skia_canvas_constructed": True,
             "health_verified": True, "bootstrap_verified": True, "port_released": True,
             "all_outputs_under_extracted_root": True, "output_file_count": len(output_files),
             "localhost_only": True, "release_approved": False,
         }
 
 
+def _run_two_relocation_smokes_after_static(
+    archive_path: Path, policy: dict[str, Any], *, smoke_parent: Path | None, timeout: float,
+) -> dict[str, Any]:
+    parents: list[Path | None]
+    if smoke_parent is None:
+        parents = [None, None]
+    else:
+        resolved = smoke_parent.resolve()
+        parents = [resolved / "relocation-a", resolved / "relocation-b"]
+    relocations = [
+        _run_relocation_smoke_after_static(
+            archive_path, policy, smoke_parent=parent, timeout=timeout,
+        )
+        for parent in parents
+    ]
+    if len(relocations) != 2 or any(report.get("status") != "PASS" for report in relocations):
+        raise VerificationError("SMOKE_TWO_RELOCATION_ROOTS_REQUIRED")
+    boolean_fields = (
+        "relocated", "node_version_verified", "jszip_loaded", "artifact_tool_loaded",
+        "skia_canvas_loaded", "skia_canvas_constructed", "health_verified",
+        "bootstrap_verified", "port_released", "all_outputs_under_extracted_root",
+        "localhost_only",
+    )
+    if any(report.get(field) is not True for report in relocations for field in boolean_fields):
+        raise VerificationError("SMOKE_RELOCATION_REPORT_INVALID")
+    return {
+        "status": "PASS", "relocation_root_count": 2, "relocations": relocations,
+        "skia_canvas_constructed_in_both": True, "port_released_in_both": True,
+        "all_outputs_under_each_extracted_root": True, "release_approved": False,
+    }
+
+
 def verify_archive_relocation_smoke(
     archive_path: Path, policy: dict[str, Any], *, policy_sha256: str | None = None,
+    expected_source_head: str | None = None,
+    expected_source_inventory_sha256: str | None = None,
     smoke_parent: Path | None = None, timeout: float = 20.0,
 ) -> dict[str, Any]:
-    verify_archive(archive_path, policy, policy_sha256=policy_sha256)
-    return _run_relocation_smoke_after_static(
+    verify_archive(
+        archive_path, policy, policy_sha256=policy_sha256,
+        expected_source_head=expected_source_head,
+        expected_source_inventory_sha256=expected_source_inventory_sha256,
+    )
+    return _run_two_relocation_smokes_after_static(
         archive_path, policy, smoke_parent=smoke_parent, timeout=timeout,
     )
 
 
 def verify_pair(
     archive_a: Path, archive_b: Path, policy: dict[str, Any], *, policy_sha256: str | None = None,
+    expected_source_head: str | None = None,
+    expected_source_inventory_sha256: str | None = None,
 ) -> dict[str, Any]:
-    first = verify_archive(archive_a, policy, policy_sha256=policy_sha256)
-    second = verify_archive(archive_b, policy, policy_sha256=policy_sha256)
+    first = verify_archive(
+        archive_a, policy, policy_sha256=policy_sha256,
+        expected_source_head=expected_source_head,
+        expected_source_inventory_sha256=expected_source_inventory_sha256,
+    )
+    second = verify_archive(
+        archive_b, policy, policy_sha256=policy_sha256,
+        expected_source_head=expected_source_head,
+        expected_source_inventory_sha256=expected_source_inventory_sha256,
+    )
     if first["sha256"] != second["sha256"] or archive_a.read_bytes() != archive_b.read_bytes():
         raise VerificationError("INDEPENDENT_ARCHIVES_NOT_BYTE_IDENTICAL")
     if first["source_head"] != second["source_head"]:
@@ -732,6 +976,8 @@ def main() -> None:
     parser.add_argument("--archive-a", type=Path, required=True)
     parser.add_argument("--archive-b", type=Path)
     parser.add_argument("--policy", type=Path, default=POLICY_PATH)
+    parser.add_argument("--expected-source-head", required=True)
+    parser.add_argument("--expected-source-inventory-sha256", required=True)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--smoke-parent", type=Path)
     parser.add_argument("--smoke-timeout", type=float, default=20.0)
@@ -740,10 +986,16 @@ def main() -> None:
         policy = load_policy(arguments.policy)
         policy_sha = sha256_file(arguments.policy)
         result = (
-            verify_pair(arguments.archive_a, arguments.archive_b, policy, policy_sha256=policy_sha)
+            verify_pair(
+                arguments.archive_a, arguments.archive_b, policy, policy_sha256=policy_sha,
+                expected_source_head=arguments.expected_source_head,
+                expected_source_inventory_sha256=arguments.expected_source_inventory_sha256,
+            )
             if arguments.archive_b else
             verify_archive(
                 arguments.archive_a, policy, policy_sha256=policy_sha,
+                expected_source_head=arguments.expected_source_head,
+                expected_source_inventory_sha256=arguments.expected_source_inventory_sha256,
                 run_smoke=arguments.smoke, smoke_parent=arguments.smoke_parent,
                 smoke_timeout=arguments.smoke_timeout,
             )
@@ -751,6 +1003,8 @@ def main() -> None:
         if arguments.archive_b and arguments.smoke:
             result["relocation_smoke"] = verify_archive_relocation_smoke(
                 arguments.archive_a, policy, policy_sha256=policy_sha,
+                expected_source_head=arguments.expected_source_head,
+                expected_source_inventory_sha256=arguments.expected_source_inventory_sha256,
                 smoke_parent=arguments.smoke_parent, timeout=arguments.smoke_timeout,
             )
     except VerificationError as error:

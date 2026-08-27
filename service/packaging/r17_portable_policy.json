@@ -150,17 +150,28 @@
     "reject_tracked_drift": true,
     "reject_untracked_injection": true,
     "reject_ignored_injection": true,
-    "recheck_before_and_after_each_build": true
+    "recheck_before_and_after_each_build": true,
+    "provenance_binding_required": true,
+    "expected_source_head_and_inventory_required_for_build_verification": true
   },
   "runtime_dependency_closure": {
+    "logical_root": "runtime",
+    "edge_paths": "POSIX_RELATIVE_TO_LOGICAL_ROOT",
     "relative_imports_required": true,
     "missing_imports_rejected": true
   },
   "relocation_smoke": {
+    "relocation_roots": 2,
     "windows_required": true,
     "health_required": true,
     "node_and_package_load_required": true,
+    "skia_canvas_construct_required": true,
     "port_release_required": true,
     "outputs_under_extracted_root": true
+  },
+  "build_verification": {
+    "independent_verifier_required_before_promotion": true,
+    "verify_both_archives": true,
+    "outputs_and_temporary_publish_paths_outside_repository": true
   }
 }

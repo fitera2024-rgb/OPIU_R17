@@ -25,6 +25,7 @@ from typing import Any, Callable, Iterable
 
 POLICY_PATH = Path(__file__).with_name("r17_portable_policy.json")
 _BASE_PATH = Path(__file__).with_name("build_clean_source_service_candidate.py")
+_INDEPENDENT_VERIFIER_PATH = Path(__file__).with_name("verify_r17_portable.py")
 _BASE_SPEC = importlib.util.spec_from_file_location("opiu_r17_packaging_base", _BASE_PATH)
 if _BASE_SPEC is None or _BASE_SPEC.loader is None:
     raise RuntimeError("CLEAN_PACKAGING_BASE_IMPORT_FAILED")
@@ -37,7 +38,9 @@ PROVENANCE_SCHEMA = "opiu-r17-build-provenance.v1"
 RUNTIME_SCHEMA = "opiu-r17-runtime-manifest.v1"
 POLICY_SCHEMA = "opiu-r17-portable-policy.v1"
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
-EXPECTED_POLICY_VALUE_SHA256 = "71400B25F1F765597E33D7F84EBF1C08E1C9BC41DEA52E92AEBEFAA2EA75169E"
+RUNTIME_LOGICAL_ROOT = "runtime"
+RUNTIME_EDGE_PATH_FORMAT = "POSIX_RELATIVE_TO_LOGICAL_ROOT"
+EXPECTED_POLICY_VALUE_SHA256 = "26A3B809C1B1D77E56C293BEB5287A4771590D96BC690636DAC678FEA3685576"
 RELATIVE_IMPORT_PATTERNS = (
     re.compile(r'''(?:from\s+|import\s*\(\s*|require\s*\(\s*|new\s+URL\s*\(\s*)["'](\.[^"']+)["']'''),
     re.compile(r'''\bimport\s*["'](\.[^"']+)["']'''),
@@ -421,7 +424,11 @@ def verify_runtime_dependency_closure(root: Path) -> dict[str, Any]:
             if matched is None:
                 raise BuildError(f"RUNTIME_RELATIVE_IMPORT_MISSING:{relative}:{specifier}")
             edges.append({"source": relative, "specifier": specifier, "target": matched})
-    return {"status": "PASS", "relative_dependency_count": checked, "edges": edges}
+    return {
+        "status": "PASS", "logical_root": RUNTIME_LOGICAL_ROOT,
+        "edge_paths": RUNTIME_EDGE_PATH_FORMAT,
+        "relative_dependency_count": checked, "edges": edges,
+    }
 
 
 def _production_scan_files(repository: Path) -> list[Path]:
@@ -710,8 +717,31 @@ def write_deterministic_zip(stage: Path, output: Path, policy: dict[str, Any]) -
             archive.writestr(info, item.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
 
 
+def verify_with_independent_verifier(
+    archive_path: Path, policy: dict[str, Any], policy_sha: str, source_head: str,
+    source_inventory_sha256: str,
+) -> dict[str, Any]:
+    spec = importlib.util.spec_from_file_location("opiu_r17_independent_verifier", _INDEPENDENT_VERIFIER_PATH)
+    if spec is None or spec.loader is None:
+        raise BuildError("INDEPENDENT_VERIFIER_IMPORT_FAILED")
+    verifier = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(verifier)
+        report = verifier.verify_archive(
+            archive_path, policy, policy_sha256=policy_sha,
+            expected_source_head=source_head,
+            expected_source_inventory_sha256=source_inventory_sha256,
+        )
+    except Exception as error:
+        raise BuildError(f"INDEPENDENT_ARCHIVE_VERIFICATION_FAILED:{type(error).__name__}") from error
+    if report.get("status") != "PASS_REPORT_ONLY_CANDIDATE" or report.get("release_approved") is not False:
+        raise BuildError("INDEPENDENT_ARCHIVE_VERIFICATION_RESULT_INVALID")
+    return report
+
+
 def promote_independent_pair(
     output_a: Path, output_b: Path, producer: Callable[[int, Path], None], archive_name: str,
+    archive_verifier: Callable[[int, Path], dict[str, Any]],
 ) -> dict[str, Any]:
     first, second = output_a.resolve(), output_b.resolve()
     if first.name != archive_name or second.name != archive_name:
@@ -722,16 +752,28 @@ def promote_independent_pair(
         if output.exists():
             raise BuildError(f"OUTPUT_ALREADY_EXISTS:{output.name}")
     temporaries: list[Path] = []
+    temporary_directories: list[tempfile.TemporaryDirectory[str]] = []
     promoted: list[Path] = []
     try:
         for index, output in enumerate((first, second)):
             output.parent.mkdir(parents=True, exist_ok=True)
-            descriptor, raw = tempfile.mkstemp(prefix=f".{archive_name}.", suffix=".building", dir=output.parent)
-            os.close(descriptor)
-            temporary = Path(raw)
-            temporary.unlink()
+            temporary_directory = tempfile.TemporaryDirectory(
+                prefix=".opiu-r17-publish-", dir=output.parent,
+            )
+            temporary_directories.append(temporary_directory)
+            temporary = Path(temporary_directory.name) / archive_name
             temporaries.append(temporary)
             producer(index, temporary)
+        verification_reports: list[dict[str, Any]] = []
+        verification_errors: list[tuple[int, Exception]] = []
+        for index, temporary in enumerate(temporaries):
+            try:
+                verification_reports.append(archive_verifier(index, temporary))
+            except Exception as error:
+                verification_errors.append((index, error))
+        if verification_errors:
+            indexes = ",".join(str(index + 1) for index, _error in verification_errors)
+            raise BuildError(f"INDEPENDENT_ARCHIVE_PAIR_VERIFICATION_FAILED:{indexes}") from verification_errors[0][1]
         hashes = [sha256_file(path) for path in temporaries]
         if hashes[0] != hashes[1] or temporaries[0].read_bytes() != temporaries[1].read_bytes():
             raise BuildError("INDEPENDENT_OUTPUTS_NONDETERMINISTIC")
@@ -743,13 +785,40 @@ def promote_independent_pair(
             output.unlink(missing_ok=True)
         raise
     finally:
-        for temporary in temporaries:
-            temporary.unlink(missing_ok=True)
+        for temporary_directory in reversed(temporary_directories):
+            temporary_directory.cleanup()
     return {
         "archive_name": archive_name, "first_sha256": hashes[0], "second_sha256": hashes[1],
         "size": first.stat().st_size, "byte_identical": True,
         "independent_complete_builds": 2, "atomic_no_overwrite": True,
+        "independent_verification_before_promotion": True,
+        "verified_archive_count": len(verification_reports),
     }
+
+
+def assert_publish_paths_outside_repository(
+    repository: Path, output_a: Path, output_b: Path, archive_name: str,
+) -> None:
+    repository = repository.resolve()
+    outputs = [output_a.resolve(), output_b.resolve()]
+    if os.path.normcase(str(outputs[0])) == os.path.normcase(str(outputs[1])):
+        raise BuildError("OUTPUT_PATHS_MUST_BE_DISTINCT")
+    for output in outputs:
+        if output.name != archive_name:
+            raise BuildError("OUTPUT_NAME_MUST_BE_OPIU_R17_ZIP")
+        try:
+            output.relative_to(repository)
+        except ValueError:
+            pass
+        else:
+            raise BuildError("OUTPUT_OR_PUBLISH_PATH_INSIDE_REPOSITORY")
+    temporary_root = Path(tempfile.gettempdir()).resolve()
+    try:
+        temporary_root.relative_to(repository)
+    except ValueError:
+        pass
+    else:
+        raise BuildError("BUILD_TEMP_ROOT_INSIDE_REPOSITORY")
 
 
 def _build_one(
@@ -821,6 +890,9 @@ def build(
     repository = repository.resolve()
     policy_path = policy_path.resolve()
     policy = load_policy(policy_path)
+    assert_publish_paths_outside_repository(
+        repository, output_a, output_b, policy["archive_name"],
+    )
     policy_sha = sha256_file(policy_path)
     verified_head = BASE.verify_repository(repository, source_head)
     source_record = exact_git_source_inventory(repository, verified_head, policy)
@@ -836,7 +908,18 @@ def build(
             node_exe.resolve(), node_modules.resolve(), policy, policy_sha, source_record,
         )
 
-    outputs = promote_independent_pair(output_a, output_b, producer, policy["archive_name"])
+    def archive_verifier(index: int, temporary_output: Path) -> dict[str, Any]:
+        report = verify_with_independent_verifier(
+            temporary_output, policy, policy_sha, verified_head,
+            source_record["inventory_sha256"],
+        )
+        if report.get("archive") != policy["archive_name"]:
+            raise BuildError(f"INDEPENDENT_ARCHIVE_{index + 1}_IDENTITY_INVALID")
+        return report
+
+    outputs = promote_independent_pair(
+        output_a, output_b, producer, policy["archive_name"], archive_verifier,
+    )
     return {
         "status": "BUILT_REPORT_ONLY_ARCH_GATED_CANDIDATE", "source_head": verified_head,
         "policy_sha256": policy_sha, "legacy_rules_gate": legacy,

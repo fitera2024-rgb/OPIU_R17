@@ -59,6 +59,13 @@ def test_canonical_policy_contains_all_exact_pins_and_closed_gates() -> None:
     }
     assert policy["safety"]["mode"] == "REPORT_ONLY"
     assert policy["safety"]["rules_service"] is False
+    assert policy["runtime_dependency_closure"] == {
+        "logical_root": "runtime", "edge_paths": "POSIX_RELATIVE_TO_LOGICAL_ROOT",
+        "relative_imports_required": True, "missing_imports_rejected": True,
+    }
+    assert policy["relocation_smoke"]["relocation_roots"] == 2
+    assert policy["relocation_smoke"]["skia_canvas_construct_required"] is True
+    assert policy["build_verification"]["verify_both_archives"] is True
     BUILDER.assert_closed_safety(policy["safety"])
 
 
@@ -153,6 +160,7 @@ def test_two_independent_zip_producers_are_byte_identical_atomic_and_no_overwrit
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         calls: list[int] = []
+        verified: list[int] = []
 
         def producer(index: int, output: Path) -> None:
             calls.append(index)
@@ -161,15 +169,25 @@ def test_two_independent_zip_producers_are_byte_identical_atomic_and_no_overwrit
             (stage / "same.txt").write_bytes(b"same bytes")
             BUILDER.write_deterministic_zip(stage, output, policy)
 
+        def verifier(index: int, output: Path) -> dict[str, object]:
+            verified.append(index)
+            assert output.name == "OPIU_R17.zip"
+            return {"status": "PASS_REPORT_ONLY_CANDIDATE"}
+
         first = root / "A" / "OPIU_R17.zip"
         second = root / "B" / "OPIU_R17.zip"
-        result = BUILDER.promote_independent_pair(first, second, producer, "OPIU_R17.zip")
+        result = BUILDER.promote_independent_pair(
+            first, second, producer, "OPIU_R17.zip", verifier,
+        )
         assert calls == [0, 1]
+        assert verified == [0, 1]
         assert result["independent_complete_builds"] == 2
         assert result["atomic_no_overwrite"] is True
         assert first.read_bytes() == second.read_bytes()
         with pytest.raises(BUILDER.BuildError, match="OUTPUT_ALREADY_EXISTS"):
-            BUILDER.promote_independent_pair(first, root / "C" / "OPIU_R17.zip", producer, "OPIU_R17.zip")
+            BUILDER.promote_independent_pair(
+                first, root / "C" / "OPIU_R17.zip", producer, "OPIU_R17.zip", verifier,
+            )
 
 
 def test_pair_rolls_back_first_promotion_if_second_promotion_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,9 +211,56 @@ def test_pair_rolls_back_first_promotion_if_second_promotion_fails(monkeypatch: 
 
         monkeypatch.setattr(BUILDER.os, "link", fail_second)
         with pytest.raises(OSError, match="synthetic"):
-            BUILDER.promote_independent_pair(first, second, producer, "OPIU_R17.zip")
+            BUILDER.promote_independent_pair(
+                first, second, producer, "OPIU_R17.zip", lambda _index, _path: {"status": "PASS"},
+            )
         assert not first.exists()
         assert not second.exists()
+
+
+def test_both_independent_archives_are_verified_before_any_promotion() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        first = root / "A" / "OPIU_R17.zip"
+        second = root / "B" / "OPIU_R17.zip"
+        verified: list[int] = []
+
+        def producer(index: int, output: Path) -> None:
+            output.write_bytes(b"same")
+
+        def reject_closure(index: int, _output: Path) -> dict[str, object]:
+            verified.append(index)
+            raise BUILDER.BuildError("RUNTIME_DEPENDENCY_CLOSURE_EVIDENCE_MISMATCH")
+
+        with pytest.raises(BUILDER.BuildError, match="INDEPENDENT_ARCHIVE_PAIR_VERIFICATION_FAILED:1,2"):
+            BUILDER.promote_independent_pair(
+                first, second, producer, "OPIU_R17.zip", reject_closure,
+            )
+        assert verified == [0, 1]
+        assert not first.exists()
+        assert not second.exists()
+
+
+def test_publish_outputs_inside_repository_are_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        repository = root / "repo"
+        repository.mkdir()
+        outside = root / "outside" / "OPIU_R17.zip"
+        with pytest.raises(BUILDER.BuildError, match="OUTPUT_OR_PUBLISH_PATH_INSIDE_REPOSITORY"):
+            BUILDER.assert_publish_paths_outside_repository(
+                repository, repository / "A" / "OPIU_R17.zip", outside, "OPIU_R17.zip",
+            )
+        BUILDER.assert_publish_paths_outside_repository(
+            repository, root / "A" / "OPIU_R17.zip", root / "B" / "OPIU_R17.zip",
+            "OPIU_R17.zip",
+        )
+        monkeypatch.setattr(BUILDER.tempfile, "gettempdir", lambda: str(repository / "temp"))
+        with pytest.raises(BUILDER.BuildError, match="BUILD_TEMP_ROOT_INSIDE_REPOSITORY"):
+            BUILDER.assert_publish_paths_outside_repository(
+                repository, root / "A" / "OPIU_R17.zip", root / "B" / "OPIU_R17.zip",
+                "OPIU_R17.zip",
+            )
 
 
 def test_immutable_r001_correction_rules_are_not_misclassified_as_external_rules_service() -> None:

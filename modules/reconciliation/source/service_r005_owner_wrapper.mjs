@@ -8,6 +8,7 @@ import { appendOwnerDecisionExplanationSheet } from "./owner_decision_xlsx.mjs";
 import { loadEconomicRouteProofDocument } from "./economic_route_proof_binding.mjs";
 import { materializeStructuralControlSettingsForRun } from "./structural_control_settings_binding.mjs";
 import { materializeStructuralControlInventoryV3 } from "./structural_control_inventory_v3.mjs";
+import { buildAuthoritativeStructuralControlInventoryHierarchyPeriod } from "./structural_control_authoritative_candidates.mjs";
 import {
   OWNER_PRESENTATION_BLOCK_EXEMPT_CLASSIFICATION,
   isOwnerPresentationBlockExempt,
@@ -29,6 +30,63 @@ export function resolveDefaultStructuralControlSettingsCsv(moduleDir = MODULE_DI
 const DEFAULT_STRUCTURAL_CONTROL_SETTINGS_CSV = resolveDefaultStructuralControlSettingsCsv();
 
 function text(value) { return String(value ?? "").trim(); }
+function normalizedText(value) {
+  return String(value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function uniqueTracePaths(trace) {
+  const seen = new Set();
+  const result = [];
+  for (const item of Array.isArray(trace) ? trace : []) {
+    const fullPath = normalizedText(item?.full_path);
+    if (!fullPath || seen.has(fullPath)) continue;
+    seen.add(fullPath);
+    result.push(fullPath);
+  }
+  return result;
+}
+
+function blockedStructuralInventoryPeriod(period) {
+  throw new Error(`BLOCKED_STRUCTURAL_CONTROL_INVENTORY_PERIOD_BINDING:${normalizedText(period)}`);
+}
+
+export function authoritativeStructuralInventoryHierarchyPeriodsFromPayload(payload = {}) {
+  const hierarchyPeriods = Array.isArray(payload?.hierarchy_periods)
+    ? payload.hierarchy_periods
+    : [];
+  const periodRows = Array.isArray(payload?.period_rows) ? payload.period_rows : [];
+  const rowsByPeriod = new Map();
+  for (const month of periodRows) {
+    const period = normalizedText(month?.period);
+    if (!period || rowsByPeriod.has(period)) blockedStructuralInventoryPeriod(period);
+    rowsByPeriod.set(period, month);
+  }
+
+  const usedPeriods = new Set();
+  const projection = hierarchyPeriods.map((hierarchyPeriod) => {
+    const period = normalizedText(hierarchyPeriod?.period);
+    const month = rowsByPeriod.get(period);
+    if (!period || !month || usedPeriods.has(period)) blockedStructuralInventoryPeriod(period);
+    usedPeriods.add(period);
+    return buildAuthoritativeStructuralControlInventoryHierarchyPeriod({
+      ...month,
+      period,
+      rows: (month.rows ?? []).map((row) => ({
+        ...row,
+        intalev_amount: row?.intalev_amount
+          ?? (typeof row?.intalev === "number" ? row.intalev : row?.intalev?.amount),
+        erp_amount: row?.erp_amount
+          ?? (typeof row?.erp === "number" ? row.erp : row?.erp?.amount),
+        erp_paths: row?.erp_paths ?? uniqueTracePaths(row?.erp?.trace),
+      })),
+    }, hierarchyPeriod);
+  });
+
+  const extraPeriod = [...rowsByPeriod.keys()].find((period) => !usedPeriods.has(period));
+  if (extraPeriod) blockedStructuralInventoryPeriod(extraPeriod);
+  return projection;
+}
+
 function parseArgs(argv) {
   const result = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -292,7 +350,7 @@ export async function enrichOwnerDecisionOutputs({ reportPath, codexPath, manife
           organization: structuralPlan.organization,
           reconciliationOrganizationName: payload.organization,
           period: payload.period,
-          hierarchyPeriods: payload.hierarchy_periods,
+          hierarchyPeriods: authoritativeStructuralInventoryHierarchyPeriodsFromPayload(payload),
           generatedAt: payload.generated_at,
           currentRunFiles: {
             reportPath,

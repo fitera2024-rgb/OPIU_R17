@@ -31,6 +31,7 @@
       "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
       "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
       "rules_path": "organization_profiles.json",
+      "aliases": ["Сахалин"],
       "journal_organization_aliases": ["Сахалин_Без ЮЛ"],
       "operation_bearing_codes": [
         "R003", "R004", "R005", "R006", "R007", "R008", "R009", "R010", "R011",
@@ -109,6 +110,15 @@
       "id": "ROOT_PRODUCER_REVIEW",
       "organization": "Производитель",
       "organization_code": "ERP-000000040",
+      "allowed_root": true,
+      "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
+      "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",
+      "rules_path": "organization_profiles.json"
+    },
+    {
+      "id": "ROOT_MANAGEMENT_ORGANIZATION_REVIEW",
+      "organization": "Управленческая организация",
+      "organization_code": "ERP-000000360",
       "allowed_root": true,
       "profile_kind": "COMMON_FAIL_CLOSED_REVIEW",
       "status": "BLOCKED_PROFILE_REVIEW_REQUIRED",

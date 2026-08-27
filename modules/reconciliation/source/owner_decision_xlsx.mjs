@@ -24,9 +24,21 @@ function worksheetXml(rows, widths = []) {
   const maxCols = Math.max(1, ...rows.map((row) => row.length));
   const maxRows = Math.max(1, rows.length);
   const cols = Array.from({ length: maxCols }, (_, index) => `<col min="${index + 1}" max="${index + 1}" width="${widths[index] ?? 18}" customWidth="1"/>`).join("");
-  const body = rows.map((row, index) => rowXml(index + 1, row, (column) => index === 0 ? 1 : [2,3,4,9].includes(column) ? 2 : 0)).join("");
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:${columnName(maxCols)}${maxRows}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/><cols>${cols}</cols><sheetData>${body}</sheetData><autoFilter ref="A1:${columnName(maxCols)}${maxRows}"/></worksheet>`;
+  const body = rows.map((row, index) => rowXml(
+    index + 1,
+    row,
+    (column) => index === 0 || index === 3 ? 1 : [2,3,4,16].includes(column) ? 2 : 0,
+  )).join("");
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:${columnName(maxCols)}${maxRows}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="4" topLeftCell="A5" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/><cols>${cols}</cols><sheetData>${body}</sheetData><autoFilter ref="A4:${columnName(maxCols)}${maxRows}"/></worksheet>`;
 }
+
+export const OWNER_DECISION_EXPLANATION_HEADERS = Object.freeze([
+  "Код строки", "Статья", "Инталев", "ERP", "Дельта raw", "CaseID", "PairID",
+  "Класс решения", "Тип решения", "Статус", "Proof", "ECONOMIC_ROUTE_PROVEN",
+  "SOURCE_OPERATION_PROVEN", "PHYSICAL_SOURCE_UNIQUE", "ECONOMIC_CORRECTION_PROVEN",
+  "OWNER_REVIEW_REQUIRED", "Effective delta", "Роль", "Почему", "Что делать",
+  "Исполнение",
+]);
 
 function worksheetPath(workbookXml, relsXml, sheetName) {
   const escapedName = sheetName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -118,10 +130,10 @@ async function patchMainTreeOwnerDecisions(zip, workbookXml, relsXml, projection
   }
   zip.file(sheetPath, sheetXml);
 }
-function projectionRows(payload, projection) {
+function projectionBusinessRows(payload, projection) {
   const byCase = new Map((projection.cases ?? []).map((decisionCase) => [decisionCase.case_id, decisionCase]));
   const byCode = new Map((payload.rows ?? []).map((row) => [text(row.code), row]));
-  const result = [["Код строки", "Статья", "Инталев", "ERP", "Дельта raw", "CaseID", "PairID", "Класс решения", "Тип решения", "Статус", "Proof", "ECONOMIC_ROUTE_PROVEN", "SOURCE_OPERATION_PROVEN", "PHYSICAL_SOURCE_UNIQUE", "ECONOMIC_CORRECTION_PROVEN", "OWNER_REVIEW_REQUIRED", "Effective delta", "Роль", "Почему", "Что делать", "Исполнение"]];
+  const result = [];
   const codes = new Set(Object.keys(projection.row_links ?? {}));
   for (const row of payload.rows ?? []) {
     const delta = typeof row.delta === "number" ? row.delta : null;
@@ -168,6 +180,29 @@ function projectionRows(payload, projection) {
   return result;
 }
 
+function ownerDecisionWorksheetRows(payload, projection) {
+  const businessRows = projectionBusinessRows(payload, projection);
+  const statusRow = businessRows.length > 0
+    ? businessRows
+    : [[
+        "INFO_NO_OWNER_DECISIONS", "", "", "", "", "", "", "REVIEW_ONLY",
+        "NO_POSTING", "INFO", "UNPROVEN", false, false, false, false, true, "",
+        "CONTROL", "Решения владельца отсутствуют.",
+        "Лист сохранён как обязательный REPORT_ONLY placeholder.",
+        "execution_allowed=false; posting_rows=0",
+      ]];
+  return {
+    businessRows,
+    rows: [
+      ["Обоснование решений владельца"],
+      ["REPORT_ONLY — лист не разрешает загрузку, проведение или финансовую корректировку."],
+      [],
+      [...OWNER_DECISION_EXPLANATION_HEADERS],
+      ...statusRow,
+    ],
+  };
+}
+
 export async function appendOwnerDecisionExplanationSheet(xlsxPath, payload, projection, sheetName = "08_Решения_обоснование") {
   const input = await fs.readFile(xlsxPath);
   const zip = await JSZip.loadAsync(input);
@@ -177,39 +212,29 @@ export async function appendOwnerDecisionExplanationSheet(xlsxPath, payload, pro
   let workbookXml = await zip.file(workbookPath).async("string");
   let relsXml = await zip.file(relsPath).async("string");
   let contentTypesXml = await zip.file(contentTypesPath).async("string");
-  const rows = projectionRows(payload, projection);
-  const sheetXml = worksheetXml(rows, [14,48,18,18,18,34,34,34,22,38,16,22,22,22,24,22,18,22,90,90,34]);
+  const projectionResult = ownerDecisionWorksheetRows(payload, projection);
+  const sheetXml = worksheetXml(projectionResult.rows, [14,48,18,18,18,34,34,34,22,38,16,22,22,22,24,22,18,22,90,90,34]);
 
   const escapedName = sheetName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const existingSheet = workbookXml.match(new RegExp(`<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?sheet\\b[^>]*name="${escapedName}"[^>]*r:id="([^"]+)"[^>]*/\\s*>`));
-  if (existingSheet) {
-    const relId = existingSheet[1];
-    const relMatch = relsXml.match(new RegExp(`<Relationship\\b(?=[^>]*Id="${relId}")(?=[^>]*Target="([^"]+)")[^>]*/\\s*>`));
-    if (!relMatch) throw new Error(`OWNER_DECISION_SHEET_RELATIONSHIP_MISSING:${sheetName}`);
-    const target = relMatch[1].replace(/^\//, "");
-    const targetPath = target.startsWith("xl/") ? target : `xl/${target.replace(/^\.\//, "")}`;
-    zip.file(targetPath, sheetXml);
-  } else {
-    const sheetIds = [...workbookXml.matchAll(/sheetId="(\d+)"/g)].map((match) => Number(match[1])).filter(Number.isFinite);
-    const nextSheetId = (sheetIds.length ? Math.max(...sheetIds) : 0) + 1;
-    const nextRelId = `Rownerdecisions${nextSheetId}`;
-    const sheetNumbers = [...relsXml.matchAll(/Target="(?:\/xl\/)?worksheets\/sheet(\d+)\.xml"/g)].map((match) => Number(match[1])).filter(Number.isFinite);
-    const nextSheetNumber = (sheetNumbers.length ? Math.max(...sheetNumbers) : 0) + 1;
-    const relId = nextRelId;
-    const sheetPath = `xl/worksheets/sheet${nextSheetNumber}.xml`;
-    const sheetTag = `<x:sheet name="${xmlEscape(sheetName)}" sheetId="${nextSheetId}" r:id="${relId}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" />`;
-    const sheetsClose = workbookXml.includes("</x:sheets>") ? "</x:sheets>" : "</sheets>";
-    if (!workbookXml.includes(sheetsClose)) throw new Error("OWNER_DECISION_WORKBOOK_SHEETS_MISSING");
-    workbookXml = workbookXml.replace(sheetsClose, `${sheetTag}${sheetsClose}`);
-    relsXml = relsXml.replace("</Relationships>", `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${nextSheetNumber}.xml"/></Relationships>`);
-    contentTypesXml = contentTypesXml.replace("</Types>", `<Override PartName="/xl/worksheets/sheet${nextSheetNumber}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
-    zip.file(sheetPath, sheetXml);
-    zip.file(workbookPath, workbookXml);
-    zip.file(relsPath, relsXml);
-    zip.file(contentTypesPath, contentTypesXml);
+  if (!existingSheet) throw new Error(`OWNER_DECISION_PLACEHOLDER_MISSING:${sheetName}`);
+  const relId = existingSheet[1];
+  const relMatch = relsXml.match(new RegExp(`<Relationship\\b(?=[^>]*Id="${relId}")(?=[^>]*Target="([^"]+)")[^>]*/\\s*>`));
+  if (!relMatch) throw new Error(`OWNER_DECISION_SHEET_RELATIONSHIP_MISSING:${sheetName}`);
+  const target = relMatch[1].replace(/^\//, "");
+  const targetPath = target.startsWith("xl/") ? target : `xl/${target.replace(/^\.\//, "")}`;
+  if (!zip.file(targetPath)) throw new Error(`OWNER_DECISION_SHEET_TARGET_MISSING:${targetPath}`);
+  const partName = `/${targetPath.replace(/^\//, "")}`;
+  const escapedPartName = partName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const contentType = contentTypesXml.match(new RegExp(
+    `<Override\\b(?=[^>]*PartName="${escapedPartName}")(?=[^>]*ContentType="([^"]+)")[^>]*/\\s*>`,
+  ))?.[1];
+  if (contentType !== "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml") {
+    throw new Error(`OWNER_DECISION_SHEET_CONTENT_TYPE_MISSING:${partName}`);
   }
+  zip.file(targetPath, sheetXml);
   await patchMainTreeOwnerDecisions(zip, workbookXml, relsXml, projection);
   const output = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
   await fs.writeFile(xlsxPath, output);
-  return { sheet_name: sheetName, rows: rows.length - 1 };
+  return { sheet_name: sheetName, rows: projectionResult.businessRows.length };
 }

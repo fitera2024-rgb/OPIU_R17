@@ -158,6 +158,7 @@ import {
   unavailableCrossJournalEvidence,
 } from "./cross_journal_discrepancy_evidence.mjs";
 import { createUniqueRunWorkDir } from "./run_workdir.mjs";
+import { OWNER_DECISION_EXPLANATION_HEADERS } from "./owner_decision_xlsx.mjs";
 import { detectConfiguredRootProfile } from "./organization_profile_registry.mjs";
 import { buildOperationTreePresentation } from "./operation_tree_presentation.mjs";
 import {
@@ -242,6 +243,65 @@ const colors = {
   border: "#B4C6E7",
   white: "#FFFFFF",
 };
+
+export const MANDATORY_RECONCILIATION_SHEET_NAMES = Object.freeze([
+  "00_Паспорт",
+  "01_Сверка_дерево",
+  "01_Сверка_ОПИУ",
+  "01_Правила",
+  "02_Помесячно",
+  "03_Инталев_узлы",
+  "03A_Пустые_статьи",
+  "04_ERP_статьи",
+  "04A_Расхождения_проводок",
+  "04B_R001_решения",
+  "05_Несопоставленные",
+  "06_Источники",
+  "07_Контроли",
+  "08_Операции_журнала",
+  "08_Решения_обоснование",
+]);
+
+export const OPTIONAL_PROVEN_OPERATIONS_SHEET_NAME = "09_Доказанные_операции";
+
+export const CROSS_JOURNAL_DISCREPANCY_HEADERS = Object.freeze([
+  "Результат сопоставления", "Тип строки", "Уверенность, %", "Период",
+  "Блок Инталев", "Статья Инталев", "Статья ERP", "Сумма", "Дата", "Дт",
+  "Кт", "Общие аналитики", "Содержание операции", "Документ Инталев",
+  "Строка Инталев", "Документ ERP", "Строка ERP",
+  "Почему строки признаны одной операцией", "Что делать пользователю",
+  "Повторное использование строки", "SourceRowID Инталев", "SourceRowID ERP",
+  "Путь статьи Инталев", "Путь статьи ERP", "Фактический блок ERP",
+  "Целевой блок по Инталев", "Код исходной статьи ERP",
+  "Счёт исходного блока ERP", "Целевая статья ERP", "Код целевой статьи ERP",
+  "Счёт целевого блока ERP", "Целевой путь ERP", "Статус выбора цели",
+]);
+
+export const CROSS_JOURNAL_CORRECTION_HEADERS = Object.freeze([
+  "CaseID", "PairID", "Тип решения", "Решение владельца", "Период",
+  "Строка сверки", "Группа", "Статья", "Роль доказательства",
+  "classification", "reclass_scope", "Proof status", "effective_delta",
+  "ECONOMIC_ROUTE_PROVEN", "SOURCE_OPERATION_PROVEN", "PHYSICAL_SOURCE_UNIQUE",
+  "ECONOMIC_CORRECTION_PROVEN", "partial_source_amount_proven",
+  "Архив источника ERP", "SHA256 архива источника ERP", "Файл журнала внутри архива",
+  "SHA256 журнала ERP", "Лист источника ERP", "SourceRowID ERP",
+  "ERP файл/лист/диапазон", "Дата источника", "Регистратор/документ",
+  "№ проводки источника", "Дт источник", "Аналитика Дт источник 1",
+  "Аналитика Дт источник 2", "Аналитика Дт источник 3", "Подразделение Дт источник",
+  "Кт источник", "Аналитика Кт источник 1", "Аналитика Кт источник 2",
+  "Аналитика Кт источник 3", "Подразделение Кт источник", "Организация",
+  "Организация сверки", "Организация источника ERP", "Физическая сумма источника",
+  "Сумма корректировки", "Причина", "Предлагаемое решение", "Исходная статья",
+  "Счет доходов/расходов Инталев", "Целевая статья analytical", "Код целевой статьи",
+  "Слот целевой аналитики", "Блок Инталев", "Полный путь Инталев",
+  "Путь целевой статьи ERP", "Счет целевой статьи ERP", "Комментарий",
+]);
+
+export const JOURNAL_OPERATION_HEADERS = Object.freeze([
+  "Период", "Исходный файл", "Лист", "Строка Excel", "Документ", "№ проводки",
+  "Дата", "Дт", "Аналитика Дт", "Кт", "Аналитика Кт", "Сумма",
+  "Организация", "Статья", "Статус", "Решение", "Причина",
+]);
 
 const INTALEV_CATALOG_NOT_EXPORTED = "BLOCKED_INTALEV_CATALOG_NOT_EXPORTED";
 const INTALEV_CATALOG_SHEET_AMBIGUOUS = "BLOCKED_SOURCE_PROOF_AMBIGUOUS_SOURCE";
@@ -6509,6 +6569,81 @@ function setColumnWidths(sheet, widths, lastRow) {
   }
 }
 
+function initializeReportOnlyContractSheet(sheet, {
+  title,
+  description,
+  headers,
+  info,
+  widths,
+}) {
+  const lastColumn = columnName(headers.length);
+  styleTitle(sheet, `A1:${lastColumn}1`, title);
+  sheet.getRange(`A2:${lastColumn}2`).merge();
+  sheet.getRange("A2").values = [[`REPORT_ONLY — ${description}`]];
+  sheet.getRange(`A2:${lastColumn}2`).format = {
+    fill: colors.yellow,
+    font: { bold: true, color: "#7F6000" },
+    wrapText: true,
+  };
+  writeValues(sheet, 4, 1, [[...headers]]);
+  styleHeader(sheet.getRange(`A4:${lastColumn}4`));
+  const infoRow = [info, ...Array.from({ length: headers.length - 1 }, () => "")];
+  writeValues(sheet, 5, 1, [infoRow]);
+  styleData(sheet.getRange(`A5:${lastColumn}5`));
+  sheet.getRange(`A5:${lastColumn}5`).format.fill = colors.yellow;
+  setColumnWidths(sheet, widths, 5);
+  sheet.freezePanes.freezeRows(4);
+}
+
+export function createMandatoryWorkbookSheets(workbook, {
+  periodLabel = "",
+  includeProvenOperations = false,
+} = {}) {
+  const byName = new Map();
+  for (const sheetName of MANDATORY_RECONCILIATION_SHEET_NAMES) {
+    byName.set(sheetName, workbook.worksheets.add(sheetName));
+  }
+  if (includeProvenOperations) {
+    byName.set(
+      OPTIONAL_PROVEN_OPERATIONS_SHEET_NAME,
+      workbook.worksheets.add(OPTIONAL_PROVEN_OPERATIONS_SHEET_NAME),
+    );
+  }
+  initializeReportOnlyContractSheet(byName.get("08_Решения_обоснование"), {
+    title: `Обоснование решений владельца — ${periodLabel || "период не задан"}`,
+    description: "placeholder будет заменён owner wrapper строго на месте; финансовая authority отсутствует.",
+    headers: OWNER_DECISION_EXPLANATION_HEADERS,
+    info: "INFO_NO_OWNER_DECISIONS",
+    widths: [14,48,18,18,18,34,34,34,22,38,16,22,22,22,24,22,18,22,90,90,34],
+  });
+  return byName;
+}
+
+export function initializeMandatoryZeroWorkbookSheets(sheetsByName, periodLabel = "") {
+  initializeReportOnlyContractSheet(sheetsByName.get("04A_Расхождения_проводок"), {
+    title: `Сопоставление физических проводок Инталев ↔ ERP — ${periodLabel}`,
+    description: "в выбранном периоде нет строк сопоставления журналов; проводки не формируются.",
+    headers: CROSS_JOURNAL_DISCREPANCY_HEADERS,
+    info: "INFO_NO_CROSS_JOURNAL_ROWS",
+    widths: [38,24,14,12,30,36,36,16,14,10,10,42,54,46,16,46,16,76,68,24,44,44,72,72,34,34,22,20,36,22,20,72,34],
+  });
+  initializeReportOnlyContractSheet(sheetsByName.get("04B_R001_решения"), {
+    title: `Доказанные решения для движка корректировок R001 — ${periodLabel}`,
+    description: "доказанные correction rows отсутствуют; posting_rows=0.",
+    headers: CROSS_JOURNAL_CORRECTION_HEADERS,
+    info: "INFO_NO_R001_DECISION_ROWS",
+    widths: CROSS_JOURNAL_CORRECTION_HEADERS.map((_, index) =>
+      index < 18 ? 20 : index < 43 ? 24 : 36),
+  });
+  initializeReportOnlyContractSheet(sheetsByName.get("08_Операции_журнала"), {
+    title: `Операции журнала для проверки — ${periodLabel}`,
+    description: "непривязанные физические операции отсутствуют; проводки не формируются.",
+    headers: JOURNAL_OPERATION_HEADERS,
+    info: "INFO_NO_JOURNAL_OPERATION_ROWS",
+    widths: [12,58,18,13,46,13,18,12,42,12,42,16,28,36,24,28,58],
+  });
+}
+
 function deduplicateTrace(trace) {
   const seen = new Set();
   const result = [];
@@ -7617,7 +7752,7 @@ function decodeXmlEntities(value) {
     .replace(/&amp;/g, "&");
 }
 
-async function patchWorksheetOutline({
+export async function patchWorksheetOutline({
   outputPath,
   sheetName,
   dataStartRow,
@@ -8043,30 +8178,25 @@ async function buildReportWorkbook(context) {
 
   const workbook = Workbook.create();
   workbook.comments.setSelf({ displayName: "Codex — сверка ОПИУ" });
-  const passport = workbook.worksheets.add("00_Паспорт");
-  const articleApprovalSheet = workbook.worksheets.add("01_Правила");
-  const hierarchySheet = workbook.worksheets.add("01_Сверка_дерево");
-  const summary = workbook.worksheets.add("01_Сверка_ОПИУ");
-  const monthlySheet = workbook.worksheets.add("02_Помесячно");
-  const intalevSheet = workbook.worksheets.add("03_Инталев_узлы");
-  const intalevBlankArticleSheet = workbook.worksheets.add("03A_Пустые_статьи");
-  const erpSheet = workbook.worksheets.add("04_ERP_статьи");
-  const crossJournalSheet = crossJournalEvidence?.applicable === true
-    ? workbook.worksheets.add("04A_Расхождения_проводок")
-    : null;
-  const crossJournalCorrectionSheet = crossJournalEvidence?.applicable === true
-    && Number(crossJournalEvidence?.correction_decision_rows ?? 0) > 0
-    ? workbook.worksheets.add("04B_R001_решения")
-    : null;
-  const issuesSheet = workbook.worksheets.add("05_Несопоставленные");
-  const sourcesSheet = workbook.worksheets.add("06_Источники");
-  const controlsSheet = workbook.worksheets.add("07_Контроли");
-  const journalCandidatesSheet = (operationEvidence?.unassigned_rows?.length ?? 0) > 0
-    ? workbook.worksheets.add("08_Операции_журнала")
-    : null;
-  const provenOperationsSheet = (operationEvidence?.source_contributor_rows ?? 0) > 0
-    ? workbook.worksheets.add("09_Доказанные_операции")
-    : null;
+  const workbookSheets = createMandatoryWorkbookSheets(workbook, {
+    periodLabel,
+    includeProvenOperations: (operationEvidence?.source_contributor_rows ?? 0) > 0,
+  });
+  const passport = workbookSheets.get("00_Паспорт");
+  const hierarchySheet = workbookSheets.get("01_Сверка_дерево");
+  const summary = workbookSheets.get("01_Сверка_ОПИУ");
+  const articleApprovalSheet = workbookSheets.get("01_Правила");
+  const monthlySheet = workbookSheets.get("02_Помесячно");
+  const intalevSheet = workbookSheets.get("03_Инталев_узлы");
+  const intalevBlankArticleSheet = workbookSheets.get("03A_Пустые_статьи");
+  const erpSheet = workbookSheets.get("04_ERP_статьи");
+  const crossJournalSheet = workbookSheets.get("04A_Расхождения_проводок");
+  const crossJournalCorrectionSheet = workbookSheets.get("04B_R001_решения");
+  const issuesSheet = workbookSheets.get("05_Несопоставленные");
+  const sourcesSheet = workbookSheets.get("06_Источники");
+  const controlsSheet = workbookSheets.get("07_Контроли");
+  const journalCandidatesSheet = workbookSheets.get("08_Операции_журнала");
+  const provenOperationsSheet = workbookSheets.get(OPTIONAL_PROVEN_OPERATIONS_SHEET_NAME) ?? null;
 
   for (const sheet of workbook.worksheets.items) sheet.showGridLines = false;
 
@@ -8090,41 +8220,30 @@ async function buildReportWorkbook(context) {
   const intalevEndRow = buildIntalevNodes();
   const intalevBlankArticleEndRow = buildIntalevBlankArticleDiagnostics();
   const erpEndRow = buildErpRows();
-  const crossJournalEndRow = buildCrossJournalDiscrepancies();
-  const crossJournalCorrectionEndRow = buildCrossJournalCorrectionDecisions();
+  const crossJournalBuild = buildCrossJournalDiscrepancies();
+  const crossJournalEndRow = crossJournalBuild.endRow;
+  const crossJournalCorrectionBuild = buildCrossJournalCorrectionDecisions();
+  const crossJournalCorrectionEndRow = crossJournalCorrectionBuild.endRow;
   const issuesEndRow = buildIssues();
   const sourcesEndRow = buildSources();
   const controlsEndRow = buildControls();
-  const journalCandidatesEndRow = buildJournalCandidates();
-  const provenOperationsEndRow = buildProvenOperations();
-  if (journalCandidatesSheet) {
-    operationEvidence.workbook_review_sheet = "08_Операции_журнала";
-    operationEvidence.workbook_review_rows = Math.max(0, journalCandidatesEndRow - 4);
-  } else {
-    operationEvidence.workbook_review_sheet = null;
-    operationEvidence.workbook_review_rows = 0;
-  }
+  const journalCandidatesBuild = buildJournalCandidates();
+  const journalCandidatesEndRow = journalCandidatesBuild.endRow;
+  const provenOperationsBuild = buildProvenOperations();
+  const provenOperationsEndRow = provenOperationsBuild.endRow;
+  operationEvidence.workbook_review_sheet = "08_Операции_журнала";
+  operationEvidence.workbook_review_rows = journalCandidatesBuild.businessRowCount;
   if (provenOperationsSheet) {
     operationEvidence.workbook_source_proof_sheet = "09_Доказанные_операции";
-    operationEvidence.workbook_source_proof_rows = Math.max(0, provenOperationsEndRow - 4);
+    operationEvidence.workbook_source_proof_rows = provenOperationsBuild.businessRowCount;
   } else {
     operationEvidence.workbook_source_proof_sheet = null;
     operationEvidence.workbook_source_proof_rows = 0;
   }
-  if (crossJournalSheet) {
-    crossJournalEvidence.workbook_sheet = "04A_Расхождения_проводок";
-    crossJournalEvidence.workbook_rows = Math.max(0, crossJournalEndRow - 4);
-  } else {
-    crossJournalEvidence.workbook_sheet = null;
-    crossJournalEvidence.workbook_rows = 0;
-  }
-  if (crossJournalCorrectionSheet) {
-    crossJournalEvidence.correction_workbook_sheet = "04B_R001_решения";
-    crossJournalEvidence.correction_workbook_rows = Math.max(0, crossJournalCorrectionEndRow - 4);
-  } else {
-    crossJournalEvidence.correction_workbook_sheet = null;
-    crossJournalEvidence.correction_workbook_rows = 0;
-  }
+  crossJournalEvidence.workbook_sheet = "04A_Расхождения_проводок";
+  crossJournalEvidence.workbook_rows = crossJournalBuild.businessRowCount;
+  crossJournalEvidence.correction_workbook_sheet = "04B_R001_решения";
+  crossJournalEvidence.correction_workbook_rows = crossJournalCorrectionBuild.businessRowCount;
 
   const preExport = await workbook.inspect({
     kind: "table",
@@ -8151,35 +8270,21 @@ async function buildReportWorkbook(context) {
     await fs.mkdir(previewDir, { recursive: true });
     const specs = [
       ["00_Паспорт", "A1:D22"],
-      ["01_Правила", `A1:U${Math.min(5 + articleApprovalAudit.row_count, 28)}`],
       ["01_Сверка_дерево", `A1:AD${Math.min(hierarchyEndRow, 28)}`],
       ["01_Сверка_ОПИУ", "A1:R25"],
+      ["01_Правила", `A1:U${Math.min(5 + articleApprovalAudit.row_count, 28)}`],
       ["02_Помесячно", `A1:P${Math.min(monthlyEndRow, 28)}`],
       ["03_Инталев_узлы", `A1:M${Math.min(intalevEndRow, 28)}`],
       ["03A_Пустые_статьи", `A1:P${Math.min(intalevBlankArticleEndRow, 28)}`],
       ["04_ERP_статьи", `A1:L${Math.min(erpEndRow, 28)}`],
+      ["04A_Расхождения_проводок", `A1:AG${Math.min(crossJournalEndRow, 28)}`],
+      ["04B_R001_решения", `A1:BC${Math.min(crossJournalCorrectionEndRow, 24)}`],
       ["05_Несопоставленные", `A1:I${Math.min(issuesEndRow, 28)}`],
       ["06_Источники", `A1:J${Math.min(sourcesEndRow, 24)}`],
       ["07_Контроли", `A1:O${controlsEndRow}`],
+      ["08_Операции_журнала", `A1:Q${Math.min(journalCandidatesEndRow, 28)}`],
+      ["08_Решения_обоснование", "A1:U5"],
     ];
-    if (crossJournalSheet) {
-      specs.splice(7, 0, [
-        "04A_Расхождения_проводок",
-        `A1:AG${Math.min(crossJournalEndRow, 28)}`,
-      ]);
-    }
-    if (crossJournalCorrectionSheet) {
-      specs.splice(8, 0, [
-        "04B_R001_решения",
-        `A1:N${Math.min(crossJournalCorrectionEndRow, 24)}`,
-      ]);
-    }
-    if (journalCandidatesSheet) {
-      specs.push([
-        "08_Операции_журнала",
-        `A1:Q${Math.min(journalCandidatesEndRow, 28)}`,
-      ]);
-    }
     if (provenOperationsSheet) {
       specs.push([
         "09_Доказанные_операции",
@@ -8203,7 +8308,7 @@ async function buildReportWorkbook(context) {
     dataStartRow: 7,
     outlineLevels: treeOutlineLevels,
     rowKinds: treeDisplayRows.map((row) => row.kind),
-    activeTabIndex: 2,
+    activeTabIndex: 1,
     freezeRows: 6,
     freezeColumns: 3,
   });
@@ -10018,7 +10123,7 @@ async function buildReportWorkbook(context) {
   }
 
   function buildCrossJournalDiscrepancies() {
-    if (!crossJournalSheet) return 0;
+    if (!crossJournalSheet) return { endRow: 0, businessRowCount: 0 };
     const evidenceRows = Array.isArray(crossJournalEvidence?.rows)
       ? crossJournalEvidence.rows
       : [];
@@ -10066,7 +10171,7 @@ async function buildReportWorkbook(context) {
     );
     crossJournalSheet.getRange("A2:AG2").merge();
     crossJournalSheet.getRange("A2").values = [[
-      `Пара ищется по физическим журналам: дата + сумма + расчётная сторона + содержание + общие аналитики. Счёт затрат может различаться — это признак межгрупповой переклассификации. Уникальных пар: ${counts.unique_pairs ?? 0}; пересортов: ${counts.different_article_pairs ?? 0}; доказанных межгрупповых целей: ${counts.proven_intergroup_reposts ?? 0}; неоднозначных: ${counts.ambiguous_pairs ?? 0}.`,
+      `REPORT_ONLY — пара ищется по физическим журналам: дата + сумма + расчётная сторона + содержание + общие аналитики. Счёт затрат может различаться — это признак межгрупповой переклассификации. Уникальных пар: ${counts.unique_pairs ?? 0}; пересортов: ${counts.different_article_pairs ?? 0}; доказанных межгрупповых целей: ${counts.proven_intergroup_reposts ?? 0}; неоднозначных: ${counts.ambiguous_pairs ?? 0}.`,
     ]];
     crossJournalSheet.getRange("A2:AG2").format = {
       fill: colors.yellow,
@@ -10074,41 +10179,7 @@ async function buildReportWorkbook(context) {
       wrapText: true,
       rowHeight: 46,
     };
-    writeValues(crossJournalSheet, 4, 1, [[
-      "Результат сопоставления",
-      "Тип строки",
-      "Уверенность, %",
-      "Период",
-      "Блок Инталев",
-      "Статья Инталев",
-      "Статья ERP",
-      "Сумма",
-      "Дата",
-      "Дт",
-      "Кт",
-      "Общие аналитики",
-      "Содержание операции",
-      "Документ Инталев",
-      "Строка Инталев",
-      "Документ ERP",
-      "Строка ERP",
-      "Почему строки признаны одной операцией",
-      "Что делать пользователю",
-      "Повторное использование строки",
-      "SourceRowID Инталев",
-      "SourceRowID ERP",
-      "Путь статьи Инталев",
-      "Путь статьи ERP",
-      "Фактический блок ERP",
-      "Целевой блок по Инталев",
-      "Код исходной статьи ERP",
-      "Счёт исходного блока ERP",
-      "Целевая статья ERP",
-      "Код целевой статьи ERP",
-      "Счёт целевого блока ERP",
-      "Целевой путь ERP",
-      "Статус выбора цели",
-    ]]);
+    writeValues(crossJournalSheet, 4, 1, [[...CROSS_JOURNAL_DISCREPANCY_HEADERS]]);
     styleHeader(crossJournalSheet.getRange("A4:AG4"));
     if (rows.length > 0) {
       writeValues(crossJournalSheet, 5, 1, rows);
@@ -10155,7 +10226,7 @@ async function buildReportWorkbook(context) {
     } else {
       crossJournalSheet.getRange("A5:AG5").merge();
       crossJournalSheet.getRange("A5").values = [[
-        "В выбранном периоде нет строк сопоставления журналов.",
+        "INFO_NO_CROSS_JOURNAL_ROWS — в выбранном периоде нет строк сопоставления журналов.",
       ]];
       crossJournalSheet.getRange("A5:AG5").format.fill = colors.yellow;
     }
@@ -10170,11 +10241,14 @@ async function buildReportWorkbook(context) {
     );
     crossJournalSheet.freezePanes.freezeRows(4);
     crossJournalSheet.freezePanes.freezeColumns(7);
-    return endRow;
+    return { endRow, businessRowCount: evidenceRows.length };
   }
 
   function buildCrossJournalCorrectionDecisions() {
-    if (!crossJournalCorrectionSheet) return 0;
+    if (!crossJournalCorrectionSheet) return { endRow: 0, businessRowCount: 0 };
+    const declaredCorrectionDecisionRows = Number(
+      crossJournalEvidence?.correction_decision_rows ?? 0,
+    );
     const proven = (Array.isArray(crossJournalEvidence?.rows) ? crossJournalEvidence.rows : [])
       .filter((row) => row.financial_gate_status === "ДОКАЗАНО")
       .filter((row) => Array.isArray(row.correction_rows) && row.correction_rows.length === 2)
@@ -10182,25 +10256,7 @@ async function buildReportWorkbook(context) {
         (sum, correctionRow) => sum + Number(correctionRow.amount ?? 0),
         0,
       )) < 0.005);
-    const headers = [
-      "CaseID", "PairID", "Тип решения", "Решение владельца", "Период",
-      "Строка сверки", "Группа", "Статья", "Роль доказательства",
-      "classification", "reclass_scope", "Proof status", "effective_delta",
-      "ECONOMIC_ROUTE_PROVEN", "SOURCE_OPERATION_PROVEN", "PHYSICAL_SOURCE_UNIQUE",
-      "ECONOMIC_CORRECTION_PROVEN", "partial_source_amount_proven",
-      "Архив источника ERP", "SHA256 архива источника ERP", "Файл журнала внутри архива",
-      "SHA256 журнала ERP", "Лист источника ERP", "SourceRowID ERP",
-      "ERP файл/лист/диапазон", "Дата источника", "Регистратор/документ",
-      "№ проводки источника", "Дт источник", "Аналитика Дт источник 1",
-      "Аналитика Дт источник 2", "Аналитика Дт источник 3", "Подразделение Дт источник",
-      "Кт источник", "Аналитика Кт источник 1", "Аналитика Кт источник 2",
-      "Аналитика Кт источник 3", "Подразделение Кт источник", "Организация",
-      "Организация сверки", "Организация источника ERP", "Физическая сумма источника",
-      "Сумма корректировки", "Причина", "Предлагаемое решение", "Исходная статья",
-      "Счет доходов/расходов Инталев", "Целевая статья analytical", "Код целевой статьи",
-      "Слот целевой аналитики", "Блок Инталев", "Полный путь Инталев",
-      "Путь целевой статьи ERP", "Счет целевой статьи ERP", "Комментарий",
-    ];
+    const headers = CROSS_JOURNAL_CORRECTION_HEADERS;
     const rows = proven.flatMap((row) => {
       const sourceCorrection = row.correction_rows.find((item) => item.operation === "STORNO");
       const targetCorrection = row.correction_rows.find((item) => item.operation === "REPOST");
@@ -10264,7 +10320,7 @@ async function buildReportWorkbook(context) {
     );
     crossJournalCorrectionSheet.getRange(`A2:${columnName(headers.length)}2`).merge();
     crossJournalCorrectionSheet.getRange("A2").values = [[
-      `Каждый CaseID содержит две равные строки: STORNO с фактического кода статьи ERP и REPOST на одноимённую статью внутри блока Инталев. Доказанных межгрупповых переносов: ${proven.length}; строк решений: ${rows.length}. Счета Дт/Кт физической проводки не подменяются — меняется код статьи ОПИУ.`,
+      `REPORT_ONLY — каждый CaseID содержит две равные строки: STORNO с фактического кода статьи ERP и REPOST на одноимённую статью внутри блока Инталев. Доказанных межгрупповых переносов: ${proven.length}; заявлено строк решений: ${declaredCorrectionDecisionRows}; фактически записано: ${rows.length}. Счета Дт/Кт физической проводки не подменяются — меняется код статьи ОПИУ.`,
     ]];
     crossJournalCorrectionSheet.getRange(`A2:${columnName(headers.length)}2`).format = {
       fill: colors.green,
@@ -10282,6 +10338,14 @@ async function buildReportWorkbook(context) {
       crossJournalCorrectionSheet.getRange(`AP5:AQ${4 + rows.length}`).format.numberFormat =
         '#,##0.00;[Red]-#,##0.00;0.00';
       crossJournalCorrectionSheet.getRange(`A5:A${4 + rows.length}`).format.font = { bold: true };
+    } else {
+      const infoRow = [
+        "INFO_NO_R001_DECISION_ROWS",
+        ...Array.from({ length: headers.length - 1 }, () => ""),
+      ];
+      writeValues(crossJournalCorrectionSheet, 5, 1, [infoRow]);
+      styleData(crossJournalCorrectionSheet.getRange(`A5:${columnName(headers.length)}5`));
+      crossJournalCorrectionSheet.getRange(`A5:${columnName(headers.length)}5`).format.fill = colors.yellow;
     }
     setColumnWidths(
       crossJournalCorrectionSheet,
@@ -10290,7 +10354,7 @@ async function buildReportWorkbook(context) {
     );
     crossJournalCorrectionSheet.freezePanes.freezeRows(4);
     crossJournalCorrectionSheet.freezePanes.freezeColumns(9);
-    return endRow;
+    return { endRow, businessRowCount: rows.length };
   }
 
   function buildIssues() {
@@ -10601,7 +10665,7 @@ async function buildReportWorkbook(context) {
   }
 
   function buildJournalCandidates() {
-    if (!journalCandidatesSheet) return 0;
+    if (!journalCandidatesSheet) return { endRow: 0, businessRowCount: 0 };
     const candidates = operationEvidence.unassigned_rows ?? [];
     const rows = candidates.map((row) => [
       row.period ?? "",
@@ -10622,7 +10686,7 @@ async function buildReportWorkbook(context) {
       "НЕ ФОРМИРОВАТЬ ПРОВОДКУ",
       row.reason ?? "",
     ]);
-    const endRow = 4 + rows.length;
+    const endRow = Math.max(5, 4 + rows.length);
     styleTitle(
       journalCandidatesSheet,
       "A1:Q1",
@@ -10630,39 +10694,31 @@ async function buildReportWorkbook(context) {
     );
     journalCandidatesSheet.getRange("A2:Q2").merge();
     journalCandidatesSheet.getRange("A2").values = [[
-      `Только строки точной организации и периода, для которых связь с R-кодом не доказана. Точно привязаны и показаны под строками дельт: ${operationEvidence?.exact_bound_operation_rows ?? 0}; R-коды: ${(operationEvidence?.exact_bound_r_codes ?? []).join(", ") || "нет"}. Все строки исключены из итогов, проводки не формируются.`,
+      `REPORT_ONLY — только строки точной организации и периода, для которых связь с R-кодом не доказана. Точно привязаны и показаны под строками дельт: ${operationEvidence?.exact_bound_operation_rows ?? 0}; R-коды: ${(operationEvidence?.exact_bound_r_codes ?? []).join(", ") || "нет"}. Все строки исключены из итогов, проводки не формируются.`,
     ]];
     journalCandidatesSheet.getRange("A2:Q2").format = {
       fill: colors.yellow,
       font: { bold: true, color: "#9C5700" },
       wrapText: true,
     };
-    writeValues(journalCandidatesSheet, 4, 1, [[
-      "Период",
-      "Исходный файл",
-      "Лист",
-      "Строка Excel",
-      "Документ",
-      "№ проводки",
-      "Дата",
-      "Дт",
-      "Аналитика Дт",
-      "Кт",
-      "Аналитика Кт",
-      "Сумма",
-      "Организация",
-      "Статья",
-      "Статус",
-      "Решение",
-      "Причина",
-    ]]);
+    writeValues(journalCandidatesSheet, 4, 1, [[...JOURNAL_OPERATION_HEADERS]]);
     styleHeader(journalCandidatesSheet.getRange("A4:Q4"));
-    writeValues(journalCandidatesSheet, 5, 1, rows);
-    styleData(journalCandidatesSheet.getRange(`A5:Q${endRow}`));
-    journalCandidatesSheet.getRange(`L5:L${endRow}`).format.numberFormat =
-      '#,##0.00;[Red](#,##0.00);-';
-    journalCandidatesSheet.getRange(`O5:Q${endRow}`).format.fill = colors.yellow;
-    journalCandidatesSheet.getRange(`B5:Q${endRow}`).format.wrapText = true;
+    if (rows.length > 0) {
+      writeValues(journalCandidatesSheet, 5, 1, rows);
+      styleData(journalCandidatesSheet.getRange(`A5:Q${endRow}`));
+      journalCandidatesSheet.getRange(`L5:L${endRow}`).format.numberFormat =
+        '#,##0.00;[Red](#,##0.00);-';
+      journalCandidatesSheet.getRange(`O5:Q${endRow}`).format.fill = colors.yellow;
+      journalCandidatesSheet.getRange(`B5:Q${endRow}`).format.wrapText = true;
+    } else {
+      const infoRow = [
+        "INFO_NO_JOURNAL_OPERATION_ROWS",
+        ...Array.from({ length: JOURNAL_OPERATION_HEADERS.length - 1 }, () => ""),
+      ];
+      writeValues(journalCandidatesSheet, 5, 1, [infoRow]);
+      styleData(journalCandidatesSheet.getRange("A5:Q5"));
+      journalCandidatesSheet.getRange("A5:Q5").format.fill = colors.yellow;
+    }
     setColumnWidths(
       journalCandidatesSheet,
       [12, 58, 18, 13, 46, 13, 18, 12, 42, 12, 42, 16, 28, 36, 24, 28, 58],
@@ -10670,11 +10726,11 @@ async function buildReportWorkbook(context) {
     );
     journalCandidatesSheet.freezePanes.freezeRows(4);
     journalCandidatesSheet.freezePanes.freezeColumns(4);
-    return endRow;
+    return { endRow, businessRowCount: rows.length };
   }
 
   function buildProvenOperations() {
-    if (!provenOperationsSheet) return 0;
+    if (!provenOperationsSheet) return { endRow: 0, businessRowCount: 0 };
     const headers = [
       "PairID", "Строка сверки", "Группа", "Роль", "ERP диапазон", "Дата",
       "Регистратор", "№ проводки", "Дт", "Аналитики Дт", "Подразделение Дт",
@@ -10716,7 +10772,7 @@ async function buildReportWorkbook(context) {
     );
     provenOperationsSheet.freezePanes.freezeRows(4);
     provenOperationsSheet.freezePanes.freezeColumns(5);
-    return endRow;
+    return { endRow, businessRowCount: rows.length };
   }
 
   function buildControls() {

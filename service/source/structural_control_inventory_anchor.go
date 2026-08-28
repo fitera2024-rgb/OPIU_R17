@@ -293,12 +293,23 @@ func validateStructuralPlanCrossLinks(inventory structuralControlInventory, r005
 		if err := decodeJSONRejectDuplicateKeys(data, &document, false); err != nil {
 			return errors.New("structural inventory current-run JSON is ambiguous")
 		}
-		var organization, period, outputPath, outputSHA string
+		var organization, period string
 		if err := json.Unmarshal(document["organization"], &organization); err != nil || organization != inventory.Organization.Name ||
-			json.Unmarshal(document["period"], &period) != nil || period != inventory.Period ||
-			json.Unmarshal(document["output_path"], &outputPath) != nil || !sameFilesystemPath(outputPath, reportPath) ||
-			json.Unmarshal(document["output_sha256"], &outputSHA) != nil || strings.ToUpper(outputSHA) != reportSHA {
+			json.Unmarshal(document["period"], &period) != nil || period != inventory.Period {
 			return errors.New("structural inventory current-run JSON scope does not match")
+		}
+		if !item.isManifest {
+			var reportInputPath, reportInputSHA string
+			if json.Unmarshal(document["report_path"], &reportInputPath) != nil || !sameFilesystemPath(reportInputPath, reportPath) ||
+				json.Unmarshal(document["report_sha256"], &reportInputSHA) != nil || strings.ToUpper(reportInputSHA) != reportSHA {
+				return errors.New("structural inventory Codex input does not bind exact report")
+			}
+		} else {
+			var outputPath, outputSHA string
+			if json.Unmarshal(document["output_path"], &outputPath) != nil || !sameFilesystemPath(outputPath, reportPath) ||
+				json.Unmarshal(document["output_sha256"], &outputSHA) != nil || strings.ToUpper(outputSHA) != reportSHA {
+				return errors.New("structural inventory current-run JSON scope does not match")
+			}
 		}
 		audit, err := decodeStructuralControlPlanAudit(document["structural_control_inventory"], inventory.SchemaVersion)
 		if err != nil || audit.SchemaVersion != inventory.SchemaVersion || audit.Status != "ELIGIBLE_PENDING_CURRENT_RUN_PROVENANCE" ||

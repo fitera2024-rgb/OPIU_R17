@@ -783,7 +783,8 @@ func (s *Server) loadStructuralControlInventory(organizationID, runID, inventory
 		return structuralControlInventory{}, "", structuralControlFail(http.StatusConflict, "STRUCTURAL_CONTROL_CONTEXT_ORGANIZATION_ID_REQUIRED")
 	}
 	if err := validateStructuralControlInventoryV2(inventory, binding, r005Dir, run, contextValue); err != nil {
-		return structuralControlInventory{}, "", structuralControlFail(http.StatusConflict, "STRUCTURAL_CONTROL_INVENTORY_UNVERIFIED")
+		return structuralControlInventory{}, "", fmt.Errorf("%w: %w",
+			structuralControlFail(http.StatusConflict, "STRUCTURAL_CONTROL_INVENTORY_UNVERIFIED"), err)
 	}
 	if err := validateStructuralControlInventoryMembers(inventory.IntalevMembers); err != nil {
 		return structuralControlInventory{}, "", err

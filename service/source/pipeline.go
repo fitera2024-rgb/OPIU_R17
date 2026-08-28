@@ -271,7 +271,7 @@ func (p *Pipeline) executeExternal(run Run, contextValue Context, erpPath, intal
 	}
 	structuralControlSettingsPath, structuralControlAudit, err := p.materializeActiveStructuralControlSettings(run, contextValue, runDir)
 	if err != nil {
-		finish(RunFailed, "R005_SETTINGS", "Настройка группировки блоков недоступна или повреждена")
+		finish(RunFailed, "R005_SETTINGS", structuralControlSettingsFailureMessage(err))
 		return
 	}
 	if err := bindStructuralControlRunManifest(run, contextValue, runDir, structuralControlAudit); err != nil {
@@ -385,7 +385,7 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 	}
 	structuralControlSettingsPath, structuralControlAudit, err := p.materializeActiveStructuralControlSettings(run, contextValue, runDir)
 	if err != nil {
-		finish(RunFailed, "R005_SETTINGS", "Настройка группировки блоков недоступна или повреждена")
+		finish(RunFailed, "R005_SETTINGS", structuralControlSettingsFailureMessage(err))
 		return
 	}
 	var packagedStructuralControlSettingsPath string
@@ -549,6 +549,35 @@ func (p *Pipeline) runStage(stage string, command []string, values map[string]st
 		return p.runner(stage, command, values, runDir, runtimeRoot)
 	}
 	return runStage(stage, command, values, runDir, runtimeRoot)
+}
+
+func structuralControlSettingsFailureMessage(err error) string {
+	const prefix = "Настройка группировки блоков не прошла проверку: "
+	if err == nil {
+		return prefix + "причина не определена"
+	}
+	known := []struct {
+		needle  string
+		message string
+	}{
+		{"structural inventory Codex input does not bind exact report", "файл доказательств Codex не связан с точным отчётом"},
+		{"structural inventory manifest does not bind exact Codex input", "манифест не связан с точным файлом доказательств Codex"},
+		{"structural inventory current-run JSON scope does not match", "организация, период или отчёт в доказательствах не совпадают"},
+		{"structural inventory embedded plan cross-link does not match", "встроенный план группировки не совпадает с подтверждённым инвентарём"},
+		{"structural inventory current-run artifact digest mismatch", "контрольная сумма файла доказательств не совпадает"},
+		{"structural inventory current-run provenance digest mismatch", "контрольная сумма происхождения запуска не совпадает"},
+		{"structural inventory member digest mismatch", "состав статей группы изменён"},
+		{"STRUCTURAL_CONTROL_INVENTORY_STALE", "подтверждённый инвентарь был изменён"},
+		{"STRUCTURAL_CONTROL_INVENTORY_UNAVAILABLE", "подтверждённый инвентарь отсутствует"},
+		{"STRUCTURAL_CONTROL_RUN_MISMATCH", "исходный запуск группировки не совпадает"},
+	}
+	text := err.Error()
+	for _, item := range known {
+		if strings.Contains(text, item.needle) {
+			return prefix + item.message
+		}
+	}
+	return prefix + "целостность подтверждённых данных не доказана"
 }
 
 func runStage(stage string, template []string, values map[string]string, runDir, runtimeRoot string) error {

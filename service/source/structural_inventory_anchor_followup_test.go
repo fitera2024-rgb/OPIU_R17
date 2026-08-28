@@ -161,6 +161,8 @@ func TestPriorRunProvenanceCannotBeRewrappedWithNewBinding(t *testing.T) {
 	// The embedded structural_control_inventory plan deliberately remains bound
 	// to originalRun. Rewriting only the visible wrapper must never create a
 	// current-run proof.
+	codex["report_path"] = replayedReport
+	codex["report_sha256"] = reportSHA
 	codex["output_path"] = replayedReport
 	codex["output_sha256"] = reportSHA
 	replayedCodex := filepath.Join(replayedDir, "reconciliation.codex-input.json")

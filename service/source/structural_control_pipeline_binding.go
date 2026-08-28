@@ -577,7 +577,10 @@ func (p *Pipeline) materializeActiveStructuralControlSettings(run Run, contextVa
 		}
 		originInventory, verifiedBindingSHA, loadErr := server.loadStructuralControlInventory(
 			originBinding.OrganizationID, version.RunID, originBinding.InventoryID)
-		if loadErr != nil || verifiedBindingSHA != originBindingSHA {
+		if loadErr != nil {
+			return "", audit, fmt.Errorf("active structural control origin inventory is not verified: %s: %w", version.ControlSetID, loadErr)
+		}
+		if verifiedBindingSHA != originBindingSHA {
 			return "", audit, fmt.Errorf("active structural control origin inventory is not verified: %s", version.ControlSetID)
 		}
 		if originBinding.OrganizationID != contextValue.OrganizationID ||

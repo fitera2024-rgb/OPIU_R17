@@ -180,13 +180,28 @@ class CleanSourceServiceCandidateTests(unittest.TestCase):
             node = root / "pinned-node" / "node.exe"
             node.parent.mkdir()
             node.write_bytes(b"pinned test node")
+            node_modules = root / "pinned-node-modules"
+            (node_modules / "jszip").mkdir(parents=True)
+            (node_modules / "jszip" / "package.json").write_text(
+                '{"name":"jszip","version":"3.10.1"}\n', encoding="utf-8",
+            )
+            node_modules_inventory = BUILDER.verified_test_node_modules_inventory(node_modules)
+            source_before = BUILDER.source_inventory(source)
+            test_modules_target = source.parent.parent / "node_modules"
             commands: list[list[str]] = []
             environments: list[dict[str, str]] = []
 
             def run(command, *, cwd, env):
                 commands.append([str(value) for value in command])
                 environments.append(dict(env))
+                if "test" in command:
+                    self.assertEqual(Path(cwd), source.resolve())
+                    self.assertEqual(
+                        (test_modules_target / "jszip" / "package.json").read_bytes(),
+                        (node_modules / "jszip" / "package.json").read_bytes(),
+                    )
                 if "build" in command:
+                    self.assertFalse(test_modules_target.exists())
                     output = Path(command[command.index("-o") + 1])
                     output.parent.mkdir(parents=True, exist_ok=True)
                     output.write_bytes(b"deterministic-new-exe")
@@ -207,6 +222,8 @@ class CleanSourceServiceCandidateTests(unittest.TestCase):
             ):
                 result = BUILDER.test_and_build_service(
                     Path("go.exe"), source, root / "build", test_node_exe=node,
+                    test_node_modules=node_modules,
+                    expected_test_node_modules_inventory=node_modules_inventory,
                 )
 
             self.assertIn("test", commands[0])
@@ -220,6 +237,8 @@ class CleanSourceServiceCandidateTests(unittest.TestCase):
             self.assertEqual(environments[0]["NODE_OPTIONS"], "")
             self.assertEqual(environments[0]["NODE_PATH"], "")
             self.assertEqual(environments[0]["NODE_ENV"], "production")
+            self.assertFalse(test_modules_target.exists())
+            self.assertEqual(BUILDER.source_inventory(source), source_before)
             for env in environments:
                 self.assertEqual(env["GOTOOLCHAIN"], "local")
                 self.assertEqual(env["GOOS"], "windows")
@@ -227,6 +246,71 @@ class CleanSourceServiceCandidateTests(unittest.TestCase):
                 self.assertEqual(env["CGO_ENABLED"], "0")
                 self.assertEqual(env["GOPROXY"], "off")
                 self.assertEqual(env["GOSUMDB"], "off")
+
+    def test_test_node_modules_collision_fails_before_go_process(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = self.make_source(root)
+            modules = root / "verified-modules"
+            modules.mkdir()
+            (modules / "package.json").write_text("{}\n", encoding="utf-8")
+            target = source.parent.parent / "node_modules"
+            target.mkdir()
+            with self.assertRaisesRegex(BUILDER.BuildError, "TEST_NODE_MODULES_TARGET_COLLISION"):
+                BUILDER.materialize_test_node_modules(
+                    source, modules, BUILDER.verified_test_node_modules_inventory(modules),
+                )
+
+    def test_test_node_modules_tamper_after_go_test_fails_before_build(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = self.make_source(root)
+            modules = root / "verified-modules"
+            modules.mkdir()
+            (modules / "package.json").write_text("{}\n", encoding="utf-8")
+            expected = BUILDER.verified_test_node_modules_inventory(modules)
+            commands: list[list[str]] = []
+
+            def run(command, *, cwd, env):
+                commands.append([str(value) for value in command])
+                if "test" in command:
+                    (source.parent.parent / "node_modules" / "package.json").write_text(
+                        '{"tampered":true}\n', encoding="utf-8",
+                    )
+                return subprocess.CompletedProcess(command, 0, "ok\n", "")
+
+            with (
+                patch.object(BUILDER, "verify_toolchain", return_value={}),
+                patch.object(BUILDER, "run_process", side_effect=run),
+                patch.object(BUILDER, "verify_toolchain_files", return_value={}),
+                self.assertRaisesRegex(BUILDER.BuildError, "TEST_NODE_MODULES_INVENTORY_MISMATCH"),
+            ):
+                BUILDER.test_and_build_service(
+                    Path("go.exe"), source, root / "build",
+                    test_node_modules=modules,
+                    expected_test_node_modules_inventory=expected,
+                )
+            self.assertEqual(len(commands), 1)
+            self.assertIn("test", commands[0])
+            self.assertFalse((source.parent.parent / "node_modules").exists())
+
+    def test_test_node_modules_reparse_input_is_inventory_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = self.make_source(root)
+            modules = root / "verified-modules"
+            modules.mkdir()
+            (modules / "package.json").write_text("{}\n", encoding="utf-8")
+            expected = BUILDER.verified_test_node_modules_inventory(modules)
+            original = BUILDER.is_reparse_point
+            with (
+                patch.object(
+                    BUILDER, "is_reparse_point",
+                    side_effect=lambda path: Path(path) == modules.absolute() or original(path),
+                ),
+                self.assertRaisesRegex(BUILDER.BuildError, "TEST_NODE_MODULES_INVENTORY_MISMATCH"),
+            ):
+                BUILDER.materialize_test_node_modules(source, modules, expected)
 
     def test_nondeterministic_service_build_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -915,6 +915,8 @@ def _build_one(
         )
         go_build = BASE.test_and_build_service(
             go_exe, service_source, work / "go", test_node_exe=node_exe,
+            test_node_modules=node_modules,
+            expected_test_node_modules_inventory=policy["toolchains"]["node_modules"],
         )
         if exact_git_source_inventory(repository, source_head, policy) != expected_source_record:
             raise BuildError("SOURCE_CHANGED_AFTER_GO_BUILD")

@@ -402,8 +402,65 @@ def verify_toolchain(go_exe: Path) -> dict[str, Any]:
     }
 
 
+def verified_test_node_modules_inventory(root: Path) -> dict[str, Any]:
+    try:
+        record = inventory_record(root, parallel=True)
+    except BuildError as error:
+        raise BuildError("TEST_NODE_MODULES_INVENTORY_MISMATCH") from error
+    return {
+        "file_count": record["file_count"],
+        "total_size": sum(row["size"] for row in record["files"]),
+        "inventory_sha256": record["sha256"],
+    }
+
+
+def require_test_node_modules_inventory(root: Path, expected: dict[str, Any]) -> None:
+    actual = verified_test_node_modules_inventory(root)
+    required = ("file_count", "total_size", "inventory_sha256")
+    if any(actual[key] != expected.get(key) for key in required):
+        raise BuildError("TEST_NODE_MODULES_INVENTORY_MISMATCH")
+
+
+def materialize_test_node_modules(
+    source_root: Path, node_modules: Path, expected_inventory: dict[str, Any],
+) -> Path:
+    """Copy verified dependencies beside the extracted repository test tree."""
+    source_root = source_root.resolve()
+    supplied = node_modules.absolute()
+    if not supplied.is_dir() or supplied.is_symlink() or is_reparse_point(supplied):
+        raise BuildError("TEST_NODE_MODULES_INVENTORY_MISMATCH")
+    # Enumerating first rejects every nested symlink/reparse before copying.
+    require_test_node_modules_inventory(supplied, expected_inventory)
+    target = source_root.parent.parent / "node_modules"
+    if os.path.lexists(target):
+        raise BuildError("TEST_NODE_MODULES_TARGET_COLLISION")
+    try:
+        shutil.copytree(supplied, target, copy_function=shutil.copyfile)
+    except OSError as error:
+        shutil.rmtree(target, ignore_errors=True)
+        raise BuildError("TEST_NODE_MODULES_COPY_FAILED") from error
+    try:
+        require_test_node_modules_inventory(target, expected_inventory)
+    except BuildError:
+        shutil.rmtree(target, ignore_errors=True)
+        raise
+    return target
+
+
+def remove_test_node_modules(source_root: Path, target: Path) -> None:
+    expected = source_root.resolve().parent.parent / "node_modules"
+    if target != expected or not target.is_dir() or target.is_symlink() or is_reparse_point(target):
+        raise BuildError("TEST_NODE_MODULES_CLEANUP_TARGET_INVALID")
+    try:
+        shutil.rmtree(target)
+    except OSError as error:
+        raise BuildError("TEST_NODE_MODULES_CLEANUP_FAILED") from error
+
+
 def test_and_build_service(
-    go_exe: Path, source_root: Path, build_root: Path, *, test_node_exe: Path | None = None,
+    go_exe: Path, source_root: Path, build_root: Path, *,
+    test_node_exe: Path | None = None, test_node_modules: Path | None = None,
+    expected_test_node_modules_inventory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_root = source_root.resolve()
     build_root = build_root.resolve()
@@ -419,13 +476,36 @@ def test_and_build_service(
             "NODE_OPTIONS": "", "NODE_PATH": "", "NODE_ENV": "production",
         })
     test_command = [str(go_exe), "test", "-count=1", "./..."]
-    test_result, _ = run_pinned_go(
-        go_exe,
-        test_command[1:],
-        cwd=source_root,
-        env=test_environment,
-    )
-    require_process(test_result, "GO_TEST")
+    test_modules_target: Path | None = None
+    test_error: Exception | None = None
+    try:
+        if test_node_modules is not None:
+            if expected_test_node_modules_inventory is None:
+                raise BuildError("TEST_NODE_MODULES_INVENTORY_MISMATCH")
+            test_modules_target = materialize_test_node_modules(
+                source_root, test_node_modules, expected_test_node_modules_inventory,
+            )
+        test_result, _ = run_pinned_go(
+            go_exe,
+            test_command[1:],
+            cwd=source_root,
+            env=test_environment,
+        )
+        require_process(test_result, "GO_TEST")
+        if test_modules_target is not None:
+            require_test_node_modules_inventory(
+                test_modules_target, expected_test_node_modules_inventory,
+            )
+    except Exception as error:
+        test_error = error
+    if test_modules_target is not None:
+        try:
+            remove_test_node_modules(source_root, test_modules_target)
+        except BuildError:
+            if test_error is None:
+                raise
+    if test_error is not None:
+        raise test_error
 
     first = build_root / "first" / SERVICE_EXE_NAME
     second = build_root / "second" / SERVICE_EXE_NAME

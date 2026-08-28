@@ -7,6 +7,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -165,6 +166,46 @@ def test_service_test_tree_preserves_git_bound_cross_runtime_topology() -> None:
             assert (target / "modules" / "corrections" / "source" / "safe.mjs").is_file()
             assert (target / "resources" / "reference" / "ref.json").is_file()
             assert (target / "data" / "defaults" / "organizations.json").is_file()
+
+
+def test_independent_build_passes_verified_modules_to_temporary_go_test_staging() -> None:
+    policy = BUILDER.load_policy()
+    expected_source_record = {"files": [], "inventory_sha256": "A" * 64}
+    captured: dict[str, object] = {}
+
+    class StopAfterTestStaging(Exception):
+        pass
+
+    def test_and_build(go_exe, source_root, build_root, **kwargs):
+        captured.update({
+            "go_exe": go_exe, "source_root": source_root,
+            "build_root": build_root, **kwargs,
+        })
+        raise StopAfterTestStaging
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        repository = root / "repository"
+        repository.mkdir()
+        modules = root / "verified-modules"
+        modules.mkdir()
+        with (
+            patch.object(BUILDER, "exact_git_source_inventory", return_value=expected_source_record),
+            patch.object(
+                BUILDER, "extract_service_test_tree",
+                return_value=(root / "source/service/source", {}, {}),
+            ),
+            patch.object(BUILDER.BASE, "test_and_build_service", side_effect=test_and_build),
+            pytest.raises(StopAfterTestStaging),
+        ):
+            BUILDER._build_one(
+                0, root / "OPIU_R17.zip", repository, "b" * 40,
+                root / "go.exe", root / "node.exe", modules,
+                policy, "C" * 64, expected_source_record,
+            )
+    assert captured["test_node_exe"] == root / "node.exe"
+    assert captured["test_node_modules"] == modules
+    assert captured["expected_test_node_modules_inventory"] == policy["toolchains"]["node_modules"]
 
 
 @pytest.mark.parametrize(

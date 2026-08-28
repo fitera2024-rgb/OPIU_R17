@@ -283,6 +283,12 @@ def test_positive_static_verification_and_identical_pair() -> None:
         archive, policy, payloads = make_valid(root / "A")
         report = VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
         assert report["status"] == "PASS_REPORT_ONLY_CANDIDATE"
+        safety_bytes = VERIFIER.canonical_json(policy["safety"])
+        assert report["runtime_safety"] == {
+            "path": "runtime/SAFETY.json",
+            "size": len(safety_bytes),
+            "sha256": VERIFIER.sha256_bytes(safety_bytes),
+        }
         assert report["privacy"]["whole_zip_user_profile_path_free"] is False
         second = root / "B" / "OPIU_R17.zip"
         write_archive(second, payloads, policy)
@@ -382,6 +388,34 @@ def test_manifest_and_payload_mutations_fail_closed(mutation: str) -> None:
         archive = root / mutation / "OPIU_R17.zip"
         write_archive(archive, payloads, policy)
         with pytest.raises(VERIFIER.VerificationError):
+            VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("missing", "REQUIRED_METADATA_MISSING:runtime/SAFETY.json"),
+        ("noncanonical", "RUNTIME_SAFETY_CANONICAL_BYTES_MISMATCH"),
+    ],
+)
+def test_runtime_safety_missing_or_noncanonical_is_rejected_with_honest_inventories(
+    mutation: str, expected: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        _, policy, payloads = make_valid(root / "seed")
+        path = "runtime/SAFETY.json"
+        if mutation == "missing":
+            payloads.pop(path)
+        else:
+            payloads[path] = (
+                json.dumps(policy["safety"], ensure_ascii=False, sort_keys=True) + "\n"
+            ).encode("utf-8")
+        payloads.pop("R17_BUILD_PROVENANCE.json")
+        rebuild_manifests(payloads, policy)
+        archive = root / mutation / "OPIU_R17.zip"
+        write_archive(archive, payloads, policy)
+        with pytest.raises(VERIFIER.VerificationError, match=expected):
             VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
 
 

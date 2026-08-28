@@ -62,6 +62,10 @@ def policy_value_sha256(value: dict[str, Any]) -> str:
     return sha256_bytes(payload)
 
 
+def canonical_json(value: Any) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
 def _json_object(data: bytes, label: str) -> dict[str, Any]:
     try:
         value = json.loads(data.decode("utf-8-sig"))
@@ -157,6 +161,19 @@ def validate_policy(policy: dict[str, Any], *, enforce_canonical: bool = True) -
 def assert_safety(value: Any, expected: dict[str, Any]) -> None:
     if not isinstance(value, dict) or value != expected:
         raise VerificationError("REPORT_ONLY_SAFETY_GATES_NOT_EXACT")
+
+
+def verify_runtime_safety(payloads: dict[str, bytes], policy: dict[str, Any]) -> dict[str, Any]:
+    path = "runtime/SAFETY.json"
+    data = payloads.get(path)
+    if data is None:
+        raise VerificationError("RUNTIME_SAFETY_MISSING")
+    expected = canonical_json(policy["safety"])
+    if data != expected:
+        raise VerificationError("RUNTIME_SAFETY_CANONICAL_BYTES_MISMATCH")
+    value = _json_object(data, path)
+    assert_safety(value, policy["safety"])
+    return {"path": path, "size": len(data), "sha256": sha256_bytes(data)}
 
 
 def verify_runtime_exact_files(payloads: dict[str, bytes], policy: dict[str, Any]) -> list[dict[str, Any]]:
@@ -586,7 +603,7 @@ def verify_archive(
     manifest = _json_object(payloads["R17_PACKAGE_MANIFEST.json"], "R17_PACKAGE_MANIFEST.json")
     provenance = _json_object(payloads["R17_BUILD_PROVENANCE.json"], "R17_BUILD_PROVENANCE.json")
     runtime_manifest = _json_object(payloads["runtime/MANIFEST.json"], "runtime/MANIFEST.json")
-    runtime_safety = _json_object(payloads["runtime/SAFETY.json"], "runtime/SAFETY.json")
+    runtime_safety = verify_runtime_safety(payloads, policy)
     runtime_exact_files = verify_runtime_exact_files(payloads, policy)
     if manifest.get("schema_version") != PACKAGE_SCHEMA or provenance.get("schema_version") != PROVENANCE_SCHEMA:
         raise VerificationError("TOP_LEVEL_SCHEMA_INVALID")
@@ -614,7 +631,6 @@ def verify_archive(
         assert_safety(document.get("safety"), policy["safety"])
         if document.get("release_approved") not in {None, False}:
             raise VerificationError("RELEASE_APPROVAL_CLAIM_FORBIDDEN")
-    assert_safety(runtime_safety, policy["safety"])
     expected_policy_sha = policy_sha256 or manifest.get("policy_sha256")
     if not isinstance(expected_policy_sha, str) or not re.fullmatch(r"[0-9A-F]{64}", expected_policy_sha):
         raise VerificationError("POLICY_SHA256_INVALID")
@@ -722,6 +738,7 @@ def verify_archive(
         "sha256": sha256_file(archive_path), "size": archive_path.stat().st_size,
         "entry_count": len(payloads), "source_head": manifest.get("source_head"),
         "release_approved": False, "safety": policy["safety"],
+        "runtime_safety": runtime_safety,
         "runtime_exact_files": runtime_exact_files,
         "legacy_rules_gate": legacy, "privacy": privacy,
         "dependency_closure": dependency_closure,

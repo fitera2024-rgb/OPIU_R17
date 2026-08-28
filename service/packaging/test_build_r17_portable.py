@@ -96,6 +96,24 @@ def test_policy_rejects_any_open_safety_gate() -> None:
         BUILDER.validate_policy(opened)
 
 
+def test_runtime_safety_is_materialized_with_exact_canonical_bytes_and_sha() -> None:
+    policy = BUILDER.load_policy()
+    expected = BUILDER.canonical_json(policy["safety"])
+    with tempfile.TemporaryDirectory() as raw:
+        stage = Path(raw) / "stage"
+        record = BUILDER.materialize_runtime_safety(stage, policy)
+        target = stage / "runtime" / "SAFETY.json"
+        assert target.read_bytes() == expected
+        assert record == {
+            "path": "runtime/SAFETY.json",
+            "size": len(expected),
+            "sha256": BUILDER.sha256_bytes(expected),
+        }
+        target.write_text("{}\n", encoding="utf-8")
+        with pytest.raises(BUILDER.BuildError, match="RUNTIME_SAFETY_PREEXISTING_CONFLICT"):
+            BUILDER.materialize_runtime_safety(stage, policy)
+
+
 @pytest.mark.parametrize("mutation", ["rules_token", "rules_fragment", "organizations_binding", "component", "relative", "full"])
 def test_policy_rejects_deleted_rules_guards_and_raised_path_limits(mutation: str) -> None:
     changed = copy.deepcopy(BUILDER.load_policy())

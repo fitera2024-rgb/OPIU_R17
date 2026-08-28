@@ -64,6 +64,28 @@ def canonical_json(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
 
+def materialize_runtime_safety(stage: Path, policy: dict[str, Any]) -> dict[str, Any]:
+    """Create the fail-closed runtime safety gate with exact canonical bytes."""
+    safety = dict(policy["safety"])
+    assert_closed_safety(safety, policy["safety"])
+    target = stage / "runtime" / "SAFETY.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    expected = canonical_json(safety)
+    if target.is_symlink() or (target.exists() and is_reparse(target)):
+        raise BuildError("RUNTIME_SAFETY_PATH_UNSAFE")
+    if target.exists() and target.read_bytes() != expected:
+        raise BuildError("RUNTIME_SAFETY_PREEXISTING_CONFLICT")
+    target.write_bytes(expected)
+    actual = target.read_bytes()
+    if actual != expected:
+        raise BuildError("RUNTIME_SAFETY_CANONICAL_WRITE_MISMATCH")
+    return {
+        "path": "runtime/SAFETY.json",
+        "size": len(actual),
+        "sha256": sha256_bytes(actual),
+    }
+
+
 def policy_value_sha256(value: dict[str, Any]) -> str:
     payload = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -729,8 +751,7 @@ def _write_metadata(
     privacy: dict[str, Any], legacy: dict[str, Any], dependency_closure: dict[str, Any],
 ) -> None:
     safety = dict(policy["safety"])
-    assert_closed_safety(safety, policy["safety"])
-    (stage / "runtime" / "SAFETY.json").write_bytes(canonical_json(safety))
+    materialize_runtime_safety(stage, policy)
     runtime_manifest_path = stage / "runtime" / "MANIFEST.json"
     runtime_record = inventory_record(stage / "runtime", excluded=("MANIFEST.json",))
     runtime_manifest = {

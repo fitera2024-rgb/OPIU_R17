@@ -167,6 +167,13 @@ func TestOpenStoreRecoversInterruptedRunsAfterServiceRestart(t *testing.T) {
 	startedAt := time.Date(2026, time.August, 28, 19, 58, 59, 0, time.UTC)
 	terminalFinishedAt := time.Date(2026, time.August, 28, 19, 59, 30, 0, time.UTC)
 	safety := reportOnlySafety()
+	unsafeActiveSafety := SafetyState{
+		Mode:           "LIVE",
+		PostingRows:    99,
+		ReadyToUpload:  true,
+		ReleaseAllowed: true,
+		Live1CAllowed:  true,
+	}
 	terminalRuns := map[string]Run{
 		"completed": {
 			ID: "completed", ContextID: "ctx_completed", Status: RunCompletedReportOnly,
@@ -203,7 +210,7 @@ func TestOpenStoreRecoversInterruptedRunsAfterServiceRestart(t *testing.T) {
 	} {
 		store.state.Runs[id] = Run{
 			ID: id, ContextID: "ctx_" + id, Status: status, Stage: string(status),
-			Message: "Незавершённый запуск", StartedAt: startedAt, Safety: safety,
+			Message: "Незавершённый запуск", StartedAt: startedAt, Safety: unsafeActiveSafety,
 		}
 	}
 	err = store.saveLocked()
@@ -239,8 +246,8 @@ func TestOpenStoreRecoversInterruptedRunsAfterServiceRestart(t *testing.T) {
 		if run.FinishedAt == nil || run.FinishedAt.Before(recoveryStarted) || run.FinishedAt.After(recoveryFinished) {
 			t.Fatalf("run %q has invalid recovery finish time: %+v", id, run.FinishedAt)
 		}
-		if run.Safety != safety {
-			t.Fatalf("run %q safety changed during recovery: got %+v want %+v", id, run.Safety, safety)
+		if run.Safety != reportOnlySafety() {
+			t.Fatalf("run %q safety was not normalized to REPORT_ONLY: got %+v want %+v", id, run.Safety, reportOnlySafety())
 		}
 	}
 	if hasActiveRuns(reopened) {

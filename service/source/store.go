@@ -135,6 +135,7 @@ func (s *Store) recoverInterruptedRuns(finishedAt time.Time) bool {
 		run.Status = RunFailed
 		run.Stage = interruptedServiceRestartStage
 		run.Message = interruptedServiceRestartMessage
+		run.Safety = reportOnlySafety()
 		completedAt := finishedAt
 		run.FinishedAt = &completedAt
 		s.state.Runs[id] = run

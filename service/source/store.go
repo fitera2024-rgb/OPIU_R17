@@ -115,6 +115,10 @@ func (s *Store) ConfigureOrganizationCatalog(nodes []organizationNode) error {
 		node.ID = cleanBusinessText(node.ID, 200)
 		node.Name = cleanBusinessText(node.Name, 200)
 		node.Path = cleanBusinessText(node.Path, 500)
+		// A reconciliation scope is always one ERP top-level organization.
+		// Descendants remain in the authoritative catalog for hierarchy proof,
+		// but must never become a selectable context through a source flag.
+		node.Selectable = node.Depth == 0
 		if node.ID == "" || node.Name == "" || node.Path == "" {
 			return errors.New("organization catalog contains incomplete exact identity")
 		}

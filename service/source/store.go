@@ -17,6 +17,11 @@ var acceptedPeriod = regexp.MustCompile(`^\d{4}(?:-(?:0[1-9]|1[0-2])|-Q[1-4])?$`
 
 var storeStateFileMu sync.Mutex
 
+const (
+	interruptedServiceRestartStage   = "INTERRUPTED_SERVICE_RESTART"
+	interruptedServiceRestartMessage = "Предыдущий экземпляр OPIU завершился до окончания расчёта. Запустите сверку повторно"
+)
+
 type storeState struct {
 	Files                    map[string]SourceFile                       `json:"files"`
 	Contexts                 map[string]Context                          `json:"contexts"`
@@ -101,12 +106,41 @@ func OpenStore(root string) (*Store, error) {
 	if store.state.StructuralControlAnchors == nil {
 		store.state.StructuralControlAnchors = map[string]structuralControlInventoryAnchor{}
 	}
-	if store.restoreSourceMetadata(persisted.SourceMetadata) {
+	stateRecovered := store.restoreSourceMetadata(persisted.SourceMetadata)
+	if store.recoverInterruptedRuns(time.Now().UTC()) {
+		stateRecovered = true
+	}
+	if stateRecovered {
 		if err := store.saveLocked(); err != nil {
-			return nil, fmt.Errorf("persist recovered source metadata: %w", err)
+			return nil, fmt.Errorf("persist recovered store state: %w", err)
 		}
 	}
 	return store, nil
+}
+
+// recoverInterruptedRuns terminalizes work that belonged to a service process
+// which no longer exists. It deliberately does not inspect or promote files in
+// the run directory: an orphan workbook is not a completed report-only result.
+// OpenStore calls this while holding the durable state lock and persists all
+// recovered runs with one locked state write.
+func (s *Store) recoverInterruptedRuns(finishedAt time.Time) bool {
+	recovered := false
+	finishedAt = finishedAt.UTC()
+	for id, run := range s.state.Runs {
+		switch run.Status {
+		case RunQueued, RunPreflight, RunRunning:
+		default:
+			continue
+		}
+		run.Status = RunFailed
+		run.Stage = interruptedServiceRestartStage
+		run.Message = interruptedServiceRestartMessage
+		completedAt := finishedAt
+		run.FinishedAt = &completedAt
+		s.state.Runs[id] = run
+		recovered = true
+	}
+	return recovered
 }
 
 func (s *Store) ConfigureOrganizationCatalog(nodes []organizationNode) error {

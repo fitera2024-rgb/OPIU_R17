@@ -592,15 +592,78 @@ def test_extra_node_sibling_or_mojibake_setting_is_rejected_with_honest_inventor
             VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
 
 
-def test_relocation_smoke_api_fails_closed_for_synthetic_non_executables() -> None:
+def test_relocation_smoke_api_fails_closed_for_synthetic_non_executables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with tempfile.TemporaryDirectory() as raw:
         archive, policy, _ = make_valid(Path(raw))
         expected = "SMOKE_NODE_VERSION_FAILED" if os.name == "nt" else "SMOKE_WINDOWS_REQUIRED"
+        if os.name == "nt":
+            def forbidden_run(*_args: object, **_kwargs: object) -> None:
+                raise AssertionError("invalid PE must be rejected before subprocess.run")
+
+            monkeypatch.setattr(VERIFIER.subprocess, "run", forbidden_run)
         with pytest.raises(VERIFIER.VerificationError, match=expected):
             VERIFIER.verify_archive(
                 archive, policy, policy_sha256=POLICY_SHA, run_smoke=True,
                 smoke_parent=Path(raw) / "relocated", smoke_timeout=2.0,
             )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PE guard")
+def test_windows_amd64_executable_guard_rejects_truncated_headers() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        executable = Path(raw) / "truncated.exe"
+        payload = bytearray(90)
+        payload[:2] = b"MZ"
+        payload[60:64] = (64).to_bytes(4, "little")
+        payload[64:68] = b"PE\0\0"
+        payload[68:70] = (0x8664).to_bytes(2, "little")
+        payload[70:72] = (1).to_bytes(2, "little")
+        payload[84:86] = (112).to_bytes(2, "little")
+        payload[86:88] = (0x0002).to_bytes(2, "little")
+        payload[88:90] = (0x20B).to_bytes(2, "little")
+        executable.write_bytes(payload)
+
+        with pytest.raises(VERIFIER.VerificationError, match="TRUNCATED_PE"):
+            VERIFIER._assert_windows_amd64_executable(executable, "TRUNCATED_PE")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows relocation smoke")
+def test_relocation_smoke_rejects_invalid_service_before_popen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        archive, policy, _ = make_valid(root)
+        checked: list[str] = []
+
+        def fake_guard(_path: Path, error_code: str) -> None:
+            checked.append(error_code)
+            if error_code == "SMOKE_SERVICE_START_FAILED":
+                raise VERIFIER.VerificationError(error_code)
+
+        def fake_run(command: list[str], **_kwargs: object) -> object:
+            stdout = (
+                policy["toolchains"]["node"]["version_line"] + "\n"
+                if "--version" in command
+                else "NODE_RUNTIME_LOAD_AND_CANVAS_PASS"
+            )
+            return VERIFIER.subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        def forbidden_popen(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("invalid Service PE must be rejected before subprocess.Popen")
+
+        monkeypatch.setattr(VERIFIER, "_assert_windows_amd64_executable", fake_guard)
+        monkeypatch.setattr(VERIFIER.subprocess, "run", fake_run)
+        monkeypatch.setattr(VERIFIER.subprocess, "Popen", forbidden_popen)
+
+        with pytest.raises(VERIFIER.VerificationError, match="SMOKE_SERVICE_START_FAILED"):
+            VERIFIER.verify_archive(
+                archive, policy, policy_sha256=POLICY_SHA, run_smoke=True,
+                smoke_parent=root / "relocated", smoke_timeout=2.0,
+            )
+        assert checked == ["SMOKE_NODE_VERSION_FAILED", "SMOKE_SERVICE_START_FAILED"]
 
 
 def test_synthetic_smoke_api_requires_two_distinct_relocation_roots(

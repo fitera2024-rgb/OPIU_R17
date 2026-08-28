@@ -797,6 +797,39 @@ def _is_reparse(path: Path) -> bool:
         raise VerificationError("SMOKE_PATH_METADATA_FAILED") from error
 
 
+def _assert_windows_amd64_executable(path: Path, error_code: str) -> None:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            dos = stream.read(64)
+            if len(dos) != 64 or dos[:2] != b"MZ":
+                raise ValueError("DOS header")
+            pe_offset = int.from_bytes(dos[60:64], "little")
+            if pe_offset < 64 or pe_offset > size - 26:
+                raise ValueError("PE offset")
+            stream.seek(pe_offset)
+            pe = stream.read(26)
+    except (OSError, ValueError) as error:
+        raise VerificationError(error_code) from error
+
+    number_of_sections = int.from_bytes(pe[6:8], "little")
+    optional_size = int.from_bytes(pe[20:22], "little")
+    characteristics = int.from_bytes(pe[22:24], "little")
+    headers_end = pe_offset + 24 + optional_size + number_of_sections * 40
+    if (
+        len(pe) != 26
+        or pe[:4] != b"PE\0\0"
+        or int.from_bytes(pe[4:6], "little") != 0x8664
+        or number_of_sections == 0
+        or optional_size < 112
+        or int.from_bytes(pe[24:26], "little") != 0x20B
+        or not characteristics & 0x0002
+        or characteristics & 0x2000
+        or headers_end > size
+    ):
+        raise VerificationError(error_code)
+
+
 def _wait_port_released(port: int, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -860,6 +893,7 @@ def _run_relocation_smoke_after_static(
             "OPIU_RELEASE_ALLOWED": "0", "OPIU_ENABLE_POSTING": "0",
             "NODE_OPTIONS": "", "NODE_PATH": "", "NODE_ENV": "production", "TZ": "UTC",
         })
+        _assert_windows_amd64_executable(node, "SMOKE_NODE_VERSION_FAILED")
         try:
             version = subprocess.run(
                 [str(node), "--version"], cwd=package_root, env=environment,
@@ -915,13 +949,17 @@ const localRequire = createRequire(path.join(modules, "__opiu_smoke__.cjs"));
         health: dict[str, Any] | None = None
         bootstrap: dict[str, Any] | None = None
         organizations: list[dict[str, Any]] | None = None
+        _assert_windows_amd64_executable(executable, "SMOKE_SERVICE_START_FAILED")
         try:
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            process = subprocess.Popen(
-                [str(executable), "-addr", f"127.0.0.1:{port}", "-data-dir", str(data_dir), "-no-open"],
-                cwd=package_root, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace", creationflags=creationflags,
-            )
+            try:
+                process = subprocess.Popen(
+                    [str(executable), "-addr", f"127.0.0.1:{port}", "-data-dir", str(data_dir), "-no-open"],
+                    cwd=package_root, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, encoding="utf-8", errors="replace", creationflags=creationflags,
+                )
+            except OSError as error:
+                raise VerificationError("SMOKE_SERVICE_START_FAILED") from error
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 if process.poll() is not None:

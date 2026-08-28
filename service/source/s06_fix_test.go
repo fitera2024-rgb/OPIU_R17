@@ -445,6 +445,74 @@ type s06FixHelperProcess struct {
 	grandchildPID int
 }
 
+func cleanupS06FixHelperProcess(
+	pid int,
+	isAlive func(int) bool,
+	terminate func(int) error,
+	wait func(),
+	timeout time.Duration,
+) error {
+	if isAlive(pid) {
+		if err := terminate(pid); err != nil {
+			return fmt.Errorf("terminate S06 helper pid=%d: %w", pid, err)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wait()
+		close(done)
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf("wait S06 helper pid=%d timed out after %v", pid, timeout)
+	}
+}
+
+func TestS06FixHelperCleanupSkipsWaitWhenTerminateFails(t *testing.T) {
+	waitCalled := false
+	err := cleanupS06FixHelperProcess(
+		23592,
+		func(int) bool { return true },
+		func(int) error { return fmt.Errorf("access denied") },
+		func() { waitCalled = true },
+		25*time.Millisecond,
+	)
+	if err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("expected terminate error, got %v", err)
+	}
+	if waitCalled {
+		t.Fatal("Wait was called after failed terminate")
+	}
+}
+
+func TestS06FixHelperCleanupWaitIsBounded(t *testing.T) {
+	release := make(chan struct{})
+	started := time.Now()
+	err := cleanupS06FixHelperProcess(
+		23592,
+		func(int) bool { return false },
+		func(int) error {
+			t.Fatal("terminate must not be called for an exited process")
+			return nil
+		},
+		func() { <-release },
+		25*time.Millisecond,
+	)
+	elapsed := time.Since(started)
+	close(release)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected bounded wait timeout, got %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("cleanup was not bounded: %v", elapsed)
+	}
+}
+
 func startS06FixHelper(t *testing.T, address, mode string) s06FixHelperProcess {
 	t.Helper()
 	command := exec.Command(os.Args[0], "-test.run=^TestS06FixProcessHelper$")
@@ -493,10 +561,16 @@ func startS06FixHelper(t *testing.T, address, mode string) s06FixHelperProcess {
 		t.Fatalf("неверный сигнал helper %s: %q (%v)", mode, readyLine, err)
 	}
 	t.Cleanup(func() {
-		if isProcessAlive(result.pid) {
-			_ = terminateProcessTree(result.pid)
+		err := cleanupS06FixHelperProcess(
+			result.pid,
+			isProcessAlive,
+			terminateProcessTree,
+			func() { _ = command.Wait() },
+			2*time.Second,
+		)
+		if err != nil {
+			t.Errorf("S06 helper cleanup failed: %v", err)
 		}
-		_ = command.Wait()
 	})
 	return result
 }

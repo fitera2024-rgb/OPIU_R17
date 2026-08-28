@@ -183,7 +183,7 @@ func TestOpenStoreRecoversInterruptedRunsAfterServiceRestart(t *testing.T) {
 		"failed": {
 			ID: "failed", ContextID: "ctx_failed", Status: RunFailed,
 			Stage: "R005", Message: "Исходная ошибка", StartedAt: startedAt, FinishedAt: &terminalFinishedAt,
-			Safety: safety,
+			Safety: unsafeActiveSafety,
 		},
 		"blocked": {
 			ID: "blocked", ContextID: "ctx_blocked", Status: RunBlockedInvalidContext,

@@ -2,10 +2,26 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func requireS10BoundedFileCause(t *testing.T, err error, outerMessage string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("codex input above 128 MiB was accepted")
+	}
+	if !strings.Contains(err.Error(), outerMessage) {
+		t.Fatalf("error %q does not expose %q", err, outerMessage)
+	}
+	cause := errors.Unwrap(err)
+	if cause == nil || cause.Error() != "structural artifact is not a bounded regular file" {
+		t.Fatalf("error %q does not preserve bounded-file cause", err)
+	}
+}
 
 func padStructuralCodexInput(t *testing.T, path string, targetSize int64) {
 	t.Helper()
@@ -97,9 +113,8 @@ func TestS10StructuralInventoryRejectsCodexInputAbove128MiB(t *testing.T) {
 	if err := os.Truncate(codexPath, structuralControlCodexInputMaxBytes+1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := validateStructuralControlInventoryForAnchor(r005Dir, run, contextValue); err == nil {
-		t.Fatal("codex input above 128 MiB was accepted by current-run digest validation")
-	}
+	_, err := validateStructuralControlInventoryForAnchor(r005Dir, run, contextValue)
+	requireS10BoundedFileCause(t, err, "structural inventory current-run artifact digest is unavailable")
 
 	data, err := readStructuralControlArtifact(r005Dir, filepath.Join(r005Dir, "structural-control-inventory.json"), 16<<20)
 	if err != nil {
@@ -109,7 +124,6 @@ func TestS10StructuralInventoryRejectsCodexInputAbove128MiB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateStructuralPlanCrossLinks(inventory, r005Dir); err == nil {
-		t.Fatal("codex input above 128 MiB was accepted by plan cross-link validation")
-	}
+	err = validateStructuralPlanCrossLinks(inventory, r005Dir)
+	requireS10BoundedFileCause(t, err, "structural inventory current-run JSON is unavailable")
 }

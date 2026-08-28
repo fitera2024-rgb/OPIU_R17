@@ -212,7 +212,10 @@ func validateStructuralControlInventoryV2(inventory structuralControlInventory, 
 			return errors.New("structural inventory current-run artifact path is not canonical")
 		}
 		actualSHA, err := sha256StructuralControlArtifact(r005Dir, expectedPath, artifact.limit)
-		if err != nil || actualSHA != artifact.descriptor.SHA256 {
+		if err != nil {
+			return fmt.Errorf("structural inventory current-run artifact digest is unavailable: %w", err)
+		}
+		if actualSHA != artifact.descriptor.SHA256 {
 			return errors.New("structural inventory current-run artifact digest mismatch")
 		}
 	}
@@ -284,7 +287,7 @@ func validateStructuralPlanCrossLinks(inventory structuralControlInventory, r005
 	} {
 		data, err := readStructuralControlArtifact(r005Dir, item.path, item.limit)
 		if err != nil {
-			return errors.New("structural inventory current-run JSON is unavailable")
+			return fmt.Errorf("structural inventory current-run JSON is unavailable: %w", err)
 		}
 		var document map[string]json.RawMessage
 		if err := decodeJSONRejectDuplicateKeys(data, &document, false); err != nil {

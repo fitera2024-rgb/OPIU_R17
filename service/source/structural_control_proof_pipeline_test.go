@@ -321,6 +321,88 @@ func TestStructuralControlSecureArtifactReadRejectsOversizeAndReparse(t *testing
 	}
 }
 
+func TestUI014LargeCodexInputUsesItsExactBoundedRole(t *testing.T) {
+	run := Run{ID: "RUN-UI014", ContextID: "CTX-UI014"}
+	contextValue := Context{
+		ID: run.ContextID, Organization: "9 Управляющая компания", OrganizationID: "ORG-9",
+		OrganizationName: "9 Управляющая компания", OrganizationPath: "9 Управляющая компания", Period: "2025-10",
+	}
+	runDir := t.TempDir()
+	audit := structuralControlPipelineAudit{
+		Status: "NO_ACTIVE_UI_FIXED_SETS", RunID: run.ID, ContextID: contextValue.ID,
+		Organization: contextValue.Organization, OrganizationID: contextValue.OrganizationID,
+		OrganizationName: contextValue.OrganizationName, OrganizationPath: contextValue.OrganizationPath,
+		Period: contextValue.Period, ControlSetIDs: []string{}, AppliedVersions: []structuralControlPipelineVersionRef{},
+	}
+	writeStructuralControlInitialRunManifest(t, runDir, run, contextValue)
+	if err := bindStructuralControlRunManifest(run, contextValue, runDir, audit); err != nil {
+		t.Fatal(err)
+	}
+	r005Dir := filepath.Join(runDir, "r005")
+	if err := os.MkdirAll(r005Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	codexPath := filepath.Join(r005Dir, structuralControlCodexInputFilename)
+	writeStructuralControlCodexProofFixture(t, codexPath, audit)
+	payload, _, err := readStructuralControlObject(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload["ui014_padding"] = strings.Repeat("x", int(structuralControlSettingsJSONMaxBytes)+1)
+	if err := atomicWritePrivateJSON(codexPath, payload); err != nil {
+		t.Fatal(err)
+	}
+	codexInfo, err := os.Stat(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if codexInfo.Size() <= structuralControlSettingsJSONMaxBytes || codexInfo.Size() > structuralControlCodexInputMaxBytes {
+		t.Fatalf("UI-014 fixture size=%d is outside the intended codex-only interval", codexInfo.Size())
+	}
+	proofPath, _, err := materializeStructuralControlProof(run, contextValue, runDir, codexPath)
+	if err != nil {
+		t.Fatalf("codex input between 4 MiB and 128 MiB was rejected: %v", err)
+	}
+	if !regularFile(filepath.Join(r005Dir, structuralControlProofBindingFile)) {
+		t.Fatal("large verified codex input did not produce immutable proof binding")
+	}
+	if _, err := verifyStructuralControlProofArtifact(run, contextValue, runDir, codexPath, proofPath); err != nil {
+		t.Fatalf("large codex proof binding was not repeatably verifiable: %v", err)
+	}
+
+	genericPath := filepath.Join(runDir, "large-generic.json")
+	if err := os.WriteFile(genericPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(genericPath, structuralControlSettingsJSONMaxBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := structuralControlManifestArtifact(runDir, genericPath, strings.Repeat("A", 64)); err == nil {
+		t.Fatal("generic JSON larger than 4 MiB was accepted")
+	}
+	counterfeitDir := filepath.Join(runDir, "r005-settings")
+	if err := os.MkdirAll(counterfeitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	counterfeitPath := filepath.Join(counterfeitDir, structuralControlCodexInputFilename)
+	if err := os.WriteFile(counterfeitPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(counterfeitPath, structuralControlSettingsJSONMaxBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := structuralControlManifestArtifact(runDir, counterfeitPath, strings.Repeat("A", 64)); err == nil {
+		t.Fatal("codex filename outside the exact r005 role received the 128 MiB limit")
+	}
+
+	if err := os.Truncate(codexPath, structuralControlCodexInputMaxBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := materializeStructuralControlProof(run, contextValue, runDir, codexPath); err == nil {
+		t.Fatal("materialization accepted codex input larger than 128 MiB")
+	}
+}
+
 func materializePackagedStructuralControlSettingsForTest(t *testing.T, run Run, contextValue Context, runDir, sourcePath string, audit structuralControlPipelineAudit) (string, structuralControlPipelineAudit, error) {
 	t.Helper()
 	node, err := exec.LookPath("node")
@@ -484,7 +566,7 @@ func TestStructuralControlProofCanonicalDescriptorMatchesR005Implementation(t *t
 		}},
 	}
 	writeStructuralControlCodexProofFixture(t, codexPath, audit)
-	payload, _, err := readStructuralControlCodexPayload(codexPath)
+	payload, _, err := readStructuralControlObject(codexPath)
 	if err != nil {
 		t.Fatal(err)
 	}

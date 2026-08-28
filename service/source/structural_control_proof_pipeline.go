@@ -22,6 +22,7 @@ const (
 	structuralControlProofBindingSchema = "opiu-service-structural-control-proof-binding.v1"
 	structuralControlProofFilename      = "structural-control-proof.json"
 	structuralControlProofBindingFile   = "structural-control-proof.binding.json"
+	structuralControlCodexInputFilename = "reconciliation.codex-input.json"
 )
 
 type structuralControlArtifactRef struct {
@@ -204,12 +205,17 @@ func structuralControlManifestArtifact(runDir, artifactPath, expectedSHA string)
 		return structuralControlArtifactRef{}, errors.New("structural-control run artifact escaped run directory")
 	}
 	limit := structuralControlSettingsJSONMaxBytes
-	if strings.EqualFold(filepath.Ext(artifactPath), ".csv") {
+	if filepath.Clean(relative) == filepath.Join("r005", structuralControlCodexInputFilename) {
+		limit = structuralControlCodexInputMaxBytes
+	} else if strings.EqualFold(filepath.Ext(artifactPath), ".csv") {
 		limit = structuralControlPackagedCSVMaxBytes
 	}
 	data, err := readStructuralControlSecureArtifact(runDir, artifactPath, limit)
+	if err != nil {
+		return structuralControlArtifactRef{}, fmt.Errorf("structural-control manifest artifact read failed: %w", err)
+	}
 	actualSHA := structuralControlBytesSHA256(data)
-	if err != nil || !validSHA256(expectedSHA) || !strings.EqualFold(actualSHA, expectedSHA) {
+	if !validSHA256(expectedSHA) || !strings.EqualFold(actualSHA, expectedSHA) {
 		return structuralControlArtifactRef{}, errors.New("structural-control manifest artifact hash mismatch")
 	}
 	return structuralControlArtifactRef{Path: filepath.ToSlash(relative), SHA256: strings.ToUpper(actualSHA), Size: int64(len(data))}, nil
@@ -446,7 +452,7 @@ func materializeStructuralControlProof(run Run, contextValue Context, runDir, co
 	if err != nil {
 		return "", structuralControlProofDescriptor{}, err
 	}
-	payload, codexBytes, err := readStructuralControlCodexPayload(codexPath)
+	payload, codexBytes, err := readStructuralControlCodexPayloadWithin(runDir, codexPath)
 	if err != nil {
 		return "", structuralControlProofDescriptor{}, err
 	}
@@ -505,7 +511,7 @@ func verifyStructuralControlProofArtifact(run Run, contextValue Context, runDir,
 	if err != nil {
 		return structuralControlProofDescriptor{}, err
 	}
-	payload, codexBytes, err := readStructuralControlCodexPayload(codexPath)
+	payload, codexBytes, err := readStructuralControlCodexPayloadWithin(runDir, codexPath)
 	if err != nil {
 		return structuralControlProofDescriptor{}, err
 	}
@@ -609,12 +615,8 @@ func verifyStructuralControlProofHandoff(handoffPath string, run Run, contextVal
 	return nil
 }
 
-func readStructuralControlCodexPayload(path string) (map[string]any, []byte, error) {
-	payload, data, err := readStructuralControlObject(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	return payload, data, nil
+func readStructuralControlCodexPayloadWithin(runDir, path string) (map[string]any, []byte, error) {
+	return readStructuralControlObjectWithin(runDir, path, structuralControlCodexInputMaxBytes)
 }
 
 func readStructuralControlObject(path string) (map[string]any, []byte, error) {

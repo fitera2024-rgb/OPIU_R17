@@ -122,7 +122,11 @@ import {
   serializeStructuralControlGroups,
   structuralControlGroupsFromConfig,
 } from "./structural_control_groups.mjs";
-import { loadStructuralControlSettingsDocument } from "./structural_control_settings_binding.mjs";
+import {
+  assertUniqueStructuralControlScopeArguments,
+  loadStructuralControlSettingsDocument,
+} from "./structural_control_settings_binding.mjs";
+import { bindStructuralControlGroupsToCurrentHierarchies } from "./structural_control_current_hierarchy_binding.mjs";
 import {
   buildStructuralControlReportDetail,
   STRUCTURAL_CONTROL_REPORT_DETAIL_HEADERS,
@@ -216,16 +220,25 @@ function khabarovskRulesPath() {
 
 const argv = process.argv.slice(2);
 const command = argv[0] ?? "help";
+assertUniqueStructuralControlScopeArguments(argv.slice(1));
 const args = parseArgs(argv.slice(1));
 const config = JSON.parse(await fs.readFile(configPath, "utf8"));
 const structuralControlSettingsBinding = await loadStructuralControlSettingsDocument(
   args["structural-control-settings"],
-  { organization: args.organization, period: args.period },
+  {
+    organization: args.organization,
+    period: args.period,
+    organizationId: args["organization-id"],
+    organizationName: args["organization-name"],
+    organizationPath: args["organization-path"],
+    runId: args["run-id"],
+    contextId: args["context-id"],
+  },
 );
-const activeStructuralControlGroups = structuralControlSettingsBinding.document
+let activeStructuralControlGroups = structuralControlSettingsBinding.document
   ? structuralControlSettingsBinding.groups
   : structuralControlGroupsFromConfig(config, { organization: args.organization });
-const structuralControlSettingsAudit = structuralControlSettingsBinding.audit;
+let structuralControlSettingsAudit = structuralControlSettingsBinding.audit;
 const organizationProfileRegistry = JSON.parse(
   await fs.readFile(organizationProfilesPath, "utf8"),
 );
@@ -6039,6 +6052,16 @@ async function runReconciliation() {
     });
   }
 
+  const currentStructuralHierarchyBinding = bindStructuralControlGroupsToCurrentHierarchies(
+    activeStructuralControlGroups,
+    monthly,
+  );
+  activeStructuralControlGroups = currentStructuralHierarchyBinding.groups;
+  structuralControlSettingsAudit = Object.freeze({
+    ...structuralControlSettingsBinding.audit,
+    current_hierarchy_binding: currentStructuralHierarchyBinding.audit,
+  });
+
   const aggregateRows = templateRows.map((templateRow) => {
     const records = monthly.map((month) =>
       month.rows.find((row) => row.code === templateRow.code),
@@ -7573,7 +7596,7 @@ export function buildCodexInputPayload({
     default_behavior: "PROCESS_ALL_DISCREPANCIES",
     structural_group_control_sets:
       serializeStructuralControlGroups(structuralControlGroups),
-    structural_control_settings_binding: structuralControlSettingsBinding.audit,
+    structural_control_settings_binding: structuralControlSettingsAudit,
     empty_article_binding_settings: (monthly ?? []).map((month) => ({
       period: month.period,
       ...(month?.empty_article_binding_settings ?? {}),
@@ -8441,7 +8464,7 @@ async function buildReportWorkbook(context) {
     structural_group_control_sets:
       codexInput?.structural_group_control_sets ?? [],
     structural_control_settings_binding:
-      codexInput?.structural_control_settings_binding ?? structuralControlSettingsBinding.audit,
+      codexInput?.structural_control_settings_binding ?? structuralControlSettingsAudit,
     empty_article_binding_settings:
       codexInput?.empty_article_binding_settings ?? [],
     empty_article_binding_audit:

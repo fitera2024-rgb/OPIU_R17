@@ -307,7 +307,7 @@ func (p *Pipeline) executeExternal(run Run, contextValue Context, erpPath, intal
 		return
 	}
 	if err := p.runStage("R005", r005Command, values, runDir, ""); err != nil {
-		finish(RunFailed, "R005", "Этап завершился ошибкой; технические детали сохранены в журнале запуска")
+		finish(RunFailed, "R005", r005StageFailureMessage(runDir))
 		return
 	}
 	r005Dir := filepath.Join(runDir, "r005")
@@ -441,7 +441,7 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 	}
 	if err := p.runStage("R005", r005Command, nil, runDir, adapter.Root); err != nil {
 		if packageErr := validateR005ReportOnlyPackage(r005Dir, contextValue, true); packageErr != nil {
-			finish(RunFailed, "R005", "Сверка завершилась ошибкой; безопасный отчётный комплект не сформирован")
+			finish(RunFailed, "R005", r005StageFailureMessage(runDir))
 			return
 		}
 	}
@@ -578,6 +578,40 @@ func structuralControlSettingsFailureMessage(err error) string {
 		}
 	}
 	return prefix + "целостность подтверждённых данных не доказана"
+}
+
+func r005StageFailureMessage(runDir string) string {
+	const generic = "Сверка завершилась ошибкой; безопасный отчётный комплект не сформирован"
+	logPath := filepath.Join(runDir, "r005.log")
+	info, err := os.Lstat(logPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 8<<20 {
+		return generic
+	}
+	payload, err := os.ReadFile(logPath)
+	if err != nil {
+		return generic
+	}
+	logText := string(payload)
+	known := []struct {
+		code    string
+		message string
+	}{
+		{"BLOCKED_STRUCTURAL_CONTROL_SETTINGS_SOURCE_INVALID", "R005 отклонил настройку группировки: формат источника не поддерживается"},
+		{"BLOCKED_STRUCTURAL_CONTROL_SETTINGS_CSV_HEADERS_INVALID", "R005 отклонил настройку группировки: заголовки файла не соответствуют его формату"},
+		{"BLOCKED_STRUCTURAL_CONTROL_SETTINGS_DOCUMENT_SOURCE_BINDING_MISMATCH", "R005 отклонил настройку группировки: выбранные пути не совпадают с подтверждёнными настройками"},
+		{"BLOCKED_STRUCTURAL_CONTROL_SETTINGS_SOURCE_DRIFT", "R005 отклонил настройку группировки: исходный файл был изменён"},
+		{"BLOCKED_STRUCTURAL_CONTROL_SETTINGS_RUN_SCOPE_MISMATCH", "R005 отклонил настройку группировки: организация или период не совпадают"},
+		{"BLOCKED_STRUCTURAL_CONTROL_SETTINGS_GROUP_CONFIG_INVALID", "R005 отклонил настройку группировки: состав группы не прошёл проверку"},
+	}
+	for _, item := range known {
+		if strings.Contains(logText, item.code) {
+			return item.message
+		}
+	}
+	if strings.Contains(logText, "BLOCKED_STRUCTURAL_CONTROL_SETTINGS_") {
+		return "R005 отклонил настройку группировки: целостность подтверждённых данных не доказана"
+	}
+	return generic
 }
 
 func runStage(stage string, template []string, values map[string]string, runDir, runtimeRoot string) error {

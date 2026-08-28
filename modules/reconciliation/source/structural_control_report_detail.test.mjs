@@ -74,6 +74,10 @@ test("keeps package-default controls visible when exact UI paths are absent", ()
 test("07_Контроли keeps its summary and appends the business detail table", () => {
   const source = fs.readFileSync(new URL("./opiu_reconcile.mjs", import.meta.url), "utf8");
   assert.match(source, /buildStructuralControlReportDetail\(\{\s*controls: reportStructuralControlResults,\s*settingsAudit: structuralControlSettingsAudit,/s);
+  assert.match(source, /structural_control_settings_binding: structuralControlSettingsAudit,/);
+  assert.match(source, /codexInput\?\.structural_control_settings_binding \?\? structuralControlSettingsAudit,/);
+  assert.doesNotMatch(source, /structural_control_settings_binding: structuralControlSettingsBinding\.audit,/);
+  assert.doesNotMatch(source, /codexInput\?\.structural_control_settings_binding \?\? structuralControlSettingsBinding\.audit,/);
   assert.match(source, /Детали структурных групп — выбранные блоки Инталев и ERP/);
   assert.match(source, /STRUCTURAL_CONTROL_REPORT_DETAIL_HEADERS/);
   assert.match(source, /\["07_Контроли", `A1:O\$\{controlsEndRow\}`\]/);

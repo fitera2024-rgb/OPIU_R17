@@ -87,16 +87,15 @@ func (s *Server) handleOrganizations(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "Иерархия организаций отсутствует в runtime"})
 		return
 	}
-	selectableRoots := make([]organizationNode, 0, len(nodes))
+	selectableRootCount := 0
 	for _, node := range nodes {
-		if node.Depth != 0 || !node.Selectable {
-			continue
+		if node.Depth == 0 && node.Selectable {
+			selectableRootCount++
 		}
-		selectableRoots = append(selectableRoots, node)
 	}
-	if len(selectableRoots) == 0 {
+	if selectableRootCount == 0 {
 		writeJSON(w, http.StatusServiceUnavailable, apiError{Error: "В иерархии организаций отсутствует верхний уровень"})
 		return
 	}
-	writeJSON(w, http.StatusOK, selectableRoots)
+	writeJSON(w, http.StatusOK, nodes)
 }

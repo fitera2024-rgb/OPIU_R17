@@ -6,7 +6,12 @@ const state = {
   organizationsPromise: null,
   refreshPromise: null,
   mutationDepth: 0,
+  activeRunId: "",
+  activeRunPollPromise: null,
+  activeRunPollTimer: null,
 };
+
+const ACTIVE_RUN_STATUSES = new Set(["QUEUED", "PREFLIGHT", "RUNNING"]);
 
 const byId = (id) => document.getElementById(id);
 
@@ -72,6 +77,112 @@ function formatTime(value) {
   if (!value) return "";
   try { return new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeStyle: "short" }).format(new Date(value)); }
   catch { return value; }
+}
+
+function runIsTerminal(run) {
+  return Boolean(run?.status) && !ACTIVE_RUN_STATUSES.has(String(run.status));
+}
+
+function runStageLabel(run) {
+  const status = String(run?.status || "");
+  const stage = String(run?.stage || "").toUpperCase();
+  if (status === "COMPLETED_REPORT_ONLY") return "Готово";
+  if (status === "FAILED") return "Запуск завершился ошибкой";
+  if (status.startsWith("BLOCKED_")) return "Запуск остановлен безопасно";
+  if (status === "QUEUED") return "В очереди";
+  if (status === "PREFLIGHT" || stage === "PREFLIGHT") return "Проверяем входные данные";
+  if (stage.includes("INVENTORY") || stage.includes("PROOF") || stage.includes("HANDOFF") || stage.includes("VALIDATION")) {
+    return "Проверяем структуру и доказательства";
+  }
+  if (stage.startsWith("R001")) return "R001 — формируем комплект корректировок";
+  if (stage.startsWith("R005")) return "R005 — формируем сверку";
+  return "Выполняем расчёт";
+}
+
+function updateRunButtonState() {
+  const button = byId("runButton");
+  if (!button) return;
+  button.disabled = Boolean(state.activeRunId) || !byId("contextSelect")?.value || mutationActive();
+}
+
+function stopActiveRunPolling() {
+  if (state.activeRunPollTimer) clearTimeout(state.activeRunPollTimer);
+  state.activeRunPollTimer = null;
+}
+
+function renderActiveRunStatus(run) {
+  if (!run || !state.activeRunId || run.id !== state.activeRunId) return;
+  const status = byId("runStatus");
+  const terminal = runIsTerminal(run);
+  const time = terminal ? run.finished_at : run.started_at;
+  const timeLabel = time ? `${terminal ? "завершён" : "начат"} ${formatTime(time)}` : "время уточняется";
+  const reason = terminal && run.message ? ` Причина: ${run.message}.` : "";
+  status.replaceChildren(document.createTextNode(
+    `${runStageLabel(run)}.${reason} Запуск ${run.id} · ${timeLabel}.`
+  ));
+  if (run.status === "COMPLETED_REPORT_ONLY") {
+    const link = document.createElement("a");
+    link.href = `#run-${run.id}`;
+    link.textContent = " Открыть результат";
+    status.append(link);
+  }
+  if (terminal) {
+    stopActiveRunPolling();
+    state.activeRunId = "";
+  }
+  updateRunButtonState();
+}
+
+function scheduleActiveRunPoll(delay = 1000) {
+  stopActiveRunPolling();
+  if (!state.activeRunId) return;
+  state.activeRunPollTimer = setTimeout(() => {
+    state.activeRunPollTimer = null;
+    void pollActiveRun();
+  }, delay);
+}
+
+async function pollActiveRun() {
+  if (!state.activeRunId) return null;
+  if (pollingPaused()) {
+    scheduleActiveRunPoll(500);
+    return null;
+  }
+  if (state.activeRunPollPromise) return state.activeRunPollPromise;
+  const exactRunId = state.activeRunId;
+  state.activeRunPollPromise = (async () => {
+    try {
+      const run = await api(`/api/runs/${encodeURIComponent(exactRunId)}`);
+      if (state.activeRunId !== exactRunId) return run;
+      const terminal = runIsTerminal(run);
+      renderActiveRunStatus(run);
+      if (terminal) await refresh({ force: true });
+      return run;
+    } catch (error) {
+      if (state.activeRunId === exactRunId) {
+        byId("runStatus").textContent = `Не удалось обновить запуск ${exactRunId}: ${error.message}. Повторяем проверку…`;
+      }
+      return null;
+    } finally {
+      state.activeRunPollPromise = null;
+      if (state.activeRunId === exactRunId) scheduleActiveRunPoll(1500);
+    }
+  })();
+  return state.activeRunPollPromise;
+}
+
+function syncActiveRunFromSnapshot(runs) {
+  const available = Array.isArray(runs) ? runs : [];
+  if (state.activeRunId) {
+    const exact = available.find((run) => run.id === state.activeRunId);
+    if (exact) renderActiveRunStatus(exact);
+    return;
+  }
+  const active = available.find((run) => ACTIVE_RUN_STATUSES.has(String(run.status)));
+  if (!active) return;
+  state.activeRunId = active.id;
+  renderActiveRunStatus(active);
+  scheduleActiveRunPoll(250);
 }
 
 function selectedFileName(id) {
@@ -143,6 +254,7 @@ function render(snapshot) {
 
   renderContexts(snapshot.contexts || []);
   renderRuns(snapshot.runs || []);
+  syncActiveRunFromSnapshot(snapshot.runs || []);
   if (typeof renderStructuralRunOptions === "function") renderStructuralRunOptions(snapshot);
   if (typeof renderEmptyArticleBindingRunOptions === "function") renderEmptyArticleBindingRunOptions(snapshot);
   window.opiuArticleApprovalRuns = (snapshot.runs || []).map((run) => ({
@@ -175,7 +287,7 @@ function renderContexts(contexts) {
   }
   if (active.some((item) => item.id === previous)) select.value = previous;
   else if (active.length) select.value = active[0].id;
-  byId("runButton").disabled = !select.value;
+  updateRunButtonState();
 
   const list = byId("contextsList");
   list.replaceChildren();
@@ -226,6 +338,7 @@ function renderRuns(runs) {
   for (const run of runs) {
     const item = document.createElement("div");
     item.className = "list-item";
+    item.id = `run-${run.id}`;
     item.dataset.runId = run.id || "";
     item.dataset.runStatus = run.status || "";
     const row = document.createElement("div");
@@ -235,7 +348,7 @@ function renderRuns(runs) {
     title.textContent = run.message || "Отчётный запуск";
     const status = document.createElement("span");
     status.className = "status";
-    status.textContent = run.status;
+    status.textContent = runStageLabel(run);
     row.append(title, status);
     const meta = document.createElement("span");
     meta.className = "list-meta";
@@ -377,6 +490,11 @@ async function startRun() {
   const status = byId("runStatus");
   const contextId = byId("contextSelect").value;
   if (!contextId) return;
+  if (state.activeRunId) {
+    status.textContent = `Запуск ${state.activeRunId} ещё выполняется. Дождитесь его завершения.`;
+    updateRunButtonState();
+    return;
+  }
   if (mutationActive()) {
     status.textContent = "Дождитесь завершения текущей операции.";
     return;
@@ -385,19 +503,22 @@ async function startRun() {
   status.textContent = "Запуск поставлен в очередь…";
   try {
     const run = await api("/api/runs", { method: "POST", body: JSON.stringify({ context_id: contextId }) });
-    status.textContent = `Запуск ${run.status}`;
+    state.activeRunId = run.id;
+    renderActiveRunStatus(run);
     await refresh({ force: true });
   } catch (error) {
     status.textContent = error.message;
   } finally {
     endMutation();
+    updateRunButtonState();
+    if (state.activeRunId) scheduleActiveRunPoll(250);
   }
 }
 
 byId("uploadButton").addEventListener("click", uploadSources);
 byId("contextButton").addEventListener("click", createContext);
 byId("runButton").addEventListener("click", startRun);
-byId("contextSelect").addEventListener("change", (event) => { byId("runButton").disabled = !event.target.value; });
+byId("contextSelect").addEventListener("change", updateRunButtonState);
 byId("reselectButton").addEventListener("click", () => {
   state.erpFileId = "";
   state.intalevFileId = "";
@@ -414,5 +535,5 @@ Promise.all([refresh(), loadOrganizations()]);
 const uiSession = new EventSource("/api/ui-session");
 window.addEventListener("pagehide", () => uiSession.close(), { once: true });
 setInterval(() => {
-  if (!pollingPaused()) void refresh();
+  if (!pollingPaused() && !state.activeRunId) void refresh();
 }, 10000);

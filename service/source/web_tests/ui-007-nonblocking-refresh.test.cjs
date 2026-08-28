@@ -18,7 +18,8 @@ test("UI-007 bootstrap refresh is single-flight and polling pauses for mutations
   assert.match(app, /mutationDepth:\s*0/);
   assert.match(app, /function\s+beginMutation\s*\(/);
   assert.match(app, /function\s+endMutation\s*\(/);
-  assert.match(app, /if\s*\(!pollingPaused\(\)\)\s*void\s+refresh\(\)/);
+  assert.match(app, /if\s*\(!pollingPaused\(\)\s*&&\s*!state\.activeRunId\)\s*void\s+refresh\(\)/,
+    "generic polling must remain paused while an exact run is being tracked");
   assert.match(app, /},\s*10000\s*\)/);
 });
 

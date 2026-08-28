@@ -191,7 +191,7 @@ func (s *Server) handleRunByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, apiError{Error: "Метод не поддерживается"})
 		return
 	}
-	snapshot, err := s.snapshotWithStructuralControlSets()
+	snapshot, err := s.snapshotWithStructuralControlSetsForRun(parts[0])
 	if err != nil {
 		writeStructuralControlError(w, err)
 		return

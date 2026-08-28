@@ -1146,8 +1146,54 @@ func structuralControlActiveVersions(registry structuralControlRegistry) map[str
 	return active
 }
 
+const structuralControlRecentProjectionLimit = 8
+
+func structuralControlRunIsActive(run Run) bool {
+	return run.Status == RunQueued || run.Status == RunPreflight || run.Status == RunRunning
+}
+
+// structuralControlProjectionRunIDs bounds expensive filesystem-backed proof
+// verification for collection endpoints. The store already orders runs newest
+// first. All executing runs are included even when they are older than the
+// recent window; an exact run endpoint supplies exactRunID and projects that
+// run regardless of age.
+func structuralControlProjectionRunIDs(runs []Run, exactRunID string) map[string]bool {
+	selected := map[string]bool{}
+	if exactRunID != "" {
+		selected[exactRunID] = true
+		return selected
+	}
+	for index, run := range runs {
+		if index < structuralControlRecentProjectionLimit || structuralControlRunIsActive(run) {
+			selected[run.ID] = true
+		}
+	}
+	return selected
+}
+
 func (s *Server) snapshotWithStructuralControlSets() (Snapshot, error) {
+	return s.snapshotWithStructuralControlSetsForRun("")
+}
+
+func (s *Server) snapshotWithStructuralControlSetsForRun(exactRunID string) (Snapshot, error) {
 	snapshot := s.store.Snapshot(s.pipeline.Ready())
+	selected := structuralControlProjectionRunIDs(snapshot.Runs, exactRunID)
+	needsRegistry := false
+	for index := range snapshot.Runs {
+		if !selected[snapshot.Runs[index].ID] {
+			// nil deliberately means deferred projection. The run and its
+			// inventory flag remain visible; /api/runs/{id} verifies it fully.
+			snapshot.Runs[index].StructuralControlSets = nil
+			continue
+		}
+		snapshot.Runs[index].StructuralControlSets = []StructuralControlSetReference{}
+		if snapshot.Runs[index].HasStructuralInventory {
+			needsRegistry = true
+		}
+	}
+	if !needsRegistry {
+		return snapshot, nil
+	}
 	unlock, err := s.lockStructuralControlRegistry()
 	if err != nil {
 		return Snapshot{}, err
@@ -1158,8 +1204,15 @@ func (s *Server) snapshotWithStructuralControlSets() (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	active := structuralControlActiveVersions(registry)
+	versionsByRunID := make(map[string][]structuralControlSetVersion, len(registry.Versions))
+	for _, version := range registry.Versions {
+		versionsByRunID[version.RunID] = append(versionsByRunID[version.RunID], version)
+	}
 	for index := range snapshot.Runs {
 		run := snapshot.Runs[index]
+		if !selected[run.ID] {
+			continue
+		}
 		references := []StructuralControlSetReference{}
 		if run.HasStructuralInventory {
 			binding, bindingRun, contextValue, _, bindingSHA, loadErr := s.loadStructuralControlBinding(run.ID)
@@ -1168,7 +1221,7 @@ func (s *Server) snapshotWithStructuralControlSets() (Snapshot, error) {
 			} else if inventory, verifiedBindingSHA, loadErr := s.loadStructuralControlInventory(binding.OrganizationID, run.ID, binding.InventoryID); loadErr != nil || verifiedBindingSHA != bindingSHA {
 				snapshot.Runs[index].HasStructuralInventory = false
 			} else {
-				for _, version := range registry.Versions {
+				for _, version := range versionsByRunID[run.ID] {
 					if !structuralControlVersionMatchesRun(version, bindingRun, contextValue) ||
 						!structuralControlVersionMatchesInventory(version, inventory) || version.InventoryBindingSHA256 != bindingSHA {
 						continue

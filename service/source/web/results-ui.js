@@ -1,5 +1,6 @@
 (() => {
-  const loaded = new Set();
+  const resultCache = new Map();
+  const resultInflight = new Map();
 
   const labels = {
     r005: {
@@ -106,8 +107,10 @@
   }
 
   async function loadForItem(item, run) {
-    if (!item || loaded.has(run.id)) return;
-    loaded.add(run.id);
+    if (!item) return;
+    const existing = item.querySelector(".run-results");
+    if (existing?.dataset.runId === run.id && existing?.dataset.runStatus === (run.status || "")) return;
+    if (existing) existing.remove();
     const holder = document.createElement("div");
     holder.className = "run-results";
     holder.dataset.runId = run.id;
@@ -118,14 +121,26 @@
     holder.append(pending);
     item.append(holder);
     try {
-      const [r005, r001] = await Promise.all([
-        api(`/api/runs/${encodeURIComponent(run.id)}/result/r005`),
-        api(`/api/runs/${encodeURIComponent(run.id)}/result/r001`),
-      ]);
+      const cached = resultCache.get(run.id);
+      let results;
+      if (cached?.status === (run.status || "")) {
+        results = cached.results;
+      } else {
+        let request = resultInflight.get(run.id);
+        if (!request) {
+          request = Promise.all([
+            api(`/api/runs/${encodeURIComponent(run.id)}/result/r005`),
+            api(`/api/runs/${encodeURIComponent(run.id)}/result/r001`),
+          ]).finally(() => resultInflight.delete(run.id));
+          resultInflight.set(run.id, request);
+        }
+        results = await request;
+        resultCache.set(run.id, { status: run.status || "", results });
+      }
+      const [r005, r001] = results;
       const boxes = [stageBox("r005", r005), stageBox("r001", r001)];
       holder.replaceChildren(...boxes);
     } catch (error) {
-      loaded.delete(run.id);
       holder.replaceChildren();
       const failed = document.createElement("span");
       failed.className = "list-meta";
@@ -134,19 +149,34 @@
     }
   }
 
-  function syncResults() {
-    const runs = state.snapshot?.runs || [];
+  function addResultLoader(item, run) {
+    if (item.querySelector(".run-result-loader")) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary compact-button run-result-loader";
+    button.textContent = "Показать результаты";
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      button.textContent = "Открываем результаты…";
+      await loadForItem(item, run);
+      button.disabled = false;
+      button.textContent = "Обновить результаты";
+    });
+    item.append(button);
+  }
+
+  function syncResults(runs = state.snapshot?.runs || []) {
     const list = byId("runsList");
     if (!list || !runs.length) return;
     const items = [...list.querySelectorAll(":scope > .list-item")];
-    runs.forEach((run, index) => {
-      if (!items[index]) return;
-      const existing = items[index].querySelector(`.run-results[data-run-id="${run.id}"]`);
-      if (existing && existing.dataset.runStatus === (run.status || "")) return;
-      if (existing) existing.remove();
-      loaded.delete(run.id);
-      loadForItem(items[index], run);
-    });
+    const runsById = new Map(runs.map((run) => [String(run.id || ""), run]));
+    for (const item of items) {
+      const run = runsById.get(item.dataset.runId || "");
+      if (!run) continue;
+      const existing = item.querySelector(".run-results");
+      if (existing && existing.dataset.runStatus !== (run.status || "")) existing.remove();
+      addResultLoader(item, run);
+    }
   }
 
   if (typeof module !== "undefined" && module.exports) {
@@ -158,16 +188,11 @@
     return;
   }
 
-  const observer = new MutationObserver(() => {
-    for (const id of [...loaded]) {
-      if (!document.querySelector(`.run-results[data-run-id="${id}"]`)) loaded.delete(id);
-    }
-    syncResults();
+  window.addEventListener("opiu:bootstrap-updated", (event) => {
+    syncResults(event.detail?.runs || []);
   });
 
   window.addEventListener("DOMContentLoaded", () => {
-    const list = byId("runsList");
-    if (list) observer.observe(list, { childList: true });
     syncResults();
   });
 })();

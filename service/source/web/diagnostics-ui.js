@@ -35,7 +35,9 @@ const nativeFetch = window.fetch.bind(window);
 window.fetch = async function instrumentedFetch(input, init = {}) {
   const url = typeof input === "string" ? input : input?.url || String(input);
   const method = String(init?.method || (typeof input !== "string" ? input?.method : "GET") || "GET").toUpperCase();
+  const tracksMutation = method !== "GET" && method !== "HEAD";
   const started = performance.now();
+  if (tracksMutation) window.opiuUIActivity?.beginMutation?.();
   pushDiagnosticEvent("api.request", { method, url });
   try {
     const response = await nativeFetch(input, init);
@@ -52,6 +54,8 @@ window.fetch = async function instrumentedFetch(input, init = {}) {
       page: location.href,
     }, "error");
     throw error;
+  } finally {
+    if (tracksMutation) window.opiuUIActivity?.endMutation?.();
   }
 };
 
@@ -103,49 +107,41 @@ function diagnosticTime(value) {
   catch { return value; }
 }
 
-async function loadDiagnosticRuns() {
+function renderDiagnosticRuns(runs) {
   const list = document.getElementById("diagnosticsList");
   if (!list) return;
-  try {
-    const response = await fetch("/api/runs");
-    const runs = await response.json();
-    if (!response.ok) throw new Error("Не удалось загрузить журнал");
-    const orderedRuns = [...(Array.isArray(runs) ? runs : [])].sort((left, right) => {
-      const leftTime = Date.parse(left?.started_at || "");
-      const rightTime = Date.parse(right?.started_at || "");
-      const timeDelta = (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
-      return timeDelta || String(right?.id || "").localeCompare(String(left?.id || ""));
-    });
-    diagnosticUI.latestRunId = orderedRuns[0]?.id || "";
-    const relevant = orderedRuns.filter((run) => diagnosticKind(run));
-    list.replaceChildren();
-    if (!relevant.length) {
-      list.className = "list empty";
-      list.textContent = "Ошибок и ожидающих решений пока нет. Локальный журнал действий уже ведётся.";
-      return;
-    }
-    list.className = "list";
-    for (const run of relevant) {
-      const item = document.createElement("div");
-      item.className = `diagnostic-item ${diagnosticKind(run)}`;
-      const body = document.createElement("div");
-      const title = document.createElement("strong");
-      title.textContent = run.message || diagnosticStatusLabel(run);
-      const meta = document.createElement("div");
-      meta.className = "list-meta";
-      meta.textContent = `${run.stage} · ${run.status} · ${diagnosticTime(run.started_at)}`;
-      body.append(title, meta);
-      const action = document.createElement("button");
-      action.type = "button";
-      action.className = "secondary compact-button";
-      action.textContent = "Скачать диагностику запуска";
-      action.addEventListener("click", () => downloadRunDiagnostics(run.id));
-      item.append(body, action);
-      list.append(item);
-    }
-  } catch (error) {
+  const orderedRuns = [...(Array.isArray(runs) ? runs : [])].sort((left, right) => {
+    const leftTime = Date.parse(left?.started_at || "");
+    const rightTime = Date.parse(right?.started_at || "");
+    const timeDelta = (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+    return timeDelta || String(right?.id || "").localeCompare(String(left?.id || ""));
+  });
+  diagnosticUI.latestRunId = orderedRuns[0]?.id || "";
+  const relevant = orderedRuns.filter((run) => diagnosticKind(run)).slice(0, 25);
+  list.replaceChildren();
+  if (!relevant.length) {
     list.className = "list empty";
-    list.textContent = `${error.message}. Локальный журнал действий всё равно можно выгрузить.`;
+    list.textContent = "Ошибок и ожидающих решений пока нет. Локальный журнал действий уже ведётся.";
+    return;
+  }
+  list.className = "list";
+  for (const run of relevant) {
+    const item = document.createElement("div");
+    item.className = `diagnostic-item ${diagnosticKind(run)}`;
+    const body = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = run.message || diagnosticStatusLabel(run);
+    const meta = document.createElement("div");
+    meta.className = "list-meta";
+    meta.textContent = `${run.stage} · ${run.status} · ${diagnosticTime(run.started_at)}`;
+    body.append(title, meta);
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = "secondary compact-button";
+    action.textContent = "Скачать диагностику запуска";
+    action.addEventListener("click", () => downloadRunDiagnostics(run.id));
+    item.append(body, action);
+    list.append(item);
   }
 }
 
@@ -209,5 +205,7 @@ function downloadLocalJournal(kind) {
 document.getElementById("downloadLatestDiagnostics")?.addEventListener("click", () => downloadLocalJournal("errors"));
 document.getElementById("downloadActionJournal")?.addEventListener("click", () => downloadLocalJournal("actions"));
 
-loadDiagnosticRuns();
-setInterval(loadDiagnosticRuns, 3000);
+window.addEventListener("opiu:bootstrap-updated", (event) => {
+  renderDiagnosticRuns(event.detail?.runs || []);
+});
+renderDiagnosticRuns(window.opiuArticleApprovalRuns || []);

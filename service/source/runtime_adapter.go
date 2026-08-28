@@ -32,27 +32,48 @@ type runtimeSafety struct {
 }
 
 func discoverRuntimeAdapter() (*RuntimeAdapter, error) {
-	candidates := []string{}
-	if configured := strings.TrimSpace(os.Getenv("OPIU_RUNTIME_ROOT")); configured != "" {
-		candidates = append(candidates, configured)
+	executable, _ := os.Executable()
+	cwd, _ := os.Getwd()
+	return discoverRuntimeAdapterFrom(strings.TrimSpace(os.Getenv("OPIU_RUNTIME_ROOT")), executable, cwd)
+}
+
+// discoverRuntimeAdapterFrom keeps discovery deterministic and testable. An
+// explicitly configured root and an adjacent portable runtime are authorities:
+// if either exists but is incomplete, starting a health-only Service would hide
+// the packaging error from the user, so discovery fails immediately.
+func discoverRuntimeAdapterFrom(configured, executable, cwd string) (*RuntimeAdapter, error) {
+	if configured = strings.TrimSpace(configured); configured != "" {
+		adapter, err := runtimeAdapterAt(configured)
+		if err != nil {
+			return nil, fmt.Errorf("configured runtime is invalid: %w", err)
+		}
+		return adapter, nil
 	}
-	if executable, err := os.Executable(); err == nil {
+
+	if strings.TrimSpace(executable) != "" {
 		base := filepath.Dir(executable)
-		candidates = append(candidates,
-			filepath.Join(base, "runtime"),
-			filepath.Join(base, "payload"),
-			base,
-		)
+		portableRoot := filepath.Join(base, "runtime")
+		if _, statErr := os.Stat(portableRoot); statErr == nil {
+			adapter, err := runtimeAdapterAtPortable(portableRoot)
+			if err != nil {
+				return nil, fmt.Errorf("adjacent portable runtime is invalid: %w", err)
+			}
+			return adapter, nil
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("adjacent portable runtime is inaccessible: %w", statErr)
+		}
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(cwd, "runtime"),
-			filepath.Join(cwd, "payload"),
-		)
+
+	candidates := []string{}
+	if strings.TrimSpace(executable) != "" {
+		base := filepath.Dir(executable)
+		candidates = append(candidates, filepath.Join(base, "payload"), base)
+	}
+	if strings.TrimSpace(cwd) != "" {
+		candidates = append(candidates, filepath.Join(cwd, "runtime"), filepath.Join(cwd, "payload"))
 	}
 
 	seen := map[string]struct{}{}
-	var firstError error
 	for _, candidate := range candidates {
 		root, err := filepath.Abs(candidate)
 		if err != nil {
@@ -67,14 +88,19 @@ func discoverRuntimeAdapter() (*RuntimeAdapter, error) {
 		if err == nil {
 			return adapter, nil
 		}
-		if firstError == nil && strings.TrimSpace(os.Getenv("OPIU_RUNTIME_ROOT")) != "" {
-			firstError = err
-		}
 	}
-	return nil, firstError
+	return nil, nil
 }
 
 func runtimeAdapterAt(root string) (*RuntimeAdapter, error) {
+	return runtimeAdapterAtWithPortableNode(root, false)
+}
+
+func runtimeAdapterAtPortable(root string) (*RuntimeAdapter, error) {
+	return runtimeAdapterAtWithPortableNode(root, true)
+}
+
+func runtimeAdapterAtWithPortableNode(root string, portable bool) (*RuntimeAdapter, error) {
 	r005Core := filepath.Join(root, "modules", "reconciliation", "source", "opiu_reconcile.mjs")
 	r001Core := filepath.Join(root, "modules", "corrections", "source", "correction_engine_r001.mjs")
 	r005Script := r005Core
@@ -105,21 +131,31 @@ func runtimeAdapterAt(root string) (*RuntimeAdapter, error) {
 	}
 
 	nodeCandidates := []string{}
-	if configured := strings.TrimSpace(os.Getenv("OPIU_NODE_PATH")); configured != "" {
-		nodeCandidates = append(nodeCandidates, configured)
-	}
+	portableNodeName := "node"
 	if runtime.GOOS == "windows" {
-		nodeCandidates = append(nodeCandidates,
-			filepath.Join(root, "runtime", "node", "node.exe"),
-			filepath.Join(root, "runtime", "node.exe"),
-			filepath.Join(root, "node.exe"),
-		)
+		portableNodeName = "node.exe"
+	}
+	if portable {
+		nodeCandidates = append(nodeCandidates, filepath.Join(root, "node", portableNodeName))
 	} else {
-		nodeCandidates = append(nodeCandidates,
-			filepath.Join(root, "runtime", "node", "node"),
-			filepath.Join(root, "runtime", "node"),
-			filepath.Join(root, "node"),
-		)
+		if configured := strings.TrimSpace(os.Getenv("OPIU_NODE_PATH")); configured != "" {
+			nodeCandidates = append(nodeCandidates, configured)
+		}
+		if runtime.GOOS == "windows" {
+			nodeCandidates = append(nodeCandidates,
+				filepath.Join(root, "node", "node.exe"),
+				filepath.Join(root, "runtime", "node", "node.exe"),
+				filepath.Join(root, "runtime", "node.exe"),
+				filepath.Join(root, "node.exe"),
+			)
+		} else {
+			nodeCandidates = append(nodeCandidates,
+				filepath.Join(root, "node", "node"),
+				filepath.Join(root, "runtime", "node", "node"),
+				filepath.Join(root, "runtime", "node"),
+				filepath.Join(root, "node"),
+			)
+		}
 	}
 	var node string
 	for _, candidate := range nodeCandidates {
@@ -131,6 +167,9 @@ func runtimeAdapterAt(root string) (*RuntimeAdapter, error) {
 			node = absolute
 			break
 		}
+	}
+	if node == "" && portable {
+		return nil, errors.New("portable Node runtime is missing: node/node executable")
 	}
 	if node == "" {
 		resolved, err := exec.LookPath("node")

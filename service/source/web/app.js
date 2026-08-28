@@ -3,22 +3,63 @@ const state = {
   intalevFileId: "",
   snapshot: null,
   organizationsLoaded: false,
+  organizationsPromise: null,
+  refreshPromise: null,
+  mutationDepth: 0,
 };
 
 const byId = (id) => document.getElementById(id);
 
+function dispatchMutationState() {
+  window.dispatchEvent(new CustomEvent("opiu:mutation-state", {
+    detail: { active: state.mutationDepth > 0 },
+  }));
+}
+
+function beginMutation() {
+  state.mutationDepth += 1;
+  dispatchMutationState();
+}
+
+function endMutation() {
+  state.mutationDepth = Math.max(0, state.mutationDepth - 1);
+  dispatchMutationState();
+}
+
+function mutationActive() {
+  return state.mutationDepth > 0;
+}
+
+function pollingPaused() {
+  return mutationActive() || document.hidden || rulesReviewEditing();
+}
+
+window.opiuUIActivity = {
+  beginMutation,
+  endMutation,
+  isMutationActive: mutationActive,
+  isPollingPaused: pollingPaused,
+};
+
 async function api(url, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: options.body instanceof FormData ? options.headers : {
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
-  });
-  if (response.status === 204) return null;
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || "Операция не выполнена");
-  return payload;
+  const method = String(options.method || "GET").toUpperCase();
+  const tracksMutation = method !== "GET" && method !== "HEAD";
+  if (tracksMutation) beginMutation();
+  try {
+    const response = await fetch(url, {
+      ...options,
+      headers: options.body instanceof FormData ? options.headers : {
+        "Content-Type": "application/json",
+        ...(options.headers || {}),
+      },
+    });
+    if (response.status === 204) return null;
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || "Операция не выполнена");
+    return payload;
+  } finally {
+    if (tracksMutation) endMutation();
+  }
 }
 
 function setNotice(text, kind = "") {
@@ -39,37 +80,43 @@ function selectedFileName(id) {
 
 async function loadOrganizations() {
   if (state.organizationsLoaded) return;
+  if (state.organizationsPromise) return state.organizationsPromise;
   const select = byId("organization");
   const status = byId("organizationStatus");
-  try {
-    const nodes = await api("/api/organizations");
-    const current = select.value;
-    select.replaceChildren();
-    const empty = document.createElement("option");
-    empty.value = "";
-    empty.textContent = "Выберите организацию";
-    select.append(empty);
-    for (const node of nodes) {
-      const option = document.createElement("option");
-      option.value = node.node_id;
-      option.dataset.organizationName = node.name;
-      option.dataset.organizationPath = node.path;
-      const indent = "— ".repeat(Math.max(0, Number(node.depth || 0)));
-      option.textContent = `${indent}${node.name || node.path || node.node_id}`;
-      option.disabled = node.selectable === false;
-      select.append(option);
+  state.organizationsPromise = (async () => {
+    try {
+      const nodes = await api("/api/organizations");
+      const current = select.value;
+      select.replaceChildren();
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = "Выберите организацию";
+      select.append(empty);
+      for (const node of nodes) {
+        const option = document.createElement("option");
+        option.value = node.node_id;
+        option.dataset.organizationName = node.name;
+        option.dataset.organizationPath = node.path;
+        const indent = "— ".repeat(Math.max(0, Number(node.depth || 0)));
+        option.textContent = `${indent}${node.name || node.path || node.node_id}`;
+        option.disabled = node.selectable === false;
+        select.append(option);
+      }
+      if ([...select.options].some((option) => option.value === current)) select.value = current;
+      state.organizationsLoaded = true;
+      status.textContent = `Загружена иерархия: ${nodes.length} узлов`;
+    } catch (error) {
+      select.replaceChildren();
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = "Иерархия организаций недоступна";
+      select.append(empty);
+      status.textContent = error.message;
+    } finally {
+      state.organizationsPromise = null;
     }
-    if ([...select.options].some((option) => option.value === current)) select.value = current;
-    state.organizationsLoaded = true;
-    status.textContent = `Загружена иерархия: ${nodes.length} узлов`;
-  } catch (error) {
-    select.replaceChildren();
-    const empty = document.createElement("option");
-    empty.value = "";
-    empty.textContent = "Иерархия организаций недоступна";
-    select.append(empty);
-    status.textContent = error.message;
-  }
+  })();
+  return state.organizationsPromise;
 }
 
 function render(snapshot) {
@@ -103,6 +150,7 @@ function render(snapshot) {
     status: run.status,
     stage: run.stage,
     message: run.message,
+    started_at: run.started_at,
     finished_at: run.finished_at,
   }));
   window.dispatchEvent(new CustomEvent("opiu:bootstrap-updated", {
@@ -178,6 +226,8 @@ function renderRuns(runs) {
   for (const run of runs) {
     const item = document.createElement("div");
     item.className = "list-item";
+    item.dataset.runId = run.id || "";
+    item.dataset.runStatus = run.status || "";
     const row = document.createElement("div");
     row.className = "list-row";
     const title = document.createElement("span");
@@ -195,12 +245,27 @@ function renderRuns(runs) {
   }
 }
 
-async function refresh() {
-  try {
-    render(await api("/api/bootstrap"));
-  } catch (error) {
-    setNotice(error.message, "error");
+async function refresh(options = {}) {
+  const force = options.force === true;
+  if (!force && pollingPaused()) return state.snapshot;
+  if (state.refreshPromise) {
+    if (!force) return state.refreshPromise;
+    await state.refreshPromise;
+    if (state.refreshPromise) return state.refreshPromise;
   }
+  state.refreshPromise = (async () => {
+    try {
+      const snapshot = await api("/api/bootstrap");
+      render(snapshot);
+      return snapshot;
+    } catch (error) {
+      setNotice(error.message, "error");
+      return state.snapshot;
+    } finally {
+      state.refreshPromise = null;
+    }
+  })();
+  return state.refreshPromise;
 }
 
 function rulesReviewEditing() {
@@ -220,24 +285,47 @@ async function uploadOne(input, kind) {
 
 async function uploadSources() {
   const status = byId("uploadStatus");
-  status.textContent = "Загружаем файлы…";
+  const button = byId("uploadButton");
+  if (mutationActive()) {
+    status.textContent = "Дождитесь завершения текущей операции.";
+    return;
+  }
+  beginMutation();
+  button.disabled = true;
   try {
     const erpInput = byId("erpFile");
     const intalevInput = byId("intalevFile");
     if (!erpInput.files?.[0] && !intalevInput.files?.[0]) throw new Error("Выберите хотя бы один файл");
-    const erpId = await uploadOne(erpInput, "erp");
-    const intalevId = await uploadOne(intalevInput, "intalev");
-    if (erpId) state.erpFileId = erpId;
-    if (intalevId) state.intalevFileId = intalevId;
-    status.textContent = "Файлы загружены";
-    await refresh();
+    const stages = [];
+    if (erpInput.files?.[0]) stages.push({ input: erpInput, kind: "erp", label: "ERP" });
+    if (intalevInput.files?.[0]) stages.push({ input: intalevInput, kind: "intalev", label: "Инталев" });
+    const completed = [];
+    for (let index = 0; index < stages.length; index += 1) {
+      const stage = stages[index];
+      status.textContent = `Загружаем ${stage.label} (${index + 1} из ${stages.length})…`;
+      const id = await uploadOne(stage.input, stage.kind);
+      if (stage.kind === "erp") state.erpFileId = id;
+      if (stage.kind === "intalev") state.intalevFileId = id;
+      completed.push(stage.label);
+      status.textContent = `${stage.label} загружен. ${index + 1 < stages.length ? "Переходим к следующему файлу…" : "Обновляем данные…"}`;
+    }
+    await refresh({ force: true });
+    status.textContent = `${completed.join(" и ")} загружены. Можно создавать контекст.`;
   } catch (error) {
-    status.textContent = error.message;
+    status.textContent = `Загрузка остановлена: ${error.message}`;
+  } finally {
+    button.disabled = false;
+    endMutation();
   }
 }
 
 async function createContext() {
   const status = byId("contextStatus");
+  if (mutationActive()) {
+    status.textContent = "Дождитесь завершения текущей операции.";
+    return;
+  }
+  beginMutation();
   status.textContent = "Создаём контекст…";
   try {
     if (!state.erpFileId || !state.intalevFileId) throw new Error("Сначала загрузите оба источника");
@@ -261,21 +349,27 @@ async function createContext() {
         intalev_file_id: state.intalevFileId,
       }),
     });
+    await refresh({ force: true });
     status.textContent = "Контекст создан";
-    await refresh();
     byId("contextSelect").value = context.id;
     byId("runButton").disabled = false;
   } catch (error) {
     status.textContent = error.message;
+  } finally {
+    endMutation();
   }
 }
 
 async function archiveContext(id) {
+  if (mutationActive()) return;
+  beginMutation();
   try {
     await api(`/api/contexts/${encodeURIComponent(id)}/archive`, { method: "POST", body: "{}" });
-    await refresh();
+    await refresh({ force: true });
   } catch (error) {
     setNotice(error.message, "error");
+  } finally {
+    endMutation();
   }
 }
 
@@ -283,13 +377,20 @@ async function startRun() {
   const status = byId("runStatus");
   const contextId = byId("contextSelect").value;
   if (!contextId) return;
+  if (mutationActive()) {
+    status.textContent = "Дождитесь завершения текущей операции.";
+    return;
+  }
+  beginMutation();
   status.textContent = "Запуск поставлен в очередь…";
   try {
     const run = await api("/api/runs", { method: "POST", body: JSON.stringify({ context_id: contextId }) });
     status.textContent = `Запуск ${run.status}`;
-    await refresh();
+    await refresh({ force: true });
   } catch (error) {
     status.textContent = error.message;
+  } finally {
+    endMutation();
   }
 }
 
@@ -313,5 +414,5 @@ Promise.all([refresh(), loadOrganizations()]);
 const uiSession = new EventSource("/api/ui-session");
 window.addEventListener("pagehide", () => uiSession.close(), { once: true });
 setInterval(() => {
-  if (!rulesReviewEditing()) refresh();
-}, 3000);
+  if (!pollingPaused()) void refresh();
+}, 10000);

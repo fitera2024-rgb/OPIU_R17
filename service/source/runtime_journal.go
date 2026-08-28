@@ -71,19 +71,34 @@ func (j *runtimeJournal) recordCrash(kind string, value any, stack []byte) {
 func fatalService(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	log.Printf("FATAL: %s", msg)
+	runtimePath := ""
 	if serviceJournal != nil {
+		runtimePath = serviceJournal.runtimePath
 		serviceJournal.recordCrash("FATAL", msg, debug.Stack())
 	}
+	showFatalServiceDialog(fatalServiceUserMessage(msg, runtimePath))
 	os.Exit(1)
+}
+
+func fatalServiceUserMessage(message, runtimePath string) string {
+	result := "OPIU R17 не запущен.\n\n" + message
+	if runtimePath != "" {
+		result += "\n\nЖурнал диагностики:\n" + runtimePath
+	}
+	result += "\n\nИсправьте указанную причину и запустите OPIU повторно."
+	return result
 }
 
 func recoverMainPanic() {
 	if value := recover(); value != nil {
 		stack := debug.Stack()
 		log.Printf("PANIC: %v\n%s", value, stack)
+		runtimePath := ""
 		if serviceJournal != nil {
+			runtimePath = serviceJournal.runtimePath
 			serviceJournal.recordCrash("PANIC", value, stack)
 		}
+		showFatalServiceDialog(fatalServiceUserMessage(fmt.Sprintf("внутренняя ошибка запуска: %v", value), runtimePath))
 		os.Exit(2)
 	}
 }

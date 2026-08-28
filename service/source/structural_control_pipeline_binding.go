@@ -8,12 +8,28 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 )
 
 const structuralControlSettingsSchema = "opiu-structural-control-settings.v1"
+
+const (
+	structuralControlAuthorityFlag         = "--structural-control-authority"
+	structuralControlSettingsCSVFlag       = "--structural-control-settings-csv"
+	structuralControlSelectionProofFlag    = "--structural-control-selection-proof"
+	structuralControlAuthorityServiceJSON  = "service-json"
+	structuralControlAuthorityServiceCSV   = "service-csv"
+	structuralControlAuthorityServiceNone  = "service-none"
+	structuralControlPackagedCSVStatus     = "PACKAGED_USER_CSV_MATERIALIZED"
+	structuralControlPackagedNoExactStatus = "PACKAGED_USER_CSV_NO_EXACT_SCOPE"
+	structuralControlPackagedCSVFilename   = "Настройка_группировки_блоков.csv"
+	structuralControlPackagedCSVMaxBytes   = int64(1 << 20)
+	structuralControlSettingsJSONMaxBytes  = int64(4 << 20)
+)
 
 type structuralControlPipelineAudit struct {
 	RunID               string                                `json:"run_id"`
@@ -28,6 +44,8 @@ type structuralControlPipelineAudit struct {
 	SettingsSHA256      string                                `json:"settings_sha256,omitempty"`
 	SourceCSVPath       string                                `json:"source_csv_path,omitempty"`
 	SourceCSVSHA256     string                                `json:"source_csv_sha256,omitempty"`
+	SelectionPath       string                                `json:"selection_path,omitempty"`
+	SelectionSHA256     string                                `json:"selection_sha256,omitempty"`
 	RegistryPath        string                                `json:"registry_path,omitempty"`
 	RegistrySHA256      string                                `json:"registry_sha256,omitempty"`
 	RegistryRevision    int64                                 `json:"registry_revision,omitempty"`
@@ -37,6 +55,23 @@ type structuralControlPipelineAudit struct {
 	CorrectionAuthority bool                                  `json:"correction_authority"`
 	FinancialRows       int                                   `json:"financial_rows"`
 	PostingRows         int                                   `json:"posting_rows"`
+}
+
+type structuralControlPackagedSelection struct {
+	Schema         string   `json:"schema"`
+	Authority      string   `json:"authority"`
+	Status         string   `json:"status"`
+	Path           string   `json:"path"`
+	SourcePath     string   `json:"source_path"`
+	SourceSHA256   string   `json:"source_sha256"`
+	SourceSize     int64    `json:"source_size"`
+	SettingsPath   string   `json:"settings_path"`
+	SettingsSHA256 string   `json:"settings_sha256"`
+	SettingsSize   int64    `json:"settings_size"`
+	SettingsID     string   `json:"settings_id"`
+	SetCount       int      `json:"set_count"`
+	SetIDs         []string `json:"set_ids"`
+	SetsSHA256     string   `json:"sets_sha256"`
 }
 
 type structuralControlPipelineSet struct {
@@ -157,6 +192,308 @@ func hasStructuralControlSettingsArgument(command []string) bool {
 		}
 	}
 	return false
+}
+
+func hasStructuralControlAuthorityArgument(command []string) bool {
+	for _, token := range command {
+		if token == structuralControlAuthorityFlag || token == structuralControlSettingsCSVFlag || token == structuralControlSelectionProofFlag {
+			return true
+		}
+	}
+	return false
+}
+
+func appendStructuralControlAuthorityArguments(command []string, audit structuralControlPipelineAudit, settingsPath string) ([]string, error) {
+	if hasStructuralControlSettingsArgument(command) || hasStructuralControlAuthorityArgument(command) {
+		return nil, errors.New("structural control authority is already present in R005 command")
+	}
+	result := append([]string{}, command...)
+	switch audit.Status {
+	case "ACTIVE_UI_FIXED_SETS_MATERIALIZED":
+		if strings.TrimSpace(settingsPath) == "" || !sameFilesystemPath(settingsPath, audit.SettingsPath) {
+			return nil, errors.New("active UI structural control settings path is missing or inconsistent")
+		}
+		return append(result,
+			structuralControlAuthorityFlag, structuralControlAuthorityServiceJSON,
+			"--structural-control-settings", settingsPath,
+		), nil
+	case structuralControlPackagedCSVStatus:
+		if strings.TrimSpace(settingsPath) == "" || !sameFilesystemPath(settingsPath, audit.SettingsPath) ||
+			strings.TrimSpace(audit.SourceCSVPath) == "" || strings.TrimSpace(audit.SelectionPath) == "" ||
+			!validSHA256(audit.SelectionSHA256) {
+			return nil, errors.New("packaged structural control settings authority is incomplete")
+		}
+		return append(result,
+			structuralControlAuthorityFlag, structuralControlAuthorityServiceJSON,
+			"--structural-control-settings", settingsPath,
+			structuralControlSelectionProofFlag, audit.SelectionPath,
+		), nil
+	case structuralControlPackagedNoExactStatus:
+		if strings.TrimSpace(settingsPath) != "" || strings.TrimSpace(audit.SourceCSVPath) == "" || strings.TrimSpace(audit.SelectionPath) == "" ||
+			!validSHA256(audit.SelectionSHA256) {
+			return nil, errors.New("packaged structural control no-exact authority is inconsistent")
+		}
+		return append(result, structuralControlAuthorityFlag, structuralControlAuthorityServiceNone,
+			structuralControlSelectionProofFlag, audit.SelectionPath), nil
+	case "NO_ACTIVE_UI_FIXED_SETS":
+		if strings.TrimSpace(settingsPath) != "" {
+			return nil, errors.New("default structural control state unexpectedly has a settings path")
+		}
+		return append(result, structuralControlAuthorityFlag, structuralControlAuthorityServiceNone), nil
+	default:
+		return nil, fmt.Errorf("unsupported structural control authority status: %s", audit.Status)
+	}
+}
+
+func packagedStructuralControlSettingsCSV(runtimeRoot string) string {
+	root := filepath.Clean(strings.TrimSpace(runtimeRoot))
+	if root == "." || root == "" {
+		return ""
+	}
+	productRoot := root
+	if strings.EqualFold(filepath.Base(root), "runtime") {
+		productRoot = filepath.Dir(root)
+	}
+	return filepath.Join(productRoot, "user-settings", structuralControlPackagedCSVFilename)
+}
+
+func materializePackagedStructuralControlSettings(
+	run Run,
+	contextValue Context,
+	runDir, sourcePath, nodePath, wrapperPath string,
+	audit structuralControlPipelineAudit,
+) (string, structuralControlPipelineAudit, error) {
+	if audit.Status != "NO_ACTIVE_UI_FIXED_SETS" {
+		return "", audit, nil
+	}
+	requested := strings.TrimSpace(sourcePath)
+	if requested == "" {
+		return "", audit, nil
+	}
+	_, err := os.Lstat(requested)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", audit, nil
+	}
+	if err != nil {
+		return "", audit, err
+	}
+	bytes, err := readStructuralControlSecureArtifact(filepath.Dir(requested), requested, structuralControlPackagedCSVMaxBytes)
+	if err != nil {
+		return "", audit, fmt.Errorf("packaged structural control settings CSV is unsafe: %w", err)
+	}
+	destination := filepath.Join(runDir, "r005-settings", "structural-control-settings.packaged.csv")
+	if err := atomicWritePrivateFile(destination, bytes); err != nil {
+		return "", audit, err
+	}
+	settingsPath := filepath.Join(runDir, "r005-settings", "structural-control-settings.packaged.json")
+	selectionPath := filepath.Join(runDir, "r005-settings", "structural-control-settings.packaged.selection.json")
+	command := exec.Command(
+		nodePath, wrapperPath, "materialize-structural-control-settings",
+		structuralControlSettingsCSVFlag, destination,
+		"--organization", contextValue.Organization,
+		"--period", contextValue.Period,
+		"--output", settingsPath,
+		"--selection-output", selectionPath,
+	)
+	command.Dir = filepath.Dir(wrapperPath)
+	if output, commandErr := command.CombinedOutput(); commandErr != nil {
+		return "", audit, fmt.Errorf("packaged structural control settings materialization failed: %w: %s", commandErr, strings.TrimSpace(string(output)))
+	}
+	selectionBytes, err := readStructuralControlSecureArtifact(runDir, selectionPath, structuralControlPackagedCSVMaxBytes)
+	if err != nil {
+		return "", audit, err
+	}
+	var selection structuralControlPackagedSelection
+	if err := decodeJSONRejectDuplicateKeys(selectionBytes, &selection, true); err != nil {
+		return "", audit, err
+	}
+	sourceSHA := structuralControlBytesSHA256(bytes)
+	if selection.Schema != "opiu-service-structural-control-selection.v1" ||
+		selection.Authority != structuralControlAuthorityServiceCSV ||
+		!sameFilesystemPath(selection.SourcePath, destination) ||
+		!strings.EqualFold(selection.SourceSHA256, sourceSHA) || selection.SourceSize != int64(len(bytes)) {
+		return "", audit, errors.New("packaged structural control selection proof does not match the run-owned CSV")
+	}
+	audit.SourceCSVPath = destination
+	audit.SourceCSVSHA256 = sourceSHA
+	switch selection.Status {
+	case "EXACT_ORGANIZATION_MATERIALIZED":
+		if !sameFilesystemPath(selection.Path, settingsPath) {
+			return "", audit, errors.New("packaged structural control selection path does not match the expected settings path")
+		}
+		verificationPath := filepath.Join(runDir, "r005-settings", "structural-control-settings.packaged.verification.json")
+		verificationCommand := exec.Command(
+			nodePath, wrapperPath, "verify-structural-control-settings",
+			structuralControlSettingsCSVFlag, destination,
+			"--structural-control-settings", settingsPath,
+			"--organization", contextValue.Organization,
+			"--period", contextValue.Period,
+			"--verification-output", verificationPath,
+		)
+		verificationCommand.Dir = filepath.Dir(wrapperPath)
+		if output, commandErr := verificationCommand.CombinedOutput(); commandErr != nil {
+			return "", audit, fmt.Errorf("packaged structural control settings verification failed: %w: %s", commandErr, strings.TrimSpace(string(output)))
+		}
+		selectionBytes, err = readStructuralControlSecureArtifact(runDir, verificationPath, structuralControlPackagedCSVMaxBytes)
+		if err != nil {
+			return "", audit, err
+		}
+		if err := decodeJSONRejectDuplicateKeys(selectionBytes, &selection, true); err != nil {
+			return "", audit, err
+		}
+		settingsBytes, err := readStructuralControlSecureArtifact(runDir, settingsPath, structuralControlSettingsJSONMaxBytes)
+		if err != nil {
+			return "", audit, err
+		}
+		settingsSHA := structuralControlBytesSHA256(settingsBytes)
+		setIDs, err := validatePackagedStructuralControlSettings(settingsBytes, contextValue, destination, sourceSHA, int64(len(bytes)))
+		if err != nil {
+			return "", audit, err
+		}
+		if selection.Schema != "opiu-service-structural-control-verification.v1" ||
+			selection.Authority != structuralControlAuthorityServiceCSV || selection.Status != "EXACT_ORGANIZATION_MATERIALIZED" ||
+			!sameFilesystemPath(selection.Path, settingsPath) || !sameFilesystemPath(selection.SettingsPath, settingsPath) ||
+			!sameFilesystemPath(selection.SourcePath, destination) ||
+			!strings.EqualFold(selection.SourceSHA256, sourceSHA) || selection.SourceSize != int64(len(bytes)) ||
+			!strings.EqualFold(selection.SettingsSHA256, settingsSHA) || selection.SettingsSize != int64(len(settingsBytes)) ||
+			selection.SettingsID == "" || selection.SetCount != len(setIDs) || !reflect.DeepEqual(selection.SetIDs, setIDs) ||
+			!validSHA256(selection.SetsSHA256) {
+			return "", audit, errors.New("packaged structural control canonical verification does not match materialized settings")
+		}
+		audit.Status = structuralControlPackagedCSVStatus
+		audit.SettingsPath = settingsPath
+		audit.SettingsSHA256 = settingsSHA
+		audit.ControlSetIDs = setIDs
+		audit.SetCount = len(setIDs)
+		audit.SelectionPath = verificationPath
+		audit.SelectionSHA256 = structuralControlBytesSHA256(selectionBytes)
+		return settingsPath, audit, nil
+	case "NO_EXACT_ORGANIZATION", "NO_ACTIVE_SETS":
+		if strings.TrimSpace(selection.Path) != "" {
+			return "", audit, errors.New("packaged structural control empty selection unexpectedly has a settings path")
+		}
+		if _, statErr := os.Lstat(settingsPath); !errors.Is(statErr, os.ErrNotExist) {
+			return "", audit, errors.New("packaged structural control empty selection unexpectedly materialized settings")
+		}
+		audit.Status = structuralControlPackagedNoExactStatus
+		audit.SelectionPath = selectionPath
+		audit.SelectionSHA256 = structuralControlBytesSHA256(selectionBytes)
+		return "", audit, nil
+	default:
+		return "", audit, fmt.Errorf("packaged structural control selection status is invalid: %s", selection.Status)
+	}
+}
+
+func structuralControlExactStringSlice(value any, label string) ([]string, error) {
+	raw, ok := value.([]any)
+	if !ok || len(raw) == 0 {
+		return nil, fmt.Errorf("%s must be a non-empty array", label)
+	}
+	result := make([]string, 0, len(raw))
+	seen := map[string]bool{}
+	for _, item := range raw {
+		text, ok := item.(string)
+		text = strings.ToUpper(strings.TrimSpace(text))
+		if !ok || text == "" || seen[text] {
+			return nil, fmt.Errorf("%s contains an invalid or duplicate code", label)
+		}
+		seen[text] = true
+		result = append(result, text)
+	}
+	return result, nil
+}
+
+func validatePackagedStructuralControlSettings(data []byte, contextValue Context, sourcePath, sourceSHA string, sourceSize int64) ([]string, error) {
+	var document map[string]any
+	if err := decodeJSONRejectDuplicateKeys(data, &document, false); err != nil {
+		return nil, err
+	}
+	if structuralControlText(document["schema"]) != structuralControlSettingsSchema ||
+		structuralControlText(document["settings_id"]) == "" ||
+		structuralControlText(document["organization"]) != contextValue.Organization ||
+		structuralControlText(document["period"]) != contextValue.Period {
+		return nil, errors.New("packaged structural control settings scope is invalid")
+	}
+	source, ok := document["source"].(map[string]any)
+	if !ok || structuralControlText(source["format"]) != "BUSINESS_CSV_SEMICOLON_UTF8" ||
+		!sameFilesystemPath(structuralControlText(source["path"]), sourcePath) ||
+		!strings.EqualFold(structuralControlText(source["sha256"]), sourceSHA) {
+		return nil, errors.New("packaged structural control settings source binding is invalid")
+	}
+	size, err := structuralControlInteger(source["size"])
+	if err != nil || int64(size) != sourceSize {
+		return nil, errors.New("packaged structural control settings source size is invalid")
+	}
+	safety, ok := document["safety"].(map[string]any)
+	postingRows, postingRowsErr := structuralControlInteger(safety["posting_rows"])
+	if !ok || structuralControlText(safety["mode"]) != "REPORT_ONLY" || postingRowsErr != nil || postingRows != 0 ||
+		safety["ready_to_upload"] != false ||
+		safety["release_allowed"] != false || safety["execution_allowed"] != false || safety["live_1c_allowed"] != false {
+		return nil, errors.New("packaged structural control settings safety is open")
+	}
+	sets, ok := document["structural_group_control_sets"].([]any)
+	if !ok || len(sets) == 0 {
+		return nil, errors.New("packaged structural control settings sets are missing")
+	}
+	ids := make([]string, 0, len(sets))
+	seenIDs, seenNames, codeOwners := map[string]bool{}, map[string]bool{}, map[string]string{}
+	for index, raw := range sets {
+		set, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("packaged structural control set %d is invalid", index)
+		}
+		id, name := structuralControlText(set["id"]), structuralControlText(set["name"])
+		if id == "" || name == "" || seenIDs[id] || seenNames[name] || set["enabled"] != true ||
+			structuralControlText(set["mode"]) != "SUM_DELTA_ONLY" ||
+			structuralControlText(set["reconciliation_organization"]) != contextValue.Organization ||
+			structuralControlText(set["reconciliation_organization_id"]) != contextValue.Organization {
+			return nil, fmt.Errorf("packaged structural control set %d identity is invalid", index)
+		}
+		if delta, deltaErr := structuralControlInteger(set["expected_control_delta"]); deltaErr != nil || delta != 0 {
+			return nil, fmt.Errorf("packaged structural control set %s expected delta is invalid", id)
+		}
+		tolerance, ok := set["tolerance"].(float64)
+		if !ok || tolerance != 0.01 {
+			return nil, fmt.Errorf("packaged structural control set %s tolerance is invalid", id)
+		}
+		members, err := structuralControlExactStringSlice(set["member_codes"], id+".member_codes")
+		if err != nil || len(members) < 2 {
+			return nil, fmt.Errorf("packaged structural control set %s members are invalid", id)
+		}
+		intalevRaw, hasIntalev := set["intalev_member_codes"]
+		erpRaw, hasERP := set["erp_member_codes"]
+		if hasIntalev != hasERP {
+			return nil, fmt.Errorf("packaged structural control set %s split sides are incomplete", id)
+		}
+		if hasIntalev {
+			intalev, intalevErr := structuralControlExactStringSlice(intalevRaw, id+".intalev_member_codes")
+			erp, erpErr := structuralControlExactStringSlice(erpRaw, id+".erp_member_codes")
+			if intalevErr != nil || erpErr != nil {
+				return nil, fmt.Errorf("packaged structural control set %s split sides are invalid", id)
+			}
+			union := map[string]bool{}
+			for _, code := range append(append([]string{}, intalev...), erp...) {
+				union[code] = true
+			}
+			if len(union) != len(members) {
+				return nil, fmt.Errorf("packaged structural control set %s split union is invalid", id)
+			}
+			for _, code := range members {
+				if !union[code] {
+					return nil, fmt.Errorf("packaged structural control set %s split union drift", id)
+				}
+			}
+		}
+		for _, code := range members {
+			if owner := codeOwners[code]; owner != "" {
+				return nil, fmt.Errorf("packaged structural control code %s overlaps %s and %s", code, owner, id)
+			}
+			codeOwners[code] = id
+		}
+		seenIDs[id], seenNames[name] = true, true
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 func appendStructuralControlScopeArguments(command []string) []string {
@@ -362,6 +699,32 @@ func (p *Pipeline) materializeActiveStructuralControlSettings(run Run, contextVa
 
 func (p *Pipeline) verifyStructuralControlPipelineAudit(audit structuralControlPipelineAudit) error {
 	if audit.Status == "NO_ACTIVE_UI_FIXED_SETS" {
+		return nil
+	}
+	if audit.Status == structuralControlPackagedCSVStatus || audit.Status == structuralControlPackagedNoExactStatus {
+		active := audit.Status == structuralControlPackagedCSVStatus
+		if len(audit.AppliedVersions) != 0 || strings.TrimSpace(audit.SourceCSVPath) == "" ||
+			strings.TrimSpace(audit.SelectionPath) == "" || !validSHA256(audit.SelectionSHA256) || !validSHA256(audit.SourceCSVSHA256) ||
+			(active && (audit.SetCount < 1 || len(audit.ControlSetIDs) != audit.SetCount ||
+				strings.TrimSpace(audit.SettingsPath) == "" || !validSHA256(audit.SettingsSHA256))) ||
+			(!active && (audit.SetCount != 0 || len(audit.ControlSetIDs) != 0 || strings.TrimSpace(audit.SettingsPath) != "")) {
+			return errors.New("packaged structural control audit is incomplete")
+		}
+		runRoot := filepath.Dir(filepath.Dir(audit.SourceCSVPath))
+		bytes, err := readStructuralControlSecureArtifact(runRoot, audit.SourceCSVPath, structuralControlPackagedCSVMaxBytes)
+		if err != nil || !strings.EqualFold(structuralControlBytesSHA256(bytes), audit.SourceCSVSHA256) {
+			return errors.New("packaged structural control CSV drift")
+		}
+		if active {
+			settingsBytes, err := readStructuralControlSecureArtifact(runRoot, audit.SettingsPath, structuralControlSettingsJSONMaxBytes)
+			if err != nil || !strings.EqualFold(structuralControlBytesSHA256(settingsBytes), audit.SettingsSHA256) {
+				return errors.New("packaged structural control settings drift")
+			}
+		}
+		selectionBytes, err := readStructuralControlSecureArtifact(runRoot, audit.SelectionPath, structuralControlPackagedCSVMaxBytes)
+		if err != nil || !strings.EqualFold(structuralControlBytesSHA256(selectionBytes), audit.SelectionSHA256) {
+			return errors.New("packaged structural control selection drift")
+		}
 		return nil
 	}
 	if audit.Status != "ACTIVE_UI_FIXED_SETS_MATERIALIZED" || audit.SetCount == 0 ||

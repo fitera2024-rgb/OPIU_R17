@@ -56,6 +56,7 @@ type structuralControlRunManifestBinding struct {
 	PreBindingManifestSHA256 string                                `json:"pre_binding_manifest_sha256"`
 	Settings                 structuralControlArtifactRef          `json:"settings"`
 	SourceCSV                structuralControlArtifactRef          `json:"source_csv"`
+	Selection                structuralControlArtifactRef          `json:"selection"`
 	Registry                 structuralControlRegistryRef          `json:"registry"`
 	AppliedVersions          []structuralControlPipelineVersionRef `json:"applied_versions"`
 	ControlSetIDs            []string                              `json:"control_set_ids"`
@@ -155,6 +156,37 @@ func bindStructuralControlRunManifest(run Run, contextValue Context, runDir stri
 		binding.Registry = structuralControlRegistryRef{
 			Path: audit.RegistryPath, SHA256: strings.ToUpper(audit.RegistrySHA256), Size: registryInfo.Size(), Revision: audit.RegistryRevision,
 		}
+	} else if audit.Status == structuralControlPackagedCSVStatus {
+		if audit.SetCount < 1 || len(audit.ControlSetIDs) != audit.SetCount || len(audit.AppliedVersions) != 0 ||
+			!validSHA256(audit.SettingsSHA256) || !validSHA256(audit.SourceCSVSHA256) || !validSHA256(audit.SelectionSHA256) ||
+			strings.TrimSpace(audit.SettingsPath) == "" || strings.TrimSpace(audit.SourceCSVPath) == "" {
+			return errors.New("packaged structural-control settings audit is inconsistent")
+		}
+		binding.Settings, err = structuralControlManifestArtifact(runDir, audit.SettingsPath, audit.SettingsSHA256)
+		if err != nil {
+			return err
+		}
+		binding.SourceCSV, err = structuralControlManifestArtifact(runDir, audit.SourceCSVPath, audit.SourceCSVSHA256)
+		if err != nil {
+			return err
+		}
+		binding.Selection, err = structuralControlManifestArtifact(runDir, audit.SelectionPath, audit.SelectionSHA256)
+		if err != nil {
+			return err
+		}
+	} else if audit.Status == structuralControlPackagedNoExactStatus {
+		if audit.SetCount != 0 || len(audit.ControlSetIDs) != 0 || len(audit.AppliedVersions) != 0 ||
+			!validSHA256(audit.SourceCSVSHA256) || !validSHA256(audit.SelectionSHA256) || strings.TrimSpace(audit.SourceCSVPath) == "" {
+			return errors.New("packaged structural-control no-exact audit is inconsistent")
+		}
+		binding.SourceCSV, err = structuralControlManifestArtifact(runDir, audit.SourceCSVPath, audit.SourceCSVSHA256)
+		if err != nil {
+			return err
+		}
+		binding.Selection, err = structuralControlManifestArtifact(runDir, audit.SelectionPath, audit.SelectionSHA256)
+		if err != nil {
+			return err
+		}
 	} else if audit.Status != "NO_ACTIVE_UI_FIXED_SETS" || audit.SetCount != 0 || len(audit.ControlSetIDs) != 0 || len(audit.AppliedVersions) != 0 {
 		return errors.New("structural-control default audit is inconsistent")
 	}
@@ -167,19 +199,20 @@ func bindStructuralControlRunManifest(run Run, contextValue Context, runDir stri
 }
 
 func structuralControlManifestArtifact(runDir, artifactPath, expectedSHA string) (structuralControlArtifactRef, error) {
-	actualSHA, err := sha256File(artifactPath)
-	if err != nil || !validSHA256(expectedSHA) || !strings.EqualFold(actualSHA, expectedSHA) {
-		return structuralControlArtifactRef{}, errors.New("structural-control manifest artifact hash mismatch")
-	}
-	info, err := os.Stat(artifactPath)
-	if err != nil || !info.Mode().IsRegular() {
-		return structuralControlArtifactRef{}, errors.New("structural-control manifest artifact is not a regular file")
-	}
 	relative, err := filepath.Rel(runDir, artifactPath)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || filepath.IsAbs(relative) {
 		return structuralControlArtifactRef{}, errors.New("structural-control run artifact escaped run directory")
 	}
-	return structuralControlArtifactRef{Path: filepath.ToSlash(relative), SHA256: strings.ToUpper(actualSHA), Size: info.Size()}, nil
+	limit := structuralControlSettingsJSONMaxBytes
+	if strings.EqualFold(filepath.Ext(artifactPath), ".csv") {
+		limit = structuralControlPackagedCSVMaxBytes
+	}
+	data, err := readStructuralControlSecureArtifact(runDir, artifactPath, limit)
+	actualSHA := structuralControlBytesSHA256(data)
+	if err != nil || !validSHA256(expectedSHA) || !strings.EqualFold(actualSHA, expectedSHA) {
+		return structuralControlArtifactRef{}, errors.New("structural-control manifest artifact hash mismatch")
+	}
+	return structuralControlArtifactRef{Path: filepath.ToSlash(relative), SHA256: strings.ToUpper(actualSHA), Size: int64(len(data))}, nil
 }
 
 func readStructuralControlRunManifest(run Run, contextValue Context, runDir string) (structuralControlRunManifestBinding, error) {
@@ -212,7 +245,7 @@ func readStructuralControlRunManifest(run Run, contextValue Context, runDir stri
 	if binding.Status == "ACTIVE_UI_FIXED_SETS_MATERIALIZED" {
 		if binding.SetCount < 1 || len(binding.ControlSetIDs) != binding.SetCount || len(binding.AppliedVersions) != binding.SetCount ||
 			!validSHA256(binding.Settings.SHA256) || !validSHA256(binding.SourceCSV.SHA256) ||
-			!validSHA256(binding.Registry.SHA256) || binding.Registry.Revision < 1 {
+			!validSHA256(binding.Registry.SHA256) || binding.Registry.Revision < 1 || !structuralControlArtifactRefEmpty(binding.Selection) {
 			return structuralControlRunManifestBinding{}, errors.New("run manifest active structural-control refs are incomplete")
 		}
 		for _, artifact := range []structuralControlArtifactRef{binding.Settings, binding.SourceCSV} {
@@ -220,16 +253,72 @@ func readStructuralControlRunManifest(run Run, contextValue Context, runDir stri
 			if err != nil {
 				return structuralControlRunManifestBinding{}, err
 			}
-			actual, err := sha256File(resolved)
-			info, statErr := os.Stat(resolved)
-			if err != nil || statErr != nil || !strings.EqualFold(actual, artifact.SHA256) || info.Size() != artifact.Size {
+			limit := structuralControlSettingsJSONMaxBytes
+			if strings.EqualFold(filepath.Ext(artifact.Path), ".csv") {
+				limit = structuralControlPackagedCSVMaxBytes
+			}
+			data, err := readStructuralControlSecureArtifact(runDir, resolved, limit)
+			if err != nil || !strings.EqualFold(structuralControlBytesSHA256(data), artifact.SHA256) || int64(len(data)) != artifact.Size {
 				return structuralControlRunManifestBinding{}, errors.New("run manifest structural-control artifact drift")
 			}
 		}
-	} else if binding.Status != "NO_ACTIVE_UI_FIXED_SETS" || binding.SetCount != 0 || len(binding.ControlSetIDs) != 0 || len(binding.AppliedVersions) != 0 {
+	} else if binding.Status == structuralControlPackagedCSVStatus {
+		if binding.SetCount < 1 || len(binding.ControlSetIDs) != binding.SetCount || len(binding.AppliedVersions) != 0 ||
+			!validSHA256(binding.Settings.SHA256) || binding.Settings.Size < 1 || strings.TrimSpace(binding.Settings.Path) == "" ||
+			!validSHA256(binding.SourceCSV.SHA256) || binding.SourceCSV.Size < 1 || strings.TrimSpace(binding.SourceCSV.Path) == "" ||
+			!validSHA256(binding.Selection.SHA256) || binding.Selection.Size < 1 || strings.TrimSpace(binding.Selection.Path) == "" ||
+			validSHA256(binding.Registry.SHA256) {
+			return structuralControlRunManifestBinding{}, errors.New("run manifest packaged structural-control settings refs are incomplete")
+		}
+		for _, artifact := range []structuralControlArtifactRef{binding.Settings, binding.SourceCSV, binding.Selection} {
+			resolved, err := resolveStructuralControlRunArtifact(runDir, artifact.Path)
+			if err != nil {
+				return structuralControlRunManifestBinding{}, err
+			}
+			limit := structuralControlSettingsJSONMaxBytes
+			if artifact.Path == binding.SourceCSV.Path || artifact.Path == binding.Selection.Path {
+				limit = structuralControlPackagedCSVMaxBytes
+			}
+			bytes, err := readStructuralControlSecureArtifact(runDir, resolved, limit)
+			if err != nil || !strings.EqualFold(structuralControlBytesSHA256(bytes), artifact.SHA256) || int64(len(bytes)) != artifact.Size {
+				return structuralControlRunManifestBinding{}, errors.New("run manifest packaged structural-control artifact drift")
+			}
+		}
+	} else if binding.Status == structuralControlPackagedNoExactStatus {
+		if binding.SetCount != 0 || len(binding.ControlSetIDs) != 0 || len(binding.AppliedVersions) != 0 ||
+			!validSHA256(binding.SourceCSV.SHA256) || binding.SourceCSV.Size < 1 || strings.TrimSpace(binding.SourceCSV.Path) == "" ||
+			!validSHA256(binding.Selection.SHA256) || binding.Selection.Size < 1 || strings.TrimSpace(binding.Selection.Path) == "" ||
+			!structuralControlArtifactRefEmpty(binding.Settings) || validSHA256(binding.Registry.SHA256) ||
+			strings.TrimSpace(binding.Registry.Path) != "" || binding.Registry.Size != 0 || binding.Registry.Revision != 0 {
+			return structuralControlRunManifestBinding{}, errors.New("run manifest packaged structural-control no-exact ref is incomplete")
+		}
+		resolved, err := resolveStructuralControlRunArtifact(runDir, binding.SourceCSV.Path)
+		if err != nil {
+			return structuralControlRunManifestBinding{}, err
+		}
+		bytes, err := readStructuralControlSecureArtifact(runDir, resolved, structuralControlPackagedCSVMaxBytes)
+		if err != nil || !strings.EqualFold(structuralControlBytesSHA256(bytes), binding.SourceCSV.SHA256) || int64(len(bytes)) != binding.SourceCSV.Size {
+			return structuralControlRunManifestBinding{}, errors.New("run manifest packaged structural-control CSV drift")
+		}
+		resolvedSelection, err := resolveStructuralControlRunArtifact(runDir, binding.Selection.Path)
+		if err != nil {
+			return structuralControlRunManifestBinding{}, err
+		}
+		selectionBytes, err := readStructuralControlSecureArtifact(runDir, resolvedSelection, structuralControlPackagedCSVMaxBytes)
+		if err != nil || !strings.EqualFold(structuralControlBytesSHA256(selectionBytes), binding.Selection.SHA256) || int64(len(selectionBytes)) != binding.Selection.Size {
+			return structuralControlRunManifestBinding{}, errors.New("run manifest packaged structural-control selection drift")
+		}
+	} else if binding.Status != "NO_ACTIVE_UI_FIXED_SETS" || binding.SetCount != 0 || len(binding.ControlSetIDs) != 0 || len(binding.AppliedVersions) != 0 ||
+		!structuralControlArtifactRefEmpty(binding.Settings) || !structuralControlArtifactRefEmpty(binding.SourceCSV) ||
+		!structuralControlArtifactRefEmpty(binding.Selection) || strings.TrimSpace(binding.Registry.Path) != "" ||
+		strings.TrimSpace(binding.Registry.SHA256) != "" || binding.Registry.Size != 0 || binding.Registry.Revision != 0 {
 		return structuralControlRunManifestBinding{}, errors.New("run manifest structural-control default state is invalid")
 	}
 	return binding, nil
+}
+
+func structuralControlArtifactRefEmpty(ref structuralControlArtifactRef) bool {
+	return strings.TrimSpace(ref.Path) == "" && strings.TrimSpace(ref.SHA256) == "" && ref.Size == 0
 }
 
 func validateStructuralControlManifestScope(manifest internalRunManifest, run Run, contextValue Context) error {
@@ -297,6 +386,61 @@ func resolveStructuralControlRunArtifact(runDir, relative string) (string, error
 	return resolved, nil
 }
 
+func readStructuralControlSecureArtifact(root, path string, limit int64) ([]byte, error) {
+	if limit < 1 {
+		return nil, errors.New("structural artifact size limit is invalid")
+	}
+	cleanRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	cleanRoot = filepath.Clean(cleanRoot)
+	cleanPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	cleanPath = filepath.Clean(cleanPath)
+	relative, err := filepath.Rel(cleanRoot, cleanPath)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return nil, errors.New("structural artifact escaped trusted directory")
+	}
+	if err := rejectReparsePathComponents(cleanRoot); err != nil {
+		return nil, fmt.Errorf("structural artifact root is unsafe: %w", err)
+	}
+	if err := rejectReparsePathComponents(cleanPath); err != nil {
+		return nil, fmt.Errorf("structural artifact path is unsafe: %w", err)
+	}
+	pathBefore, err := os.Lstat(cleanPath)
+	if err != nil || !isBoundedStructuralControlArtifact(pathBefore.Mode(), pathBefore.Size(), limit) || pathBefore.Size() < 1 {
+		return nil, errors.New("structural artifact is not a bounded regular file")
+	}
+	file, err := os.Open(cleanPath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	handleBefore, err := file.Stat()
+	if err != nil || !isBoundedStructuralControlArtifact(handleBefore.Mode(), handleBefore.Size(), limit) || handleBefore.Size() < 1 ||
+		!os.SameFile(pathBefore, handleBefore) {
+		return nil, errors.New("structural artifact changed before bounded read")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil || int64(len(data)) > limit || int64(len(data)) != handleBefore.Size() {
+		return nil, errors.New("structural artifact changed size during bounded read")
+	}
+	handleAfter, err := file.Stat()
+	pathAfter, pathErr := os.Lstat(cleanPath)
+	if err != nil || pathErr != nil || !os.SameFile(handleBefore, handleAfter) || !os.SameFile(handleAfter, pathAfter) ||
+		handleAfter.Size() != handleBefore.Size() || pathAfter.Size() != handleBefore.Size() ||
+		!isBoundedStructuralControlArtifact(pathAfter.Mode(), pathAfter.Size(), limit) {
+		return nil, errors.New("structural artifact changed after bounded read")
+	}
+	if err := rejectReparsePathComponents(cleanPath); err != nil {
+		return nil, fmt.Errorf("structural artifact path changed to unsafe: %w", err)
+	}
+	return data, nil
+}
+
 func materializeStructuralControlProof(run Run, contextValue Context, runDir, codexPath string) (string, structuralControlProofDescriptor, error) {
 	manifestBinding, err := readStructuralControlRunManifest(run, contextValue, runDir)
 	if err != nil {
@@ -310,7 +454,7 @@ func materializeStructuralControlProof(run Run, contextValue Context, runDir, co
 	if err != nil {
 		return "", structuralControlProofDescriptor{}, err
 	}
-	if err := verifyCodexProofAgainstRunManifest(payload, descriptor, manifestBinding); err != nil {
+	if err := verifyCodexProofAgainstRunManifest(payload, descriptor, manifestBinding, runDir); err != nil {
 		return "", structuralControlProofDescriptor{}, err
 	}
 	r005Dir := filepath.Join(runDir, "r005")
@@ -369,7 +513,7 @@ func verifyStructuralControlProofArtifact(run Run, contextValue Context, runDir,
 	if err != nil {
 		return structuralControlProofDescriptor{}, err
 	}
-	if err := verifyCodexProofAgainstRunManifest(payload, expected, manifestBinding); err != nil {
+	if err := verifyCodexProofAgainstRunManifest(payload, expected, manifestBinding, runDir); err != nil {
 		return structuralControlProofDescriptor{}, err
 	}
 	proofBytes, err := os.ReadFile(proofPath)
@@ -496,6 +640,30 @@ func readStructuralControlObject(path string) (map[string]any, []byte, error) {
 	}
 	if value == nil {
 		return nil, nil, errors.New("JSON object is required")
+	}
+	return value, data, nil
+}
+
+func readStructuralControlObjectWithin(root, path string, limit int64) (map[string]any, []byte, error) {
+	data, err := readStructuralControlSecureArtifact(root, path, limit)
+	if err != nil {
+		return nil, nil, err
+	}
+	duplicateDecoder := json.NewDecoder(bytes.NewReader(data))
+	if err := scanJSONValueForDuplicateKeys(duplicateDecoder); err != nil {
+		return nil, nil, err
+	}
+	if _, err := duplicateDecoder.Token(); err != io.EOF {
+		return nil, nil, errors.New("multiple JSON values are forbidden")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value map[string]any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, nil, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF || value == nil {
+		return nil, nil, errors.New("one JSON object is required")
 	}
 	return value, data, nil
 }
@@ -666,25 +834,36 @@ func structuralControlAppliedVersionIDs(binding map[string]any) ([]string, error
 	return result, nil
 }
 
-func verifyCodexProofAgainstRunManifest(payload map[string]any, descriptor structuralControlProofDescriptor, binding structuralControlRunManifestBinding) error {
+func verifyCodexProofAgainstRunManifest(payload map[string]any, descriptor structuralControlProofDescriptor, binding structuralControlRunManifestBinding, runDir string) error {
 	rawBinding := payload["structural_control_settings_binding"]
 	if binding.Status == "NO_ACTIVE_UI_FIXED_SETS" {
-		if descriptor.Status != "NO_ACTIVE_DEFAULT_ALL_GROUPS" || descriptor.SetCount != 0 {
+		selection, selectionOK := payload["structural_control_settings_selection"].(map[string]any)
+		if descriptor.Status != "NO_ACTIVE_DEFAULT_ALL_GROUPS" || descriptor.SetCount != 0 || descriptor.ControlResultCount != 0 ||
+			!selectionOK || structuralControlText(selection["authority"]) != structuralControlAuthorityServiceNone ||
+			structuralControlText(selection["status"]) != "SERVICE_NO_SETTINGS" || structuralControlText(selection["path"]) != "" {
 			return errors.New("R005 codex-input did not preserve the manifest default structural-control state")
 		}
-		if rawBinding != nil {
-			settings, ok := rawBinding.(map[string]any)
-			if !ok || structuralControlText(settings["status"]) != "MISSING_DEFAULT_ALL_GROUPS" {
-				return errors.New("R005 codex-input default structural-control binding is invalid")
-			}
+		if err := verifyDefaultStructuralControlBinding(rawBinding); err != nil {
+			return fmt.Errorf("R005 codex-input default structural-control binding is invalid: %w", err)
 		}
 		return nil
+	}
+	if binding.Status == structuralControlPackagedCSVStatus || binding.Status == structuralControlPackagedNoExactStatus {
+		return verifyPackagedStructuralControlProof(payload, descriptor, binding, runDir)
 	}
 	settings, ok := rawBinding.(map[string]any)
 	if !ok || descriptor.Status != "ACTIVE_VERIFIED" || descriptor.SetCount != binding.SetCount ||
 		!strings.EqualFold(structuralControlText(settings["input_sha256"]), binding.Settings.SHA256) ||
 		!strings.EqualFold(structuralControlText(settings["source_sha256"]), binding.SourceCSV.SHA256) {
 		return errors.New("R005 codex-input structural-control settings do not match run manifest")
+	}
+	selection, ok := payload["structural_control_settings_selection"].(map[string]any)
+	manifestSettingsPath, selectionErr := resolveStructuralControlRunArtifact(runDir, binding.Settings.Path)
+	if !ok || selectionErr != nil || structuralControlText(selection["authority"]) != structuralControlAuthorityServiceJSON ||
+		structuralControlText(selection["status"]) != "EXPLICIT_CLI_SETTINGS" ||
+		!sameFilesystemPath(structuralControlText(selection["path"]), manifestSettingsPath) ||
+		!sameFilesystemPath(structuralControlText(settings["input_path"]), manifestSettingsPath) {
+		return errors.New("R005 codex-input structural-control selection path does not match run manifest")
 	}
 	registry, ok := settings["ui_fixed_registry"].(map[string]any)
 	if !ok || structuralControlText(registry["status"]) != "ACTIVE_UI_FIXED_REGISTRY_VERIFIED" ||
@@ -709,6 +888,234 @@ func verifyCodexProofAgainstRunManifest(payload map[string]any, descriptor struc
 	data, err := json.Marshal(appliedValues)
 	if err != nil || json.Unmarshal(data, &applied) != nil || !reflect.DeepEqual(applied, binding.AppliedVersions) {
 		return errors.New("R005 codex-input applied-version refs drift")
+	}
+	settingsSetIDs, err := structuralControlSetIDsFromBinding(settings)
+	if err != nil || len(settingsSetIDs) != binding.SetCount {
+		return errors.New("R005 codex-input materialized set refs are invalid")
+	}
+	return verifyStructuralControlResultsForSets(payload, settingsSetIDs)
+}
+
+func verifyPackagedStructuralControlProof(payload map[string]any, descriptor structuralControlProofDescriptor, binding structuralControlRunManifestBinding, runDir string) error {
+	selection, ok := payload["structural_control_settings_selection"].(map[string]any)
+	if !ok {
+		return errors.New("R005 codex-input packaged structural-control authority is missing")
+	}
+	manifestSelectionPath, err := resolveStructuralControlRunArtifact(runDir, binding.Selection.Path)
+	if err != nil || !sameFilesystemPath(structuralControlText(selection["selection_proof_path"]), manifestSelectionPath) ||
+		!strings.EqualFold(structuralControlText(selection["selection_proof_sha256"]), binding.Selection.SHA256) {
+		return errors.New("R005 codex-input packaged structural-control selection proof artifact mismatch")
+	}
+	selectionProofSize, err := structuralControlInteger(selection["selection_proof_size"])
+	if err != nil || int64(selectionProofSize) != binding.Selection.Size {
+		return errors.New("R005 codex-input packaged structural-control selection proof size mismatch")
+	}
+	selectionProof, selectionProofBytes, err := readStructuralControlObjectWithin(runDir, manifestSelectionPath, structuralControlPackagedCSVMaxBytes)
+	if err != nil || int64(len(selectionProofBytes)) != binding.Selection.Size ||
+		!strings.EqualFold(structuralControlBytesSHA256(selectionProofBytes), binding.Selection.SHA256) {
+		return errors.New("R005 packaged structural-control selection proof drift")
+	}
+	manifestSourcePath, err := resolveStructuralControlRunArtifact(runDir, binding.SourceCSV.Path)
+	if err != nil || !sameFilesystemPath(structuralControlText(selection["source_path"]), manifestSourcePath) {
+		return errors.New("R005 codex-input packaged structural-control source path mismatch")
+	}
+	if !strings.EqualFold(structuralControlText(selection["source_sha256"]), binding.SourceCSV.SHA256) {
+		return errors.New("R005 codex-input packaged structural-control source hash mismatch")
+	}
+	selectionSize, err := structuralControlInteger(selection["source_size"])
+	if err != nil || int64(selectionSize) != binding.SourceCSV.Size {
+		return errors.New("R005 codex-input packaged structural-control source size mismatch")
+	}
+	selectionStatus := structuralControlText(selection["status"])
+	materializationStatus := structuralControlText(selection["materialization_status"])
+	if structuralControlText(selectionProof["authority"]) != structuralControlAuthorityServiceCSV ||
+		structuralControlText(selectionProof["status"]) != materializationStatus ||
+		!sameFilesystemPath(structuralControlText(selectionProof["source_path"]), manifestSourcePath) ||
+		!strings.EqualFold(structuralControlText(selectionProof["source_sha256"]), binding.SourceCSV.SHA256) {
+		return errors.New("R005 codex-input packaged structural-control selection proof content mismatch")
+	}
+	proofSourceSize, err := structuralControlInteger(selectionProof["source_size"])
+	if err != nil || int64(proofSourceSize) != binding.SourceCSV.Size {
+		return errors.New("R005 packaged structural-control selection proof source size mismatch")
+	}
+	rawBinding := payload["structural_control_settings_binding"]
+	if binding.Status == structuralControlPackagedNoExactStatus {
+		if descriptor.Status != "NO_ACTIVE_DEFAULT_ALL_GROUPS" || descriptor.SetCount != 0 ||
+			structuralControlText(selection["authority"]) != structuralControlAuthorityServiceNone ||
+			selectionStatus != "SERVICE_NO_SETTINGS" || structuralControlText(selection["path"]) != "" ||
+			(materializationStatus != "NO_EXACT_ORGANIZATION" && materializationStatus != "NO_ACTIVE_SETS") {
+			return errors.New("R005 codex-input packaged structural-control empty selection is inconsistent")
+		}
+		if structuralControlText(selectionProof["schema"]) != "opiu-service-structural-control-selection.v1" ||
+			structuralControlText(selectionProof["path"]) != "" {
+			return errors.New("R005 codex-input packaged structural-control empty selection proof is invalid")
+		}
+		if err := verifyDefaultStructuralControlBinding(rawBinding); err != nil {
+			return fmt.Errorf("R005 codex-input packaged structural-control default binding is invalid: %w", err)
+		}
+		return nil
+	}
+	if binding.Status != structuralControlPackagedCSVStatus || descriptor.Status != "ACTIVE_VERIFIED" ||
+		descriptor.SetCount != binding.SetCount || structuralControlText(selection["authority"]) != structuralControlAuthorityServiceJSON ||
+		selectionStatus != "EXPLICIT_CLI_SETTINGS" || materializationStatus != "EXACT_ORGANIZATION_MATERIALIZED" {
+		return errors.New("R005 codex-input packaged structural-control active selection is invalid")
+	}
+	if structuralControlText(selectionProof["schema"]) != "opiu-service-structural-control-verification.v1" {
+		return errors.New("R005 packaged structural-control canonical verification is missing")
+	}
+	settings, ok := rawBinding.(map[string]any)
+	if !ok || structuralControlText(settings["status"]) != "ACTIVE_EXACT_ORGANIZATION_MONTH" ||
+		structuralControlText(settings["organization"]) != binding.Organization ||
+		structuralControlText(settings["period"]) != binding.Period ||
+		!strings.EqualFold(structuralControlText(settings["source_sha256"]), binding.SourceCSV.SHA256) {
+		return errors.New("R005 codex-input packaged structural-control settings scope or source mismatch")
+	}
+	setCount, err := structuralControlInteger(settings["set_count"])
+	if err != nil || setCount != binding.SetCount {
+		return errors.New("R005 codex-input packaged structural-control set count mismatch")
+	}
+	sourceSize, err := structuralControlInteger(settings["source_size"])
+	if err != nil || int64(sourceSize) != binding.SourceCSV.Size {
+		return errors.New("R005 codex-input packaged structural-control source size drift")
+	}
+	inputPath := structuralControlText(settings["input_path"])
+	inputSHA := structuralControlText(settings["input_sha256"])
+	inputSize, err := structuralControlInteger(settings["input_size"])
+	manifestSettingsPath, manifestSettingsErr := resolveStructuralControlRunArtifact(runDir, binding.Settings.Path)
+	if err != nil || manifestSettingsErr != nil || inputPath == "" || !sameFilesystemPath(inputPath, manifestSettingsPath) ||
+		!sameFilesystemPath(structuralControlText(selection["path"]), inputPath) ||
+		!strings.EqualFold(inputSHA, binding.Settings.SHA256) || inputSize != int(binding.Settings.Size) {
+		return errors.New("R005 codex-input packaged structural-control settings artifact is incomplete")
+	}
+	verifiedSetIDs, err := structuralControlStringArray(selection["verified_set_ids"])
+	proofSetIDs, proofSetIDsErr := structuralControlStringArray(selectionProof["set_ids"])
+	verifiedSetCount, verifiedSetCountErr := structuralControlInteger(selection["verified_set_count"])
+	proofSetCount, proofSetCountErr := structuralControlInteger(selectionProof["set_count"])
+	if err != nil || proofSetIDsErr != nil || verifiedSetCountErr != nil || proofSetCountErr != nil ||
+		verifiedSetCount != binding.SetCount || proofSetCount != binding.SetCount ||
+		!reflect.DeepEqual(verifiedSetIDs, binding.ControlSetIDs) || !reflect.DeepEqual(proofSetIDs, binding.ControlSetIDs) ||
+		!sameFilesystemPath(structuralControlText(selection["verified_settings_path"]), manifestSettingsPath) ||
+		!sameFilesystemPath(structuralControlText(selectionProof["settings_path"]), manifestSettingsPath) ||
+		!strings.EqualFold(structuralControlText(selection["verified_settings_sha256"]), binding.Settings.SHA256) ||
+		!strings.EqualFold(structuralControlText(selectionProof["settings_sha256"]), binding.Settings.SHA256) ||
+		structuralControlText(selection["verified_settings_id"]) == "" ||
+		structuralControlText(selection["verified_settings_id"]) != structuralControlText(selectionProof["settings_id"]) ||
+		!validSHA256(structuralControlText(selection["verified_sets_sha256"])) ||
+		!strings.EqualFold(structuralControlText(selection["verified_sets_sha256"]), structuralControlText(selectionProof["sets_sha256"])) {
+		return errors.New("R005 codex-input packaged structural-control canonical verification drift")
+	}
+	verifiedSettingsSize, verifiedSettingsSizeErr := structuralControlInteger(selection["verified_settings_size"])
+	proofSettingsSize, proofSettingsSizeErr := structuralControlInteger(selectionProof["settings_size"])
+	if verifiedSettingsSizeErr != nil || proofSettingsSizeErr != nil || int64(verifiedSettingsSize) != binding.Settings.Size ||
+		int64(proofSettingsSize) != binding.Settings.Size {
+		return errors.New("R005 codex-input packaged structural-control canonical settings size drift")
+	}
+	inputDocument, inputBytes, err := readStructuralControlObjectWithin(runDir, inputPath, structuralControlSettingsJSONMaxBytes)
+	if err != nil || len(inputBytes) != inputSize || !strings.EqualFold(structuralControlBytesSHA256(inputBytes), inputSHA) {
+		return errors.New("R005 packaged structural-control settings artifact drift")
+	}
+	if structuralControlText(inputDocument["schema"]) != structuralControlSettingsSchema ||
+		structuralControlText(inputDocument["organization"]) != binding.Organization ||
+		structuralControlText(inputDocument["period"]) != binding.Period {
+		return errors.New("R005 packaged structural-control settings document scope mismatch")
+	}
+	documentSource, ok := inputDocument["source"].(map[string]any)
+	if !ok || !strings.EqualFold(structuralControlText(documentSource["sha256"]), binding.SourceCSV.SHA256) {
+		return errors.New("R005 packaged structural-control settings document source mismatch")
+	}
+	documentSourceSize, err := structuralControlInteger(documentSource["size"])
+	if err != nil || int64(documentSourceSize) != binding.SourceCSV.Size {
+		return errors.New("R005 packaged structural-control settings document source size mismatch")
+	}
+	if !sameFilesystemPath(structuralControlText(documentSource["path"]), manifestSourcePath) {
+		return errors.New("R005 packaged structural-control settings document source path mismatch")
+	}
+	documentSetIDs, err := structuralControlSetIDsFromDocument(inputDocument)
+	if err != nil || !reflect.DeepEqual(documentSetIDs, binding.ControlSetIDs) {
+		return errors.New("R005 packaged structural-control settings document set refs mismatch")
+	}
+	settingsSetIDs, err := structuralControlSetIDsFromBinding(settings)
+	if err != nil || !reflect.DeepEqual(settingsSetIDs, binding.ControlSetIDs) {
+		return errors.New("R005 packaged structural-control effective set refs mismatch")
+	}
+	return verifyStructuralControlResultsForSets(payload, binding.ControlSetIDs)
+}
+
+func verifyDefaultStructuralControlBinding(raw any) error {
+	settings, ok := raw.(map[string]any)
+	if !ok || structuralControlText(settings["schema"]) != structuralControlSettingsSchema ||
+		structuralControlText(settings["status"]) != "MISSING_DEFAULT_ALL_GROUPS" {
+		return errors.New("explicit default binding is required")
+	}
+	setCount, err := structuralControlInteger(settings["set_count"])
+	if err != nil || setCount != 0 ||
+		settings["correction_authority"] != false || settings["execution_allowed"] != false {
+		return errors.New("default binding is incomplete or unsafe")
+	}
+	if rawSets, exists := settings["sets"]; exists {
+		sets, setsOK := rawSets.([]any)
+		if !setsOK || len(sets) != 0 {
+			return errors.New("default binding sets are not empty")
+		}
+	}
+	if err := structuralControlRequireZero(settings["financial_rows"], "default.financial_rows"); err != nil {
+		return err
+	}
+	return structuralControlRequireZero(settings["posting_rows"], "default.posting_rows")
+}
+
+func structuralControlSetIDsFromBinding(binding map[string]any) ([]string, error) {
+	sets, ok := binding["sets"].([]any)
+	if !ok {
+		return nil, errors.New("sets are missing")
+	}
+	return structuralControlSetIDsFromValues(sets)
+}
+
+func structuralControlSetIDsFromDocument(document map[string]any) ([]string, error) {
+	sets, ok := document["structural_group_control_sets"].([]any)
+	if !ok {
+		return nil, errors.New("sets are missing")
+	}
+	return structuralControlSetIDsFromValues(sets)
+}
+
+func structuralControlSetIDsFromValues(values []any) ([]string, error) {
+	result := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, raw := range values {
+		set, ok := raw.(map[string]any)
+		id := structuralControlText(set["id"])
+		if !ok || id == "" || seen[id] {
+			return nil, errors.New("set id is invalid or duplicate")
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
+	return result, nil
+}
+
+func verifyStructuralControlResultsForSets(payload map[string]any, expected []string) error {
+	values, ok := payload["structural_group_control_results"].([]any)
+	if !ok || len(values) != len(expected) {
+		return errors.New("R005 structural-control result count mismatch")
+	}
+	wanted := map[string]bool{}
+	for _, id := range expected {
+		wanted[id] = true
+	}
+	seen := map[string]bool{}
+	for index, raw := range values {
+		result, ok := raw.(map[string]any)
+		id := structuralControlText(result["control_set_id"])
+		if !ok || !wanted[id] || seen[id] {
+			return fmt.Errorf("R005 structural-control result %d set id mismatch", index)
+		}
+		if result["report_only"] != true || result["posting_allowed"] != false || result["execution_allowed"] != false ||
+			result["ready_to_upload"] != false || result["release_allowed"] != false || result["live_1c_allowed"] != false {
+			return fmt.Errorf("R005 structural-control result %s safety is incomplete", id)
+		}
+		seen[id] = true
 	}
 	return nil
 }

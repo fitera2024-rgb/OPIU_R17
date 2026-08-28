@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -319,11 +320,18 @@ func canonicalJSONSHA256(value any) (string, error) {
 	if err := json.Unmarshal(raw, &generic); err != nil {
 		return "", err
 	}
-	canonical, err := json.Marshal(generic)
-	if err != nil {
+	var canonical bytes.Buffer
+	encoder := json.NewEncoder(&canonical)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(generic); err != nil {
 		return "", err
 	}
-	digest := sha256.Sum256(canonical)
+	canonicalBytes := canonical.Bytes()
+	if len(canonicalBytes) == 0 || canonicalBytes[len(canonicalBytes)-1] != '\n' {
+		return "", errors.New("canonical JSON encoder did not write a trailing newline")
+	}
+	canonicalBytes = canonicalBytes[:len(canonicalBytes)-1]
+	digest := sha256.Sum256(canonicalBytes)
 	return strings.ToUpper(hex.EncodeToString(digest[:])), nil
 }
 

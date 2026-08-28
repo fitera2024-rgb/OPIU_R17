@@ -6,7 +6,10 @@ import { fileURLToPath } from "node:url";
 import { projectOwnerEconomicDecisions } from "./owner_decision_projection.mjs";
 import { appendOwnerDecisionExplanationSheet } from "./owner_decision_xlsx.mjs";
 import { loadEconomicRouteProofDocument } from "./economic_route_proof_binding.mjs";
-import { materializeStructuralControlSettingsForRun } from "./structural_control_settings_binding.mjs";
+import {
+  loadStructuralControlSettingsDocument,
+  materializeStructuralControlSettingsForRun,
+} from "./structural_control_settings_binding.mjs";
 import {
   materializeStructuralControlInventoryV3,
   planStructuralControlInventoryV3,
@@ -31,6 +34,8 @@ export function resolveDefaultStructuralControlSettingsCsv(moduleDir = MODULE_DI
 }
 
 const DEFAULT_STRUCTURAL_CONTROL_SETTINGS_CSV = resolveDefaultStructuralControlSettingsCsv();
+const STRUCTURAL_CONTROL_SELECTION_PROOF_MAX_BYTES = 1024 * 1024;
+const STRUCTURAL_CONTROL_SETTINGS_MAX_BYTES = 4 * 1024 * 1024;
 
 function text(value) { return String(value ?? "").trim(); }
 function normalizedText(value) {
@@ -168,6 +173,59 @@ async function sha256(filePath) {
 async function writeJson(filePath, value) {
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
+async function writeJsonImmutable(filePath, value) {
+  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+}
+
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function rejectReparsePathComponents(resolved, errorCode) {
+  const parsed = path.parse(resolved);
+  const relative = path.relative(parsed.root, resolved);
+  let current = parsed.root;
+  for (const component of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, component);
+    const stat = await fs.lstat(current);
+    if (stat.isSymbolicLink()) throw new Error(errorCode);
+  }
+}
+
+async function readBoundedRegularFile(requestedPath, maxBytes, errorCode) {
+  const resolved = path.resolve(text(requestedPath));
+  if (!resolved || !Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error(errorCode);
+  await rejectReparsePathComponents(resolved, errorCode);
+  const pathBefore = await fs.lstat(resolved);
+  if (!pathBefore.isFile() || pathBefore.isSymbolicLink() || pathBefore.size < 1 || pathBefore.size > maxBytes) {
+    throw new Error(errorCode);
+  }
+  const handle = await fs.open(resolved, "r");
+  try {
+    const handleBefore = await handle.stat();
+    if (!handleBefore.isFile() || handleBefore.size < 1 || handleBefore.size > maxBytes ||
+        !sameFileIdentity(pathBefore, handleBefore)) {
+      throw new Error(errorCode);
+    }
+    const buffer = Buffer.alloc(Number(handleBefore.size) + 1);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    const handleAfter = await handle.stat();
+    const pathAfter = await fs.lstat(resolved);
+    if (offset !== Number(handleBefore.size) || handleAfter.size !== handleBefore.size ||
+        !sameFileIdentity(handleBefore, handleAfter) || !sameFileIdentity(handleAfter, pathAfter) ||
+        pathAfter.isSymbolicLink() || !pathAfter.isFile()) {
+      throw new Error(errorCode);
+    }
+    return Object.freeze({ resolved, bytes: buffer.subarray(0, offset), size: offset });
+  } finally {
+    await handle.close();
+  }
+}
 async function pathKind(filePath) {
   try {
     const stat = await fs.stat(filePath);
@@ -235,19 +293,152 @@ export async function coreArgsWithOwnerEconomicRouteProof(argv, {
   return Object.freeze({ argv: Object.freeze(result), selection });
 }
 
+function withoutWrapperStructuralControlArguments(argv) {
+  const wrapperOnly = new Set([
+    "--structural-control-authority",
+    "--structural-control-settings-csv",
+    "--structural-control-selection-proof",
+  ]);
+  const result = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (!wrapperOnly.has(token)) {
+      result.push(token);
+      continue;
+    }
+    const next = argv[index + 1];
+    if (next && !next.startsWith("--")) index += 1;
+  }
+  return result;
+}
+
+async function readServiceStructuralControlSelectionProof(requestedPath, expectedSettingsPath = "") {
+  const proofFile = await readBoundedRegularFile(
+    requestedPath,
+    STRUCTURAL_CONTROL_SELECTION_PROOF_MAX_BYTES,
+    "STRUCTURAL_CONTROL_SELECTION_PROOF_UNSAFE",
+  );
+  const value = JSON.parse(proofFile.bytes.toString("utf8").replace(/^\uFEFF/, ""));
+  const materializationStatus = text(value?.status);
+  const active = materializationStatus === "EXACT_ORGANIZATION_MATERIALIZED";
+  if (!["opiu-service-structural-control-selection.v1", "opiu-service-structural-control-verification.v1"].includes(value?.schema)
+      || value?.authority !== "service-csv"
+      || !["EXACT_ORGANIZATION_MATERIALIZED", "NO_EXACT_ORGANIZATION", "NO_ACTIVE_SETS"].includes(materializationStatus)
+      || !text(value?.source_path)
+      || !/^[0-9A-F]{64}$/u.test(text(value?.source_sha256).toUpperCase())
+      || !Number.isSafeInteger(Number(value?.source_size))
+      || Number(value?.source_size) < 1
+      || (active && value?.schema !== "opiu-service-structural-control-verification.v1")
+      || (!active && value?.schema !== "opiu-service-structural-control-selection.v1")) {
+    throw new Error("STRUCTURAL_CONTROL_SELECTION_PROOF_INVALID");
+  }
+  const expected = text(expectedSettingsPath) ? path.resolve(expectedSettingsPath) : "";
+  if (active && (
+    !expected || path.resolve(text(value.path)) !== expected || path.resolve(text(value.settings_path)) !== expected ||
+    !/^[0-9A-F]{64}$/u.test(text(value.settings_sha256).toUpperCase()) ||
+    !Number.isSafeInteger(Number(value.settings_size)) || Number(value.settings_size) < 1 ||
+    !text(value.settings_id) || !Number.isSafeInteger(Number(value.set_count)) || Number(value.set_count) < 1 ||
+    !Array.isArray(value.set_ids) || value.set_ids.length !== Number(value.set_count) ||
+    new Set(value.set_ids.map(text)).size !== value.set_ids.length || value.set_ids.some((id) => !text(id)) ||
+    !/^[0-9A-F]{64}$/u.test(text(value.sets_sha256).toUpperCase())
+  )) {
+    throw new Error("STRUCTURAL_CONTROL_SELECTION_PROOF_SETTINGS_INVALID");
+  }
+  if (!active && (text(value.path) || expected)) {
+    throw new Error("STRUCTURAL_CONTROL_SELECTION_PROOF_EMPTY_PATH_INVALID");
+  }
+  return Object.freeze({
+    materialization_status: materializationStatus,
+    source_path: path.resolve(value.source_path),
+    source_sha256: text(value.source_sha256).toUpperCase(),
+    source_size: Number(value.source_size),
+    selection_proof_path: proofFile.resolved,
+    selection_proof_sha256: crypto.createHash("sha256").update(proofFile.bytes).digest("hex").toUpperCase(),
+    selection_proof_size: proofFile.size,
+    ...(active ? {
+      verified_settings_path: path.resolve(value.settings_path),
+      verified_settings_sha256: text(value.settings_sha256).toUpperCase(),
+      verified_settings_size: Number(value.settings_size),
+      verified_settings_id: text(value.settings_id),
+      verified_set_count: Number(value.set_count),
+      verified_set_ids: Object.freeze(value.set_ids.map(text)),
+      verified_sets_sha256: text(value.sets_sha256).toUpperCase(),
+    } : {}),
+  });
+}
+
 export async function coreArgsWithUserStructuralControlSettings(argv, {
   csvPath = process.env.OPIU_STRUCTURAL_CONTROL_SETTINGS_CSV || DEFAULT_STRUCTURAL_CONTROL_SETTINGS_CSV,
 } = {}) {
   const args = parseArgs(argv);
-  if (text(args["structural-control-settings"])) {
+  const flagCount = (flag) => argv.filter((token) => token === flag).length;
+  const authorityCount = flagCount("--structural-control-authority");
+  const settingsCount = flagCount("--structural-control-settings");
+  const csvCount = flagCount("--structural-control-settings-csv");
+  const selectionProofCount = flagCount("--structural-control-selection-proof");
+  if (authorityCount > 1 || settingsCount > 1 || csvCount > 1 || selectionProofCount > 1) {
+    throw new Error("STRUCTURAL_CONTROL_AUTHORITY_DUPLICATE");
+  }
+  const authority = text(args["structural-control-authority"]);
+  if (authority) {
+    if (authorityCount !== 1 || !["service-json", "service-csv", "service-none"].includes(authority)) {
+      throw new Error(`STRUCTURAL_CONTROL_AUTHORITY_INVALID:${authority}`);
+    }
+    if (authority === "service-json") {
+      if (settingsCount !== 1 || csvCount !== 0 || !text(args["structural-control-settings"])) {
+        throw new Error("STRUCTURAL_CONTROL_SERVICE_JSON_ARGUMENT_INVALID");
+      }
+      const serviceSelectionProof = selectionProofCount === 1
+        ? await readServiceStructuralControlSelectionProof(
+          args["structural-control-selection-proof"],
+          args["structural-control-settings"],
+        )
+        : null;
+      return Object.freeze({
+        argv: Object.freeze(withoutWrapperStructuralControlArguments(argv)),
+        selection: Object.freeze({
+          authority,
+          status: "EXPLICIT_CLI_SETTINGS",
+          path: path.resolve(args["structural-control-settings"]),
+          ...serviceSelectionProof,
+        }),
+      });
+    }
+    if (authority === "service-none") {
+      if (settingsCount !== 0 || csvCount !== 0) {
+        throw new Error("STRUCTURAL_CONTROL_SERVICE_NONE_ARGUMENT_INVALID");
+      }
+      const serviceSelectionProof = selectionProofCount === 1
+        ? await readServiceStructuralControlSelectionProof(args["structural-control-selection-proof"])
+        : null;
+      return Object.freeze({
+        argv: Object.freeze(withoutWrapperStructuralControlArguments(argv)),
+        selection: Object.freeze({ authority, status: "SERVICE_NO_SETTINGS", path: "", ...serviceSelectionProof }),
+      });
+    }
+    if (selectionProofCount !== 0) throw new Error("STRUCTURAL_CONTROL_SERVICE_CSV_SELECTION_PROOF_INVALID");
+    if (settingsCount !== 0 || csvCount !== 1 || !text(args["structural-control-settings-csv"])) {
+      throw new Error("STRUCTURAL_CONTROL_SERVICE_CSV_ARGUMENT_INVALID");
+    }
+    csvPath = path.resolve(args["structural-control-settings-csv"]);
+  } else if (selectionProofCount !== 0) {
+    throw new Error("STRUCTURAL_CONTROL_SELECTION_PROOF_WITHOUT_SERVICE_AUTHORITY");
+  } else if (settingsCount === 1 && text(args["structural-control-settings"])) {
     return Object.freeze({
       argv: Object.freeze([...argv]),
-      selection: Object.freeze({ status: "EXPLICIT_CLI_SETTINGS", path: path.resolve(args["structural-control-settings"]) }),
+      selection: Object.freeze({ authority: "standalone", status: "EXPLICIT_CLI_SETTINGS", path: path.resolve(args["structural-control-settings"]) }),
     });
+  } else if (settingsCount !== 0) {
+    throw new Error("STRUCTURAL_CONTROL_SETTINGS_ARGUMENT_INVALID");
+  } else if (csvCount === 1 && text(args["structural-control-settings-csv"])) {
+    csvPath = path.resolve(args["structural-control-settings-csv"]);
+  } else if (csvCount !== 0) {
+    throw new Error("STRUCTURAL_CONTROL_SETTINGS_CSV_ARGUMENT_INVALID");
   }
   const kind = await pathKind(csvPath);
   if (kind === "missing") {
-    return Object.freeze({ argv: Object.freeze([...argv]), selection: Object.freeze({ status: "NO_USER_CSV", path: "" }) });
+    if (authority === "service-csv") throw new Error(`STRUCTURAL_CONTROL_SERVICE_CSV_MISSING:${path.resolve(csvPath)}`);
+    return Object.freeze({ argv: Object.freeze([...argv]), selection: Object.freeze({ authority: "standalone", status: "NO_USER_CSV", path: "" }) });
   }
   if (kind !== "file") throw new Error(`STRUCTURAL_CONTROL_SETTINGS_CSV_INVALID:${path.resolve(csvPath)}`);
   const reportPath = text(args.output) ? path.resolve(args.output) : "";
@@ -260,9 +451,12 @@ export async function coreArgsWithUserStructuralControlSettings(argv, {
     period: args.period,
     outputPath: settingsPath,
   });
-  const result = [...argv];
+  const result = withoutWrapperStructuralControlArguments(argv);
   if (selection.path) result.push("--structural-control-settings", selection.path);
-  return Object.freeze({ argv: Object.freeze(result), selection });
+  return Object.freeze({
+    argv: Object.freeze(result),
+    selection: Object.freeze({ ...selection, authority: authority || "standalone" }),
+  });
 }
 function nonzeroRows(payload) {
   const structuralControlGroups = closedStructuralControlGroups(payload);
@@ -326,7 +520,13 @@ function caseSummary(projection) {
   }));
 }
 
-export async function enrichOwnerDecisionOutputs({ reportPath, codexPath, manifestPath = "", policyPath = POLICY_PATH } = {}) {
+export async function enrichOwnerDecisionOutputs({
+  reportPath,
+  codexPath,
+  manifestPath = "",
+  policyPath = POLICY_PATH,
+  structuralControlSettingsSelection = null,
+} = {}) {
   if (!reportPath || !codexPath) throw new Error("OWNER_DECISION_OUTPUT_PATH_REQUIRED");
   const [payloadText, policyText] = await Promise.all([fs.readFile(codexPath, "utf8"), fs.readFile(policyPath, "utf8")]);
   const payload = JSON.parse(payloadText.replace(/^\uFEFF/, ""));
@@ -352,6 +552,30 @@ export async function enrichOwnerDecisionOutputs({ reportPath, codexPath, manife
     policy_sha256: crypto.createHash("sha256").update(policyText).digest("hex").toUpperCase(),
     explanation_sheet: worksheet.sheet_name,
   };
+  if (structuralControlSettingsSelection) {
+    const source = structuralControlSettingsSelection.source
+      ?? structuralControlSettingsSelection.document?.source
+      ?? null;
+    payload.structural_control_settings_selection = {
+      authority: text(structuralControlSettingsSelection.authority),
+      status: text(structuralControlSettingsSelection.status),
+      path: text(structuralControlSettingsSelection.path),
+      materialization_status: text(structuralControlSettingsSelection.materialization_status),
+      source_path: text(structuralControlSettingsSelection.source_path ?? source?.path),
+      source_sha256: text(structuralControlSettingsSelection.source_sha256 ?? source?.sha256).toUpperCase(),
+      source_size: Number(structuralControlSettingsSelection.source_size ?? source?.size ?? 0),
+      selection_proof_path: text(structuralControlSettingsSelection.selection_proof_path),
+      selection_proof_sha256: text(structuralControlSettingsSelection.selection_proof_sha256).toUpperCase(),
+      selection_proof_size: Number(structuralControlSettingsSelection.selection_proof_size ?? 0),
+      verified_settings_path: text(structuralControlSettingsSelection.verified_settings_path),
+      verified_settings_sha256: text(structuralControlSettingsSelection.verified_settings_sha256).toUpperCase(),
+      verified_settings_size: Number(structuralControlSettingsSelection.verified_settings_size ?? 0),
+      verified_settings_id: text(structuralControlSettingsSelection.verified_settings_id),
+      verified_set_count: Number(structuralControlSettingsSelection.verified_set_count ?? 0),
+      verified_set_ids: [...(structuralControlSettingsSelection.verified_set_ids ?? [])].map(text),
+      verified_sets_sha256: text(structuralControlSettingsSelection.verified_sets_sha256).toUpperCase(),
+    };
+  }
   const closedGroups = closedStructuralControlGroups(payload);
   payload.rows = (payload.rows ?? []).map((row) => {
     const presentationBlockExempt = isOwnerPresentationBlockExempt(
@@ -443,8 +667,123 @@ async function runCore(argv) {
   });
 }
 
+async function materializeServiceStructuralControlSettings(argv) {
+  const args = parseArgs(argv);
+  const csvPath = text(args["structural-control-settings-csv"]);
+  const outputPath = text(args.output);
+  const selectionOutput = text(args["selection-output"]);
+  if (!csvPath || !outputPath || !selectionOutput) {
+    throw new Error("STRUCTURAL_CONTROL_SERVICE_MATERIALIZATION_ARGUMENT_REQUIRED");
+  }
+  const selection = await materializeStructuralControlSettingsForRun({
+    csvPath,
+    organization: args.organization,
+    period: args.period,
+    outputPath,
+  });
+  const source = selection.source ?? selection.document?.source ?? null;
+  const proof = {
+    schema: "opiu-service-structural-control-selection.v1",
+    authority: "service-csv",
+    status: text(selection.status),
+    path: text(selection.path),
+    source_path: text(source?.path),
+    source_sha256: text(source?.sha256).toUpperCase(),
+    source_size: Number(source?.size ?? 0),
+  };
+  await writeJsonImmutable(selectionOutput, proof);
+  console.log(JSON.stringify(proof));
+}
+
+export async function verifyServiceStructuralControlSettings({
+  csvPath,
+  settingsPath,
+  organization,
+  period,
+  outputPath,
+} = {}) {
+  if (![csvPath, settingsPath, organization, period, outputPath].every((value) => text(value))) {
+    throw new Error("STRUCTURAL_CONTROL_SERVICE_VERIFICATION_ARGUMENT_REQUIRED");
+  }
+  const settingsBefore = await readBoundedRegularFile(
+    settingsPath,
+    STRUCTURAL_CONTROL_SETTINGS_MAX_BYTES,
+    "STRUCTURAL_CONTROL_SERVICE_SETTINGS_UNSAFE",
+  );
+  const sourceBefore = await readBoundedRegularFile(
+    csvPath,
+    STRUCTURAL_CONTROL_SELECTION_PROOF_MAX_BYTES,
+    "STRUCTURAL_CONTROL_SERVICE_CSV_UNSAFE",
+  );
+  const loaded = await loadStructuralControlSettingsDocument(settingsBefore.resolved, { organization, period });
+  const settingsAfter = await readBoundedRegularFile(
+    settingsPath,
+    STRUCTURAL_CONTROL_SETTINGS_MAX_BYTES,
+    "STRUCTURAL_CONTROL_SERVICE_SETTINGS_UNSAFE",
+  );
+  const sourceAfter = await readBoundedRegularFile(
+    csvPath,
+    STRUCTURAL_CONTROL_SELECTION_PROOF_MAX_BYTES,
+    "STRUCTURAL_CONTROL_SERVICE_CSV_UNSAFE",
+  );
+  const settingsSHA = crypto.createHash("sha256").update(settingsBefore.bytes).digest("hex").toUpperCase();
+  const sourceSHA = crypto.createHash("sha256").update(sourceBefore.bytes).digest("hex").toUpperCase();
+  if (settingsSHA !== crypto.createHash("sha256").update(settingsAfter.bytes).digest("hex").toUpperCase() ||
+      sourceSHA !== crypto.createHash("sha256").update(sourceAfter.bytes).digest("hex").toUpperCase() ||
+      loaded.audit?.status !== "ACTIVE_EXACT_ORGANIZATION_MONTH" ||
+      path.resolve(text(loaded.audit?.input_path)) !== settingsBefore.resolved ||
+      text(loaded.audit?.input_sha256).toUpperCase() !== settingsSHA || Number(loaded.audit?.input_size) !== settingsBefore.size ||
+      text(loaded.audit?.source_sha256).toUpperCase() !== sourceSHA || Number(loaded.audit?.source_size) !== sourceBefore.size ||
+      path.resolve(text(loaded.document?.source?.path)) !== sourceBefore.resolved) {
+    throw new Error("STRUCTURAL_CONTROL_SERVICE_VERIFICATION_DRIFT");
+  }
+  const sets = loaded.document?.structural_group_control_sets;
+  const setIDs = Array.isArray(sets) ? sets.map((set) => text(set?.id)) : [];
+  if (setIDs.length < 1 || setIDs.some((id) => !id) || new Set(setIDs).size !== setIDs.length) {
+    throw new Error("STRUCTURAL_CONTROL_SERVICE_VERIFICATION_SETS_INVALID");
+  }
+  const proof = {
+    schema: "opiu-service-structural-control-verification.v1",
+    authority: "service-csv",
+    status: "EXACT_ORGANIZATION_MATERIALIZED",
+    path: settingsBefore.resolved,
+    source_path: sourceBefore.resolved,
+    source_sha256: sourceSHA,
+    source_size: sourceBefore.size,
+    settings_path: settingsBefore.resolved,
+    settings_sha256: settingsSHA,
+    settings_size: settingsBefore.size,
+    settings_id: text(loaded.document.settings_id),
+    set_count: setIDs.length,
+    set_ids: setIDs,
+    sets_sha256: crypto.createHash("sha256").update(JSON.stringify(sets)).digest("hex").toUpperCase(),
+  };
+  await writeJsonImmutable(path.resolve(outputPath), proof);
+  return Object.freeze(proof);
+}
+
+async function verifyServiceStructuralControlSettingsCommand(argv) {
+  const args = parseArgs(argv);
+  const proof = await verifyServiceStructuralControlSettings({
+    csvPath: args["structural-control-settings-csv"],
+    settingsPath: args["structural-control-settings"],
+    organization: args.organization,
+    period: args.period,
+    outputPath: args["verification-output"],
+  });
+  console.log(JSON.stringify(proof));
+}
+
 async function main() {
   const argv = process.argv.slice(2);
+  if (argv[0] === "materialize-structural-control-settings") {
+    await materializeServiceStructuralControlSettings(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "verify-structural-control-settings") {
+    await verifyServiceStructuralControlSettingsCommand(argv.slice(1));
+    return;
+  }
   const args = parseArgs(argv);
   const reportPath = text(args.output) ? path.resolve(args.output) : "";
   if (!reportPath) throw new Error("OWNER_DECISION_R005_OUTPUT_REQUIRED");
@@ -453,7 +792,12 @@ async function main() {
   await runCore(structuralInput.argv);
   const codexPath = reportPath.replace(/\.xlsx$/i, ".codex-input.json");
   const manifestPath = reportPath.replace(/\.xlsx$/i, ".manifest.json");
-  const result = await enrichOwnerDecisionOutputs({ reportPath, codexPath, manifestPath });
+  const result = await enrichOwnerDecisionOutputs({
+    reportPath,
+    codexPath,
+    manifestPath,
+    structuralControlSettingsSelection: structuralInput.selection,
+  });
   console.log(JSON.stringify({
     owner_decision_wrapper: "R005",
     cases: result.projection.cases.length,

@@ -293,11 +293,11 @@ func (p *Pipeline) executeExternal(run Run, contextValue Context, erpPath, intal
 	}
 	r005Command := appendEmptyArticleBindingSettingsArgument(p.commands["R005"], emptyArticleBindingSettingsPath)
 	r005Command = appendArticleApprovalSettingsArgument(r005Command, articleApprovalSettingsPath)
-	if structuralControlSettingsPath != "" && hasStructuralControlSettingsArgument(r005Command) {
-		finish(RunFailed, "R005_SETTINGS", "Команда сверки содержит повторную настройку группировки блоков")
+	r005Command, err = appendStructuralControlAuthorityArguments(r005Command, structuralControlAudit, structuralControlSettingsPath)
+	if err != nil {
+		finish(RunFailed, "R005_SETTINGS", "Команда сверки содержит неоднозначный источник настройки группировки блоков")
 		return
 	}
-	r005Command = appendStructuralControlSettingsArgument(r005Command, structuralControlSettingsPath)
 	r005Command = appendStructuralControlScopeArguments(r005Command)
 	if !p.updateStage(&run, "R005") {
 		return
@@ -388,6 +388,19 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 		finish(RunFailed, "R005_SETTINGS", "Настройка группировки блоков недоступна или повреждена")
 		return
 	}
+	var packagedStructuralControlSettingsPath string
+	packagedStructuralControlSettingsPath, structuralControlAudit, err = materializePackagedStructuralControlSettings(
+		run, contextValue, runDir,
+		packagedStructuralControlSettingsCSV(adapter.Root), adapter.Node, adapter.R005Script,
+		structuralControlAudit,
+	)
+	if err != nil {
+		finish(RunFailed, "R005_SETTINGS", "Пакетная настройка группировки блоков недоступна или повреждена")
+		return
+	}
+	if packagedStructuralControlSettingsPath != "" {
+		structuralControlSettingsPath = packagedStructuralControlSettingsPath
+	}
 	if err := bindStructuralControlRunManifest(run, contextValue, runDir, structuralControlAudit); err != nil {
 		finish(RunFailed, "R005_SETTINGS", "Настройка группировки блоков не привязана к паспорту запуска")
 		return
@@ -414,11 +427,11 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 	}
 	r005Command = appendEmptyArticleBindingSettingsArgument(r005Command, emptyArticleBindingSettingsPath)
 	r005Command = appendArticleApprovalSettingsArgument(r005Command, articleApprovalSettingsPath)
-	if structuralControlSettingsPath != "" && hasStructuralControlSettingsArgument(r005Command) {
-		finish(RunFailed, "R005_SETTINGS", "Команда сверки содержит повторную настройку группировки блоков")
+	r005Command, err = appendStructuralControlAuthorityArguments(r005Command, structuralControlAudit, structuralControlSettingsPath)
+	if err != nil {
+		finish(RunFailed, "R005_SETTINGS", "Команда сверки содержит неоднозначный источник настройки группировки блоков")
 		return
 	}
-	r005Command = appendStructuralControlSettingsArgument(r005Command, structuralControlSettingsPath)
 	if !p.updateStage(&run, "R005") {
 		return
 	}

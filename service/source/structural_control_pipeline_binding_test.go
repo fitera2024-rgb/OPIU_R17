@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -40,6 +41,12 @@ func TestRuntimeR005ReceivesExactActiveUIFixedStructuralSettings(t *testing.T) {
 		if !found || settingsPath == "" {
 			t.Fatalf("active fixed UI sets were lost from R005 argv: %#v", command)
 		}
+		if authority, found := commandArgument(command, structuralControlAuthorityFlag); !found || authority != structuralControlAuthorityServiceJSON {
+			t.Fatalf("active fixed UI sets lost service-json authority: %#v", command)
+		}
+		if _, found := commandArgument(command, structuralControlSettingsCSVFlag); found {
+			t.Fatalf("active fixed UI settings unexpectedly received a CSV authority: %#v", command)
+		}
 		assertUIFixedStructuralSettingsDocument(t, settingsPath, run, contextValue, 1)
 		assertNodeLoadsUIFixedStructuralSettings(t, settingsPath, run, contextValue)
 		return errors.New("intentional stop after argv verification")
@@ -71,6 +78,9 @@ func TestExternalR005ReceivesExactActiveUIFixedStructuralSettings(t *testing.T) 
 		if !found || settingsPath == "" {
 			t.Fatalf("external R005 lost fixed UI settings: %#v", command)
 		}
+		if authority, found := commandArgument(command, structuralControlAuthorityFlag); !found || authority != structuralControlAuthorityServiceJSON {
+			t.Fatalf("external R005 lost service-json authority: %#v", command)
+		}
 		for _, key := range []string{"--organization-id", "--organization-name", "--organization-path", "--run-id", "--context-id"} {
 			if value, ok := commandArgument(command, key); !ok || value == "" {
 				t.Fatalf("external R005 lost exact scope %s: %#v", key, command)
@@ -80,6 +90,119 @@ func TestExternalR005ReceivesExactActiveUIFixedStructuralSettings(t *testing.T) 
 		return errors.New("intentional stop after external argv verification")
 	}
 	pipeline.executeExternal(run, contextValue, "erp.xlsx", "intalev.xlsx", runDir, func(RunStatus, string, string) {})
+}
+
+func TestExternalR005NoActiveSettingsUsesOnlyServiceNone(t *testing.T) {
+	context := newStructuralSourceTestContext(t)
+	run, _ := context.store.Run(context.runID)
+	contextValue, _ := context.store.Context(context.contextID)
+	runDir := filepath.Join(context.store.RunsDir(), run.ID)
+	pipeline := &Pipeline{
+		store: context.store,
+		commands: map[string][]string{
+			"R005": {"r005-command"}, "RULES": {"rules-command"}, "R001": {"r001-command"},
+		},
+		active: map[string]struct{}{},
+	}
+	pipeline.runner = func(stage string, command []string, _ map[string]string, _, _ string) error {
+		if stage != "R005" {
+			t.Fatalf("unexpected stage %s", stage)
+		}
+		if authority, found := commandArgument(command, structuralControlAuthorityFlag); !found || authority != structuralControlAuthorityServiceNone {
+			t.Fatalf("external no-active R005 did not receive service-none: %#v", command)
+		}
+		for _, forbidden := range []string{"--structural-control-settings", structuralControlSettingsCSVFlag, structuralControlSelectionProofFlag} {
+			if _, found := commandArgument(command, forbidden); found {
+				t.Fatalf("external no-active R005 received forbidden %s: %#v", forbidden, command)
+			}
+		}
+		binding, err := readStructuralControlRunManifest(run, contextValue, runDir)
+		if err != nil || binding.Status != "NO_ACTIVE_UI_FIXED_SETS" {
+			t.Fatalf("external no-active manifest drift: binding=%#v err=%v", binding, err)
+		}
+		return errors.New("intentional stop after external service-none verification")
+	}
+	pipeline.executeExternal(run, contextValue, "erp.xlsx", "intalev.xlsx", runDir, func(RunStatus, string, string) {})
+}
+
+func TestRuntimeR005PrebindsPackagedStructuralControlCSVWhenUIRegistryIsEmpty(t *testing.T) {
+	context := newStructuralSourceTestContext(t)
+	run, _ := context.store.Run(context.runID)
+	contextValue, _ := context.store.Context(context.contextID)
+	runDir := filepath.Join(context.store.RunsDir(), run.ID)
+	packageRoot := t.TempDir()
+	runtimeRoot := filepath.Join(packageRoot, "runtime")
+	if err := os.MkdirAll(filepath.Join(packageRoot, "user-settings"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(packageRoot, "user-settings", structuralControlPackagedCSVFilename)
+	sourceBytes := []byte("Организация;Название группы;Коды верхних блоков;Активна\n9 Управляющая компания;Финансовые и внереализационные расходы;R045,R055;Да\n")
+	if err := os.WriteFile(sourcePath, sourceBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := &Pipeline{
+		store:  context.store,
+		active: map[string]struct{}{},
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("node runtime required for packaged structural-control test")
+	}
+	wrapper, err := filepath.Abs(filepath.Join("..", "..", "modules", "reconciliation", "source", "service_r005_owner_wrapper.mjs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeline.runtime = &RuntimeAdapter{Root: runtimeRoot, Node: node, R005Script: wrapper}
+	pipeline.runner = func(stage string, command []string, _ map[string]string, _, _ string) error {
+		if stage != "R005" {
+			t.Fatalf("unexpected stage %s", stage)
+		}
+		authority, found := commandArgument(command, structuralControlAuthorityFlag)
+		if !found || authority != structuralControlAuthorityServiceJSON {
+			t.Fatalf("packaged CSV did not become the explicit Service authority: %#v", command)
+		}
+		settingsPath, found := commandArgument(command, "--structural-control-settings")
+		if !found || settingsPath == "" || sameFilesystemPath(settingsPath, sourcePath) {
+			t.Fatalf("R005 did not receive a private run-owned settings JSON: %#v", command)
+		}
+		selectionPath, found := commandArgument(command, structuralControlSelectionProofFlag)
+		if !found || selectionPath == "" {
+			t.Fatalf("R005 did not receive the canonical selection proof: %#v", command)
+		}
+		if _, found := commandArgument(command, structuralControlSettingsCSVFlag); found {
+			t.Fatalf("packaged CSV leaked past Service materialization: %#v", command)
+		}
+		binding, err := readStructuralControlRunManifest(run, contextValue, runDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if binding.Status != structuralControlPackagedCSVStatus || binding.SourceCSV.Size != int64(len(sourceBytes)) ||
+			!strings.EqualFold(binding.SourceCSV.SHA256, structuralControlBytesSHA256(sourceBytes)) ||
+			!sameFilesystemPath(settingsPath, filepath.Join(runDir, filepath.FromSlash(binding.Settings.Path))) ||
+			!sameFilesystemPath(selectionPath, filepath.Join(runDir, filepath.FromSlash(binding.Selection.Path))) {
+			t.Fatalf("manifest did not pre-bind exact packaged CSV: %#v", binding)
+		}
+		return errors.New("intentional stop after packaged CSV verification")
+	}
+	pipeline.executeRuntime(run, contextValue, "erp.xlsx", strings.Repeat("A", 64), "intalev.xlsx", runDir,
+		func(RunStatus, string, string) {})
+}
+
+func TestStructuralControlAuthorityRejectsPreexistingOrMixedArguments(t *testing.T) {
+	audit := structuralControlPipelineAudit{Status: "NO_ACTIVE_UI_FIXED_SETS"}
+	command, err := appendStructuralControlAuthorityArguments([]string{"r005"}, audit, "")
+	if err != nil || !reflect.DeepEqual(command, []string{"r005", structuralControlAuthorityFlag, structuralControlAuthorityServiceNone}) {
+		t.Fatalf("external no-active path did not receive exact service-none authority: command=%#v err=%v", command, err)
+	}
+	for _, command := range [][]string{
+		{"r005", structuralControlAuthorityFlag, structuralControlAuthorityServiceNone},
+		{"r005", structuralControlSettingsCSVFlag, "preexisting.csv"},
+		{"r005", "--structural-control-settings", "preexisting.json"},
+	} {
+		if _, err := appendStructuralControlAuthorityArguments(command, audit, ""); err == nil {
+			t.Fatalf("preexisting structural-control authority was accepted: %#v", command)
+		}
+	}
 }
 
 func TestUIFixedStructuralSettingsMaterializeSeveralDistinctSetsAndFallbackWhenAbsent(t *testing.T) {

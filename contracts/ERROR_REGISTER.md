@@ -370,15 +370,15 @@
 ### PACK-001 — переносимый EXE не получает authoritative каталог организаций
 
 - Дата: `28.08.2026`
-- Статус: `DIAGNOSED`
+- Статус: `IMPLEMENTED`
 - Сообщил: независимая read-only проверка финальной упаковки.
 - Наблюдаемое поведение: `NewPipeline` в packaged-runtime без внешних adapters всегда открывает `runtime/data/defaults/organizations.json`, но `r17_portable_policy.json` и builder переносят только source-модули и `resources/reference`; каталога в Git нет. Такой EXE должен завершиться до `/api/health` и `/api/organizations` ошибкой `load authoritative organization catalog`.
 - Ожидаемое поведение: exact authoritative каталог организаций входит в подписанный runtime, учитывается source/runtime inventory и доступен по `runtime/data/defaults/organizations.json` после распаковки в любой короткий путь; `/api/organizations` возвращает selectable `ERP-000000224` и `ERP-000000076` с их верхними уровнями.
 - Затронутые пункты контракта: §§1, 3.1, 11, 13–14; A01, A03, A10, A13–A14.
 - Допустимый scope: exact resource `data/defaults/organizations.json`, packaging policy/builder/verifier/tests и production smoke; финансовая логика R005/R001, Rules Service и safety gates не меняются.
 - Обязательный регрессионный тест: чистый A/B build включает каталог с exact SHA-256; independent verifier и два relocation-smoke запуска проходят; `/api/health` и `/api/bootstrap` подтверждают `REPORT_ONLY`, `rules_service=false`, posting/live/executed `0`; `/api/organizations` содержит оба контрольных selectable узла.
-- Реализация: ожидается.
-- Протокол проверки: ожидается.
+- Реализация: commit `5478aae7fe2258b826d9ed911b7d49364ba795a3` добавил exact `data/defaults/organizations.json`, включил его в policy/builder/source+runtime inventory и independent verifier. Каталог устанавливается в `runtime/data/defaults/organizations.json`; verifier требует контрольные selectable `ERP-000000224` и `ERP-000000076`.
+- Протокол проверки: packaging unit/integration suite commit прошёл; детерминированная A/B-сборка `a8820e9` ранее дала побайтово одинаковые архивы и `2/2` relocation smoke, `/api/organizations` содержал обе контрольные организации. Повторный package-smoke выполняется для итогового commit.
 
 ### R005-011 — допустимые уровни Excel и `/` внутри статьи ошибочно блокируют иерархию Сахалина
 
@@ -405,3 +405,42 @@
 - Обязательный регрессионный тест: Codex input и manifest содержат одинаковые `output_path`/`output_sha256`; SHA соответствует финальной книге; Codex SHA в manifest соответствует финальному Codex input; UK и Сахалин проходят current-run anchor, а stale/missing/wrong path/SHA блокируются.
 - Реализация: core создаёт обе пары `report_*`/`output_*`; owner-wrapper после финального изменения XLSX повторно вычисляет SHA и атомарно перепривязывает Codex input, затем вычисляет SHA Codex input и перепривязывает manifest. Только после этого материализуются inventory/binding; строгий Go-validator не изменён.
 - Протокол проверки: helper/inventory regression `6/6 PASS`; полный R005 `231 PASS`, `0 FAIL`, `1` штатный skip; полный R001 `256/256 PASS`; полный Go service `PASS`. На реальном Сахалине Codex/manifest paths совпали с финальными файлами, обе report/output SHA совпали с фактическим XLSX, manifest Codex SHA совпал с фактическим Codex input; inventory v3 `VERIFIED` и `verification_blockers=[]`.
+
+### R005-013 — Node и Go по-разному вычисляют SHA структурного инвентаря с `<пустое значение>`
+
+- Дата: `28.08.2026`
+- Статус: `IMPLEMENTED`
+- Сообщил: независимый packaged-EXE acceptance 9 УК за ноябрь и 3 Сахалин за январь.
+- Наблюдаемое поведение: R005 создаёт structural inventory v3 со статусом `VERIFIED`, но Service блокирует его как `member digest mismatch`. JavaScript сохраняет символы `<` и `>` в canonical JSON, а Go `encoding/json` по умолчанию кодирует их как `\u003c` и `\u003e`; одинаковый member `<пустое значение>` получает разные SHA-256.
+- Ожидаемое поведение: Node и Go вычисляют один SHA-256 для одного canonical JSON независимо от наличия HTML-символов; фактическое изменение member по-прежнему блокируется.
+- Затронутые пункты контракта: §§4–6, 10–14; A01–A04, A10–A14.
+- Допустимый scope: Go canonical JSON helper и focused regressions; hierarchy, authority, Rules Service, финансовая логика и safety gates не меняются.
+- Обязательный регрессионный тест: member с `<пустое значение>` проходит JS↔Go SHA и v3 anchor; изменение любого поля даёт digest mismatch; packaged UK November и Сахалин проходят `R005_INVENTORY`.
+- Реализация: Go canonical JSON encoder использует `SetEscapeHTML(false)` и нормализует ровно один завершающий перевод строки, совпадая с Node для `<пустое значение>`; изменение member по-прежнему приводит к digest mismatch.
+- Протокол проверки: независимый Node↔Go SHA для `<пустое значение>` — `19B235E5449644998949069786D5056E5DE3474F1A150128022BD74724253ABB`; focused parity/tamper `-count=3` PASS; полный R005 `238 PASS`, `0 FAIL`, `1` штатный skip; Windows amd64 test compile PASS.
+
+### R005-014 — Service manifest и R005 используют разные источники настройки группировки
+
+- Дата: `28.08.2026`
+- Статус: `IMPLEMENTED`
+- Сообщил: независимый packaged-EXE acceptance 9 УК за октябрь.
+- Наблюдаемое поведение: Service фиксирует в run manifest `NO_ACTIVE_UI_FIXED_SETS/0`, но owner-wrapper без переданного settings-файла самостоятельно применяет пакетный CSV как `ACTIVE_EXACT_ORGANIZATION_MONTH/1`. Проверка proof закономерно блокирует несовпадающие authorities до R001.
+- Ожидаемое поведение: Service manifest, фактический аргумент R005 и Codex proof описывают один и тот же неизменяемый источник настройки; скрытый fallback не может изменить authority после фиксации manifest.
+- Затронутые пункты контракта: §§4–6, 10–14; A01–A04, A09–A14.
+- Допустимый scope: exact materialization/argument/binding path настройки structural control и focused regressions; экономические суммы, Rules Service, корректировки и safety validators не ослабляются.
+- Обязательный регрессионный тест: отсутствие активной UI-версии сохраняет один default state без неявного применения CSV либо пакетный CSV заранее материализуется и точно привязывается Service; active exact-scope версия остаётся единственной authority; drift/mismatch блокируется; packaged October проходит `R005_PROOF` и запускает R001.
+- Реализация: Service заранее копирует CSV в private run-dir, материализует канонический settings JSON и отдельный semantic verifier artifact, связывает их exact path/SHA/size в immutable manifest и передаёт wrapper явный `service-json`. Wrapper не использует скрытый fallback в Service-режиме. Exact `service-none` фиксирует отсутствие настроек. Proof требует совпадение канонической семантики CSV, settings/verifier SHA и ровно один уникальный безопасный control result на каждый активный set; missing/duplicate/foreign/tampered данные блокируются. Чтение bounded, handle-stable и reparse-aware.
+- Протокол проверки: scoped focused Go `11/11 PASS`; wrapper syntax и `7/7 PASS`; same-count tamper `name/member/split/id`, неверный selection path, missing/duplicate/foreign result и неверный service-none отклоняются; полный R005 `238 PASS`, `0 FAIL`, `1` штатный skip; полный R001 `256/256 PASS`; independent focused Go `-count=3` и Windows amd64 compile PASS; `git diff --check` PASS. Path-sensitive baseline-тесты в sandbox отдельно блокируются системным `EvalSymlinks: Access is denied` до вызова R005-014 и повторяются в package-smoke на чистом коротком пути.
+
+### UI-006 — двойной щелчок молча закрывает OPIU, если порт занят чужим процессом
+
+- Дата: `28.08.2026`
+- Статус: `IMPLEMENTED`
+- Сообщил: пользовательский запуск переносимого `OPIU_R17.exe` из `C:\OPIU_R17_TEST\OPIU_R17\OPIU_R17`.
+- Наблюдаемое поведение: окно запуска появляется и сразу закрывается. Runtime-журнал фиксирует, что `127.0.0.1:8765` занят чужим `HAT\.hat-runtime\python.exe`, PID `23636`; OPIU безопасно не завершает чужой процесс, но пользователь не видит причины и пути к журналу.
+- Ожидаемое поведение: доказанный старый OPIU завершается и освобождает точный endpoint; чужой владелец порта никогда не завершается. Если точный порт безопасно освободить нельзя, запуск останавливается с устойчивым понятным окном, в котором указаны endpoint, PID, executable и журнал диагностики.
+- Затронутые пункты контракта: §§11, 13–14; UI-001, UI-002; A13–A14, A16.
+- Допустимый scope: Windows startup/fatal UX и focused integration test; правила определения/завершения владельца endpoint, финансовая логика, R005/R001 и REPORT_ONLY safety не ослабляются.
+- Обязательный регрессионный тест: чужой процесс занимает exact endpoint; OPIU не завершает его, возвращает ошибку с PID/path/journal и показывает устойчивый пользовательский диалог. Доказанный предыдущий OPIU по-прежнему корректно завершается; свободный порт запускается штатно; panic главного startup-потока также не закрывается без объяснения.
+- Реализация: строгая проверка exact endpoint и владельца сохранена: завершается только повторно подтверждённый OPIU с безопасным health и process identity; чужой процесс блокирует запуск и остаётся жив. Все контролируемые fatal-ошибки и panic главного startup-потока дополнительно показываются через системный Windows-диалог с первопричиной и журналом. HTTP panic обрабатывается middleware внутри продолжающего работать сервиса и не открывает системный startup-диалог.
+- Протокол проверки: focused Go `TestFatalServiceUserMessage*` — `2/2 PASS`; S06 foreign/unsafe owner, exact health и old-OPIU replacement regressions входят в обязательный полный Windows прогон. Полный package-smoke ожидается.

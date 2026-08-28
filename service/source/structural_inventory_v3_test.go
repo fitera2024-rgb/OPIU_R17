@@ -266,6 +266,46 @@ func TestStructuralInventoryV3MatchesProducerCrossLanguageFixture(t *testing.T) 
 	}
 }
 
+func TestStructuralInventoryV3AcceptsNodeCanonicalSHAWithEmptyArticleAndRejectsTamper(t *testing.T) {
+	const nodeCanonicalSHA = "19B235E5449644998949069786D5056E5DE3474F1A150128022BD74724253ABB"
+
+	inventory := structuralSourceInventoryV3("RUN-NODE-SHA", "CONTEXT-NODE-SHA")
+	intalevMembers := inventory["intalev_members"].([]any)
+	emptyArticle := intalevMembers[0].(map[string]any)
+	emptyArticle["name"] = "<пустое значение>"
+	emptyArticle["hierarchy_path"] = "ОПИУ / <пустое значение>"
+
+	actualSHA, err := canonicalJSONSHA256(intalevMembers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actualSHA != nodeCanonicalSHA {
+		t.Fatalf("Go canonical member SHA does not match Node: got %s want %s", actualSHA, nodeCanonicalSHA)
+	}
+	inventory["member_hashes"].(map[string]any)["intalev"] = nodeCanonicalSHA
+
+	encoded, err := json.Marshal(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeStructuralControlInventory(encoded)
+	if err != nil {
+		t.Fatalf("v3 member with Node canonical SHA was rejected: %v", err)
+	}
+	if decoded.CanonicalMemberHashes.Intalev != nodeCanonicalSHA {
+		t.Fatalf("accepted v3 member SHA changed: got %s want %s", decoded.CanonicalMemberHashes.Intalev, nodeCanonicalSHA)
+	}
+
+	emptyArticle["name"] = "<подменённое значение>"
+	tampered, err := json.Marshal(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeStructuralControlInventory(tampered); err == nil || !strings.Contains(err.Error(), "member digest mismatch") {
+		t.Fatalf("tampered v3 member did not fail closed: %v", err)
+	}
+}
+
 func TestStructuralInventoryV3RejectsIncompleteTraceAndV2DoesNotWiden(t *testing.T) {
 	store, contextValue, run, _ := newPipelineStructuralContext(t)
 	v3 := structuralSourceInventoryV3(run.ID, contextValue.ID)

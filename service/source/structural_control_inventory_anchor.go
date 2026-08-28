@@ -34,7 +34,10 @@ type structuralControlPlanAudit struct {
 	Safety                 SafetyState                        `json:"safety"`
 }
 
-const structuralControlInventoryFile = "structural-control-inventory.binding.json"
+const (
+	structuralControlInventoryFile      = "structural-control-inventory.binding.json"
+	structuralControlCodexInputMaxBytes = int64(128 << 20)
+)
 
 func validateStructuralControlPipelineScope(run Run, contextValue Context) error {
 	if strings.TrimSpace(run.ID) == "" || run.ContextID != contextValue.ID ||
@@ -201,7 +204,7 @@ func validateStructuralControlInventoryV2(inventory structuralControlInventory, 
 		limit      int64
 	}{
 		{current.Report, "reconciliation.xlsx", 1 << 30},
-		{current.CodexInput, "reconciliation.codex-input.json", 64 << 20},
+		{current.CodexInput, "reconciliation.codex-input.json", structuralControlCodexInputMaxBytes},
 		{current.Manifest, "reconciliation.manifest.json", 64 << 20},
 	} {
 		expectedPath := filepath.Join(r005Dir, artifact.name)
@@ -274,8 +277,12 @@ func validateStructuralPlanCrossLinks(inventory structuralControlInventory, r005
 	for _, item := range []struct {
 		path       string
 		isManifest bool
-	}{{codexPath, false}, {manifestPath, true}} {
-		data, err := readStructuralControlArtifact(r005Dir, item.path, 64<<20)
+		limit      int64
+	}{
+		{codexPath, false, structuralControlCodexInputMaxBytes},
+		{manifestPath, true, 64 << 20},
+	} {
+		data, err := readStructuralControlArtifact(r005Dir, item.path, item.limit)
 		if err != nil {
 			return errors.New("structural inventory current-run JSON is unavailable")
 		}

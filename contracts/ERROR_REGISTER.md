@@ -529,3 +529,15 @@
 - Обязательный регрессионный тест: после POST run UI получает run ID, отслеживает именно его, отключает повторный запуск, обновляет этап и конечный статус из bootstrap; BLOCKED показывает русскую причину и finished_at, READY показывает ссылку на результат; polling single-flight и завершается для terminal status.
 - Реализация: UI сохраняет exact ID из ответа POST, опрашивает только `/api/runs/{id}` одним single-flight запросом, отключает повторный запуск до terminal status и переводит внутренние этапы в понятные русские статусы. В terminal состоянии polling прекращается; BLOCKED показывает причину и время, READY — устойчивую ссылку на результат.
 - Протокол проверки: focused UI-007/UI-009 `8/8 PASS`; полный web-набор `54/54 PASS`; `node --check` и `git diff --check` — PASS. Итоговый runtime-smoke выполняется на TEST3.
+
+### S10 — реальный Codex input превышает общий лимит 64 MiB
+
+- Дата: `28.08.2026`
+- Статус: `IMPLEMENTED`
+- Сообщил: независимый real-run acceptance 9 УК и Сахалина перед сборкой TEST3.
+- Наблюдаемое поведение: verified v3 inventory и binding SHA корректны, но Service отклоняет `reconciliation.codex-input.json` размером `67 730 152`–`67 750 010` байт из-за общего ограничения `64 MiB` и маскирует причину сообщением `artifact digest mismatch`.
+- Ожидаемое поведение: полный доказательный Codex input до `128 MiB` принимается только после всех прежних SHA/cross-link проверок; файл свыше `128 MiB` блокируется. Лимиты manifest и XLSX не меняются.
+- Затронутые пункты контракта: §§10–14; A01–A04, A07, A10–A14.
+- Допустимый scope: два bounded-read лимита только для `reconciliation.codex-input.json`, focused boundary regressions и эта запись; финансовая логика, hierarchy, authority, manifest/report limits и safety gates не меняются.
+- Реализация: введён отдельный `structuralControlCodexInputMaxBytes = 128 MiB` и применён в SHA-проверке current-run artifacts и cross-link JSON reader. Manifest сохраняет лимит `64 MiB`, отчёт — `1 GiB`.
+- Протокол проверки: `64 MiB + 1` и exact `128 MiB` проходят полный SHA/cross-link validator; `128 MiB + 1` блокируется обеими проверками; прежний manifest boundary не расширен. Focused `TestS10* -count=3`, `go vet` и `git diff --check` — PASS; изолированный validator трёх реальных runs после узкого изменения — PASS.

@@ -53,9 +53,7 @@ func writePipelineStructuralInventoryDocument(t *testing.T, store *Store, run Ru
 		t.Fatal(err)
 	}
 	journalPath := filepath.Join(r005Dir, "erp-operation-journal.xlsx")
-	if err := os.WriteFile(journalPath, []byte("synthetic immutable ERP operation journal\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeSyntheticReportWorkbook(t, journalPath, "Лист_1", nil)
 	journalSHA, err := sha256File(journalPath)
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +94,7 @@ func writePipelineStructuralInventoryDocument(t *testing.T, store *Store, run Ru
 		"execution_allowed": false, "ready_to_upload": false, "release_allowed": false,
 		"live_1c_allowed": false, "live_delete_allowed": false,
 		"operation_evidence": map[string]any{
-			"journal_sha256": strings.ToUpper(journalSHA), "journal_sheet": "Журнал",
+			"journal_sha256": strings.ToUpper(journalSHA), "journal_sheet": "Лист_1",
 			"input": map[string]any{"journal_source": journalPath}, "rows": []any{},
 		},
 		"structural_control_settings_binding": map[string]any{

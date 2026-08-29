@@ -162,7 +162,10 @@ import {
   buildCrossJournalDiscrepancyEvidence,
   unavailableCrossJournalEvidence,
 } from "./cross_journal_discrepancy_evidence.mjs";
-import { createUniqueRunWorkDir } from "./run_workdir.mjs";
+import {
+  createUniqueRunWorkDir,
+  persistImmutableErpJournalEvidence,
+} from "./run_workdir.mjs";
 import { OWNER_DECISION_EXPLANATION_HEADERS } from "./owner_decision_xlsx.mjs";
 import { detectConfiguredRootProfile } from "./organization_profile_registry.mjs";
 import { buildOperationTreePresentation } from "./operation_tree_presentation.mjs";
@@ -6428,6 +6431,12 @@ async function runReconciliation() {
   const requestedOutputPath = resolveOutputPath(organization, mode, periodLabel);
   const outputPath = await chooseWritableOutputPath(requestedOutputPath);
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  await persistImmutableErpJournalEvidence({
+    workDir,
+    outputPath,
+    crossJournalEvidence,
+    operationEvidence,
+  });
   const buildResult = await buildReportWorkbook({
     organization,
     structuralInventoryScope,

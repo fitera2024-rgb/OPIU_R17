@@ -109,6 +109,50 @@ func validateOOXMLWorkbook(filePath string) error {
 	return archive.close()
 }
 
+func validateExactXLSXSheet(filePath, expectedSheet string) error {
+	expectedSheet = strings.TrimSpace(expectedSheet)
+	if expectedSheet == "" {
+		return errors.New("expected worksheet name is missing")
+	}
+	archive, err := openXLSXArchive(filePath)
+	if err != nil {
+		return err
+	}
+	defer archive.close()
+	var workbook xlsxWorkbook
+	if err := archive.decode("xl/workbook.xml", &workbook); err != nil {
+		return err
+	}
+	var relationships xlsxRelationships
+	if err := archive.decode("xl/_rels/workbook.xml.rels", &relationships); err != nil {
+		return err
+	}
+	relationshipTargets := map[string]string{}
+	for _, relation := range relationships.Items {
+		target := path.Clean(path.Join("xl", strings.TrimPrefix(strings.ReplaceAll(relation.Target, "\\", "/"), "/xl/")))
+		if target == "xl" || strings.HasPrefix(target, "../") || !strings.HasPrefix(target, "xl/") {
+			return errors.New("OOXML worksheet relationship escaped xl root")
+		}
+		relationshipTargets[relation.ID] = target
+	}
+	matchingSheets := 0
+	sheetPath := ""
+	for _, sheet := range workbook.Sheets {
+		if sheet.Name != expectedSheet {
+			continue
+		}
+		matchingSheets++
+		sheetPath = relationshipTargets[sheet.RID]
+	}
+	if matchingSheets != 1 {
+		return fmt.Errorf("expected exactly one worksheet %q, found %d", expectedSheet, matchingSheets)
+	}
+	if sheetPath == "" || archive.files[sheetPath] == nil {
+		return fmt.Errorf("worksheet %q relationship target is missing", expectedSheet)
+	}
+	return nil
+}
+
 func xlsxColumnIndex(reference string) (int, error) {
 	letters := ""
 	for _, symbol := range strings.ToUpper(strings.TrimSpace(reference)) {

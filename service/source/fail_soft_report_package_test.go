@@ -295,15 +295,13 @@ func writeFailSoftR005Fixture(t *testing.T, r005Dir string, contextValue Context
 	}
 	reportPath := filepath.Join(r005Dir, "reconciliation.xlsx")
 	codexPath := filepath.Join(r005Dir, "reconciliation.codex-input.json")
-	journalPath := filepath.Join(r005Dir, "erp-operation-journal.xlsx")
+	journalPath := filepath.Join(r005Dir, "physical-evidence", "erp-journal.xlsx")
 	if !regularFile(reportPath) {
 		if err := os.WriteFile(reportPath, []byte("synthetic report-only reconciliation"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(journalPath, []byte("synthetic immutable ERP operation journal\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeSyntheticReportWorkbook(t, journalPath, "Лист_1", nil)
 	journalSHA, err := sha256File(journalPath)
 	if err != nil {
 		t.Fatal(err)
@@ -323,10 +321,19 @@ func writeFailSoftR005Fixture(t *testing.T, r005Dir string, contextValue Context
 		"report_path": reportPath, "report_sha256": strings.ToUpper(reportSHA),
 		"output_path": reportPath, "output_sha256": strings.ToUpper(reportSHA),
 		"operation_evidence": map[string]any{
-			"journal_sha256": strings.ToUpper(journalSHA), "journal_sheet": "Журнал",
+			"journal_sha256": strings.ToUpper(journalSHA), "journal_sheet": "Лист_1",
 			"input": map[string]any{"journal_source": journalPath}, "rows": []any{},
 		},
-		"rows": []any{map[string]any{"code": "R001", "status": status}},
+		"structural_control_settings_selection": map[string]any{
+			"authority": structuralControlAuthorityServiceNone, "status": "SERVICE_NO_SETTINGS", "path": "",
+		},
+		"structural_control_settings_binding": map[string]any{
+			"schema": structuralControlSettingsSchema, "status": "MISSING_DEFAULT_ALL_GROUPS", "set_count": 0,
+			"sets": []any{}, "correction_authority": false, "financial_rows": 0, "posting_rows": 0,
+			"execution_allowed": false,
+		},
+		"structural_group_control_results": []any{},
+		"rows":                             []any{map[string]any{"code": "R001", "status": status}},
 	} {
 		codex[key] = value
 	}

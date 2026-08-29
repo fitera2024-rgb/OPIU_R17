@@ -53,9 +53,7 @@ func writePipelineStructuralInventoryDocument(t *testing.T, store *Store, run Ru
 		t.Fatal(err)
 	}
 	journalPath := filepath.Join(r005Dir, "erp-operation-journal.xlsx")
-	if err := os.WriteFile(journalPath, []byte("synthetic immutable ERP operation journal\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeSyntheticReportWorkbook(t, journalPath, "Лист_1", nil)
 	journalSHA, err := sha256File(journalPath)
 	if err != nil {
 		t.Fatal(err)
@@ -96,12 +94,15 @@ func writePipelineStructuralInventoryDocument(t *testing.T, store *Store, run Ru
 		"execution_allowed": false, "ready_to_upload": false, "release_allowed": false,
 		"live_1c_allowed": false, "live_delete_allowed": false,
 		"operation_evidence": map[string]any{
-			"journal_sha256": strings.ToUpper(journalSHA), "journal_sheet": "Журнал",
+			"journal_sha256": strings.ToUpper(journalSHA), "journal_sheet": "Лист_1",
 			"input": map[string]any{"journal_source": journalPath}, "rows": []any{},
 		},
 		"structural_control_settings_binding": map[string]any{
-			"status": "MISSING_DEFAULT_ALL_GROUPS", "set_count": 0, "sets": []any{},
+			"schema": structuralControlSettingsSchema, "status": "MISSING_DEFAULT_ALL_GROUPS", "set_count": 0, "sets": []any{},
 			"correction_authority": false, "financial_rows": 0, "posting_rows": 0, "execution_allowed": false,
+		},
+		"structural_control_settings_selection": map[string]any{
+			"authority": structuralControlAuthorityServiceNone, "status": "SERVICE_NO_SETTINGS", "path": "",
 		},
 		"structural_group_control_results": []any{},
 	}); err != nil {
@@ -237,6 +238,9 @@ func TestExternalPipelineAnchorsVerifiedInventoryBeforeDirectR001(t *testing.T) 
 			switch stage {
 			case "R005":
 				writePipelineStructuralInventoryV3(t, store, run, contextValue)
+				r005Dir := filepath.Join(runDir, "r005")
+				writeFailSoftR005Fixture(t, r005Dir, contextValue, "BLOCKED_R005_REPASS_REQUIRED")
+				refreshFailSoftInventoryProvenance(t, filepath.Join(r005Dir, "structural-control-inventory.json"), r005Dir)
 			case "R001":
 				if _, ok := store.StructuralControlInventoryAnchor(run.ID); !ok {
 					t.Fatal("R001 started before immutable structural inventory anchor")

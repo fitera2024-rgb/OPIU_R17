@@ -244,7 +244,7 @@ func verifyServiceR001Handoff(path, expectedSHA string, run Run, contextValue Co
 	if !reflectArtifact(document.PhysicalEvidence.ERPPackage, document.Sources.ERP) {
 		return serviceR001Handoff{}, errors.New("physical ERP package is not the pinned source")
 	}
-	if err := verifyHandoffJournal(document.PhysicalEvidence.ERPJournal); err != nil {
+	if err := verifyHandoffJournal(document.PhysicalEvidence.ERPJournal, runDir); err != nil {
 		return serviceR001Handoff{}, err
 	}
 	if err := validatePhysicalDigest(document.PhysicalEvidence); err != nil {
@@ -408,6 +408,10 @@ func physicalEvidenceFromR005(codex map[string]any, erpPackage serviceHandoffArt
 	ids := []string{}
 	reuseCount := 0
 	if cross != nil && mapBool(cross, "applicable") {
+		if mapText(cross, "organization") != mapText(codex, "organization") ||
+			mapText(cross, "period") != mapText(codex, "period") {
+			return serviceHandoffPhysicalEvidence{}, errors.New("physical ERP journal scope mismatch")
+		}
 		sources, _ := cross["sources"].(map[string]any)
 		erp, _ := sources["erp"].(map[string]any)
 		journalPath, journalSHA, journalSheet = mapText(erp, "path"), strings.ToUpper(mapText(erp, "sha256")), mapText(erp, "sheet")
@@ -469,14 +473,24 @@ func handoffJournal(path, expectedSHA, sheet string) (serviceHandoffJournal, err
 	if err != nil || !strings.EqualFold(ref.SHA256, expectedSHA) {
 		return serviceHandoffJournal{}, errors.New("R005 physical ERP journal SHA-256 mismatch")
 	}
+	if err := validateExactXLSXSheet(ref.Path, strings.TrimSpace(sheet)); err != nil {
+		return serviceHandoffJournal{}, fmt.Errorf("R005 physical ERP journal sheet mismatch: %w", err)
+	}
 	return serviceHandoffJournal{Path: ref.Path, Size: ref.Size, SHA256: ref.SHA256, Sheet: strings.TrimSpace(sheet)}, nil
 }
 
-func verifyHandoffJournal(ref serviceHandoffJournal) error {
+func verifyHandoffJournal(ref serviceHandoffJournal, runDir string) error {
 	if strings.TrimSpace(ref.Sheet) == "" {
 		return errors.New("handoff ERP journal sheet is missing")
 	}
-	return verifyHandoffArtifact(serviceHandoffArtifact{Path: ref.Path, Size: ref.Size, SHA256: ref.SHA256})
+	expectedPath := filepath.Join(runDir, "r005", "physical-evidence", "erp-journal.xlsx")
+	if !sameFilesystemPath(ref.Path, expectedPath) || rejectSymlinkTraversal(runDir, ref.Path) != nil {
+		return errors.New("handoff ERP journal path is not the persistent run-owned copy")
+	}
+	if err := verifyHandoffArtifact(serviceHandoffArtifact{Path: ref.Path, Size: ref.Size, SHA256: ref.SHA256}); err != nil {
+		return err
+	}
+	return validateExactXLSXSheet(ref.Path, strings.TrimSpace(ref.Sheet))
 }
 
 func exactUniqueSourceRowIDs(values []string) ([]string, error) {

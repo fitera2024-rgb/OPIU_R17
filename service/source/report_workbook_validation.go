@@ -7,12 +7,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
 )
 
 const materializationSheetName = "10_R001_Материализация"
+
+const (
+	xlsxWorksheetRelationshipType       = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+	xlsxStrictWorksheetRelationshipType = "http://purl.oclc.org/ooxml/officeDocument/relationships/worksheet"
+	xlsxWorksheetContentType            = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+	xlsxMainNamespace                   = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+	xlsxStrictMainNamespace             = "http://purl.oclc.org/ooxml/spreadsheetml/main"
+	packageContentTypesNamespace        = "http://schemas.openxmlformats.org/package/2006/content-types"
+	packageRelationshipsNamespace       = "http://schemas.openxmlformats.org/package/2006/relationships"
+)
 
 type xlsxSheetRef struct {
 	Name string `xml:"name,attr"`
@@ -24,12 +35,29 @@ type xlsxWorkbook struct {
 }
 
 type xlsxRelationship struct {
-	ID     string `xml:"Id,attr"`
-	Target string `xml:"Target,attr"`
+	ID         string `xml:"Id,attr"`
+	Type       string `xml:"Type,attr"`
+	Target     string `xml:"Target,attr"`
+	TargetMode string `xml:"TargetMode,attr"`
 }
 
 type xlsxRelationships struct {
 	Items []xlsxRelationship `xml:"Relationship"`
+}
+
+type xlsxContentTypeDefault struct {
+	Extension   string `xml:"Extension,attr"`
+	ContentType string `xml:"ContentType,attr"`
+}
+
+type xlsxContentTypeOverride struct {
+	PartName    string `xml:"PartName,attr"`
+	ContentType string `xml:"ContentType,attr"`
+}
+
+type xlsxContentTypes struct {
+	Defaults  []xlsxContentTypeDefault  `xml:"Default"`
+	Overrides []xlsxContentTypeOverride `xml:"Override"`
 }
 
 type xlsxCell struct {
@@ -62,10 +90,10 @@ func openXLSXArchive(filePath string) (*xlsxArchive, error) {
 	}
 	files := map[string]*zip.File{}
 	for _, file := range reader.File {
-		name := path.Clean(strings.ReplaceAll(file.Name, "\\", "/"))
-		if name == "." || strings.HasPrefix(name, "../") || strings.HasPrefix(name, "/") {
+		name, err := canonicalXLSXPackagePart(file.Name)
+		if err != nil {
 			reader.Close()
-			return nil, errors.New("OOXML member path is unsafe")
+			return nil, fmt.Errorf("OOXML member path is unsafe: %w", err)
 		}
 		if _, exists := files[name]; exists {
 			reader.Close()
@@ -101,6 +129,57 @@ func (archive *xlsxArchive) decode(name string, value any) error {
 	return nil
 }
 
+func (archive *xlsxArchive) decodeRoot(name, expectedLocal string, namespaceOK func(string) bool, value any) error {
+	file := archive.files[name]
+	if file == nil {
+		return fmt.Errorf("OOXML member is missing: %s", name)
+	}
+	reader, err := file.Open()
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	decoder := xml.NewDecoder(io.LimitReader(reader, 32<<20))
+	var start xml.StartElement
+	for {
+		token, tokenErr := decoder.Token()
+		if tokenErr != nil {
+			return fmt.Errorf("decode OOXML member %s: %w", name, tokenErr)
+		}
+		if candidate, ok := token.(xml.StartElement); ok {
+			start = candidate
+			break
+		}
+		if characterData, ok := token.(xml.CharData); ok && strings.TrimSpace(string(characterData)) != "" {
+			return fmt.Errorf("OOXML member %s has content before root element", name)
+		}
+	}
+	if start.Name.Local != expectedLocal || namespaceOK == nil || !namespaceOK(start.Name.Space) {
+		return fmt.Errorf("OOXML member %s has unexpected root element", name)
+	}
+	if err := decoder.DecodeElement(value, &start); err != nil {
+		return fmt.Errorf("decode OOXML member %s: %w", name, err)
+	}
+	for {
+		token, tokenErr := decoder.Token()
+		if tokenErr == io.EOF {
+			return nil
+		}
+		if tokenErr != nil {
+			return fmt.Errorf("decode OOXML member %s: %w", name, tokenErr)
+		}
+		switch extra := token.(type) {
+		case xml.CharData:
+			if strings.TrimSpace(string(extra)) == "" {
+				continue
+			}
+		case xml.Comment, xml.Directive, xml.ProcInst:
+			continue
+		}
+		return fmt.Errorf("OOXML member %s has content after root element", name)
+	}
+}
+
 func validateOOXMLWorkbook(filePath string) error {
 	archive, err := openXLSXArchive(filePath)
 	if err != nil {
@@ -109,29 +188,133 @@ func validateOOXMLWorkbook(filePath string) error {
 	return archive.close()
 }
 
-func validateExactXLSXSheet(filePath, expectedSheet string) error {
+func canonicalXLSXPackagePart(raw string) (string, error) {
+	if raw == "" || strings.Contains(raw, "\\") || strings.ContainsRune(raw, '\x00') || strings.HasPrefix(raw, "/") {
+		return "", errors.New("package part is absolute, empty, or uses backslashes")
+	}
+	if path.Clean(raw) != raw {
+		return "", errors.New("package part is not canonical")
+	}
+	for _, component := range strings.Split(raw, "/") {
+		if component == "" || component == "." || component == ".." {
+			return "", errors.New("package part contains unsafe path components")
+		}
+	}
+	return raw, nil
+}
+
+func xlsxMainNamespaceOK(namespace string) bool {
+	return namespace == xlsxMainNamespace || namespace == xlsxStrictMainNamespace
+}
+
+func packageContentTypesNamespaceOK(namespace string) bool {
+	return namespace == packageContentTypesNamespace
+}
+
+func packageRelationshipsNamespaceOK(namespace string) bool {
+	return namespace == packageRelationshipsNamespace
+}
+
+func resolveXLSXRelationshipTarget(sourcePart string, relation xlsxRelationship) (string, error) {
+	target := relation.Target
+	if strings.TrimSpace(target) != target || target == "" || strings.Contains(target, "\\") {
+		return "", errors.New("OOXML relationship target is empty or non-canonical")
+	}
+	if mode := strings.TrimSpace(relation.TargetMode); mode != "" && !strings.EqualFold(mode, "Internal") {
+		return "", errors.New("OOXML relationship target is external")
+	}
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(target, "%") {
+		return "", errors.New("OOXML relationship target is not an internal package URI")
+	}
+	targetPath := parsed.Path
+	if targetPath == "" {
+		return "", errors.New("OOXML relationship target path is empty")
+	}
+	for _, component := range strings.Split(strings.TrimPrefix(targetPath, "/"), "/") {
+		if component == "" || component == "." || component == ".." {
+			return "", errors.New("OOXML relationship target contains traversal or non-canonical components")
+		}
+	}
+	resolved := targetPath
+	if !strings.HasPrefix(targetPath, "/") {
+		resolved = path.Join(path.Dir(sourcePart), targetPath)
+	}
+	resolved = strings.TrimPrefix(resolved, "/")
+	canonical, err := canonicalXLSXPackagePart(resolved)
+	if err != nil {
+		return "", fmt.Errorf("OOXML relationship target is unsafe: %w", err)
+	}
+	return canonical, nil
+}
+
+func isXLSXWorksheetRelationshipType(typeName string) bool {
+	return typeName == xlsxWorksheetRelationshipType || typeName == xlsxStrictWorksheetRelationshipType
+}
+
+func xlsxContentTypeForPart(contentTypes xlsxContentTypes, partName string) (string, error) {
+	extension := strings.ToLower(strings.TrimPrefix(path.Ext(partName), "."))
+	overrides := map[string]string{}
+	for _, override := range contentTypes.Overrides {
+		if strings.TrimSpace(override.ContentType) == "" || !strings.HasPrefix(override.PartName, "/") {
+			return "", errors.New("OOXML content-type override is incomplete")
+		}
+		part, err := canonicalXLSXPackagePart(strings.TrimPrefix(override.PartName, "/"))
+		if err != nil {
+			return "", fmt.Errorf("OOXML content-type override is unsafe: %w", err)
+		}
+		if _, exists := overrides[part]; exists {
+			return "", fmt.Errorf("duplicate OOXML content-type override: %s", part)
+		}
+		overrides[part] = override.ContentType
+	}
+	if contentType, exists := overrides[partName]; exists {
+		return contentType, nil
+	}
+	defaults := map[string]string{}
+	for _, defaultType := range contentTypes.Defaults {
+		if strings.TrimSpace(defaultType.Extension) == "" || strings.TrimSpace(defaultType.ContentType) == "" {
+			return "", errors.New("OOXML content-type default is incomplete")
+		}
+		if strings.ToLower(defaultType.Extension) == extension {
+			if prior, exists := defaults[extension]; exists && prior != defaultType.ContentType {
+				return "", fmt.Errorf("conflicting OOXML content-type defaults: %s", extension)
+			}
+			defaults[extension] = defaultType.ContentType
+		}
+	}
+	return defaults[extension], nil
+}
+
+func resolveExactXLSXSheet(archive *xlsxArchive, expectedSheet string) (string, error) {
 	expectedSheet = strings.TrimSpace(expectedSheet)
 	if expectedSheet == "" {
-		return errors.New("expected worksheet name is missing")
+		return "", errors.New("expected worksheet name is missing")
 	}
-	archive, err := openXLSXArchive(filePath)
-	if err != nil {
-		return err
-	}
-	defer archive.close()
 	var workbook xlsxWorkbook
-	if err := archive.decode("xl/workbook.xml", &workbook); err != nil {
-		return err
+	if err := archive.decodeRoot("xl/workbook.xml", "workbook", xlsxMainNamespaceOK, &workbook); err != nil {
+		return "", err
 	}
 	var relationships xlsxRelationships
-	if err := archive.decode("xl/_rels/workbook.xml.rels", &relationships); err != nil {
-		return err
+	if err := archive.decodeRoot("xl/_rels/workbook.xml.rels", "Relationships", packageRelationshipsNamespaceOK, &relationships); err != nil {
+		return "", err
 	}
+	var contentTypes xlsxContentTypes
+	if err := archive.decodeRoot("[Content_Types].xml", "Types", packageContentTypesNamespaceOK, &contentTypes); err != nil {
+		return "", err
+	}
+
 	relationshipTargets := map[string]string{}
 	for _, relation := range relationships.Items {
-		target := path.Clean(path.Join("xl", strings.TrimPrefix(strings.ReplaceAll(relation.Target, "\\", "/"), "/xl/")))
-		if target == "xl" || strings.HasPrefix(target, "../") || !strings.HasPrefix(target, "xl/") {
-			return errors.New("OOXML worksheet relationship escaped xl root")
+		if strings.TrimSpace(relation.ID) == "" || strings.TrimSpace(relation.Type) == "" {
+			return "", errors.New("OOXML workbook relationship is incomplete")
+		}
+		if _, exists := relationshipTargets[relation.ID]; exists {
+			return "", fmt.Errorf("duplicate OOXML workbook relationship id: %s", relation.ID)
+		}
+		target, err := resolveXLSXRelationshipTarget("xl/workbook.xml", relation)
+		if err != nil {
+			return "", err
 		}
 		relationshipTargets[relation.ID] = target
 	}
@@ -142,15 +325,51 @@ func validateExactXLSXSheet(filePath, expectedSheet string) error {
 			continue
 		}
 		matchingSheets++
+		relation, exists := findXLSXRelationship(relationships.Items, sheet.RID)
+		if !exists {
+			return "", fmt.Errorf("worksheet %q r:id does not resolve", expectedSheet)
+		}
+		if !isXLSXWorksheetRelationshipType(relation.Type) {
+			return "", fmt.Errorf("worksheet %q relationship type is not worksheet", expectedSheet)
+		}
 		sheetPath = relationshipTargets[sheet.RID]
 	}
 	if matchingSheets != 1 {
-		return fmt.Errorf("expected exactly one worksheet %q, found %d", expectedSheet, matchingSheets)
+		return "", fmt.Errorf("expected exactly one worksheet %q, found %d", expectedSheet, matchingSheets)
 	}
 	if sheetPath == "" || archive.files[sheetPath] == nil {
-		return fmt.Errorf("worksheet %q relationship target is missing", expectedSheet)
+		return "", fmt.Errorf("worksheet %q relationship target is missing", expectedSheet)
 	}
-	return nil
+	contentType, err := xlsxContentTypeForPart(contentTypes, sheetPath)
+	if err != nil {
+		return "", err
+	}
+	if contentType != xlsxWorksheetContentType {
+		return "", fmt.Errorf("worksheet %q relationship target has non-worksheet content type", expectedSheet)
+	}
+	if err := archive.decodeRoot(sheetPath, "worksheet", xlsxMainNamespaceOK, &struct{}{}); err != nil {
+		return "", fmt.Errorf("worksheet %q relationship target is not a worksheet part: %w", expectedSheet, err)
+	}
+	return sheetPath, nil
+}
+
+func findXLSXRelationship(relationships []xlsxRelationship, id string) (xlsxRelationship, bool) {
+	for _, relation := range relationships {
+		if relation.ID == id {
+			return relation, true
+		}
+	}
+	return xlsxRelationship{}, false
+}
+
+func validateExactXLSXSheet(filePath, expectedSheet string) error {
+	archive, err := openXLSXArchive(filePath)
+	if err != nil {
+		return err
+	}
+	defer archive.close()
+	_, err = resolveExactXLSXSheet(archive, expectedSheet)
+	return err
 }
 
 func xlsxColumnIndex(reference string) (int, error) {
@@ -242,38 +461,16 @@ func readMaterializationTable(filePath string) ([]map[string]string, error) {
 		return nil, err
 	}
 	defer archive.close()
-	var workbook xlsxWorkbook
-	if err := archive.decode("xl/workbook.xml", &workbook); err != nil {
-		return nil, err
-	}
-	var relationships xlsxRelationships
-	if err := archive.decode("xl/_rels/workbook.xml.rels", &relationships); err != nil {
-		return nil, err
-	}
-	relationshipTargets := map[string]string{}
-	for _, relation := range relationships.Items {
-		target := path.Clean(path.Join("xl", strings.TrimPrefix(strings.ReplaceAll(relation.Target, "\\", "/"), "/xl/")))
-		if target == "xl" || strings.HasPrefix(target, "../") || !strings.HasPrefix(target, "xl/") {
-			return nil, errors.New("OOXML worksheet relationship escaped xl root")
-		}
-		relationshipTargets[relation.ID] = target
-	}
-	sheetPath := ""
-	for _, sheet := range workbook.Sheets {
-		if sheet.Name == materializationSheetName {
-			sheetPath = relationshipTargets[sheet.RID]
-			break
-		}
-	}
-	if sheetPath == "" || archive.files[sheetPath] == nil {
-		return nil, fmt.Errorf("required worksheet %s is missing", materializationSheetName)
+	sheetPath, err := resolveExactXLSXSheet(archive, materializationSheetName)
+	if err != nil {
+		return nil, fmt.Errorf("required worksheet %s is invalid: %w", materializationSheetName, err)
 	}
 	shared, err := readSharedStrings(archive)
 	if err != nil {
 		return nil, err
 	}
 	var worksheet xlsxWorksheet
-	if err := archive.decode(sheetPath, &worksheet); err != nil {
+	if err := archive.decodeRoot(sheetPath, "worksheet", xlsxMainNamespaceOK, &worksheet); err != nil {
 		return nil, err
 	}
 	rows := map[int]map[int]string{}

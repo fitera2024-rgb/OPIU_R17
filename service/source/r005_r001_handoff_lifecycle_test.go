@@ -84,9 +84,9 @@ func setR005LifecycleJournal(t *testing.T, r005Dir, journalPath, journalSHA stri
 		t.Fatal(err)
 	}
 	codex["cross_journal_discrepancy_evidence"] = map[string]any{
-		"applicable": true,
+		"applicable":   true,
 		"organization": "9 Управляющая компания",
-		"period":      "2025-10",
+		"period":       "2025-10",
 		"sources": map[string]any{
 			"erp": map[string]any{"path": journalPath, "sha256": strings.ToUpper(journalSHA), "sheet": "Лист_1"},
 		},

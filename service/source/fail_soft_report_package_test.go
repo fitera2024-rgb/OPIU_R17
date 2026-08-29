@@ -324,7 +324,16 @@ func writeFailSoftR005Fixture(t *testing.T, r005Dir string, contextValue Context
 			"journal_sha256": strings.ToUpper(journalSHA), "journal_sheet": "Лист_1",
 			"input": map[string]any{"journal_source": journalPath}, "rows": []any{},
 		},
-		"rows": []any{map[string]any{"code": "R001", "status": status}},
+		"structural_control_settings_selection": map[string]any{
+			"authority": structuralControlAuthorityServiceNone, "status": "SERVICE_NO_SETTINGS", "path": "",
+		},
+		"structural_control_settings_binding": map[string]any{
+			"schema": structuralControlSettingsSchema, "status": "MISSING_DEFAULT_ALL_GROUPS", "set_count": 0,
+			"sets": []any{}, "correction_authority": false, "financial_rows": 0, "posting_rows": 0,
+			"execution_allowed": false,
+		},
+		"structural_group_control_results": []any{},
+		"rows":                             []any{map[string]any{"code": "R001", "status": status}},
 	} {
 		codex[key] = value
 	}

@@ -296,7 +296,7 @@ func validateR001ReportOnlyPackage(r001Dir string) error {
 		lower := strings.ToLower(filepath.ToSlash(relative))
 		hasDecisions = hasDecisions || (strings.Contains(lower, strings.ToLower("решения_корректировок_ввод_r001")) && strings.HasSuffix(lower, ".xlsx"))
 		hasRegistry = hasRegistry || (strings.Contains(lower, strings.ToLower("реестр")) && strings.HasSuffix(lower, ".xlsx"))
-		if lower == "reconciliation.xlsx" {
+		if lower == "reconciliation.xlsx" || strings.HasSuffix(lower, "/сверка.xlsx") || lower == "сверка.xlsx" {
 			hasReconciliation = true
 			reconciliationPath = artifactPath
 		}

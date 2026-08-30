@@ -630,6 +630,19 @@
 - Точная причина подтверждена сопоставлением package/runtime с `d3a4eb2` и текущего `HEAD`: пакет не содержит persistence export/call из `701f2ee`. `materializeServiceR001Handoff` достигает `handoffJournal`; `handoffArtifact` не находит удалённый journal и возвращает raw guard error `R005 physical ERP journal SHA-256 mismatch`, после чего handoff не записывается и verifier/R001 не вызываются. В runtime-логах нового прогона raw exception не сохранён; безопасно отображён только `R005_HANDOFF`, поэтому raw текст зафиксирован как source-correlated guard error, а не как отдельная строка лога.
 - Источник ZIP не изменялся; `REPORT_ONLY=true`, `rules_service=false`, `posting_rows=0`, `ready_to_upload=false`, `release_allowed=false`, `live_1c_allowed=false`, no upload/posting to 1С сохранены. Нового defect ID нет; запись подтверждает R005-015 и stale package/runtime.
 
+### R005-017 — Service handoff не содержит обязательный `execution_allowed=false`
+
+- Дата: `30.08.2026`
+- Статус: `OPEN_FIX_PR`
+- Обнаружено: после исправления R005-016 новый изолированный source-Service прогон `run_8968c2a8e934b48b2bb333c7`, организация `9 Управляющая компания` (`ERP-000000224`), период `2025-10`.
+- Наблюдаемое поведение: Go Service создаёт persistent journal и полный `handoff/r005-r001-service-handoff.json`, но R001 wrapper отклоняет handoff на exact schema: `SERVICE_HANDOFF_EXACT_SCHEMA_MISMATCH:safety:live_1c_allowed,mode,posting_rows,ready_to_upload,release_allowed`; запуск завершается `FAILED / R001`, диагностический комплект R001 не создан.
+- Доказательство: JSON handoff содержит в `safety` только `mode`, `posting_rows`, `ready_to_upload`, `release_allowed`, `live_1c_allowed`; `modules/corrections/source/service_r005_r001_handoff.mjs` требует также `execution_allowed=false`. Причина — `SafetyState`/`reportOnlySafety()` в Go не сериализуют этот обязательный ключ.
+- Ожидаемое поведение: Service handoff сериализует ровно закрытый safety-набор с `execution_allowed=false`; R001 wrapper принимает только этот набор и сохраняет `REPORT_ONLY`, нулевые posting rows, запрет upload/release/live 1С.
+- Затронутые пункты контракта: §§9.5, 10–13; A01–A04, A10–A15.
+- Обязательный регрессионный тест: Go handoff содержит `execution_allowed=false`; R001 exact-schema wrapper принимает handoff и формирует безопасный комплект; unsafe/missing/extra safety keys по-прежнему блокируются.
+- Допустимый scope фикса: `SafetyState`/`reportOnlySafety()` и focused handoff integration test; финансовая логика, BOM/OOXML validation, physical journal persistence, authority, R005/R001 semantics, rules service и 1С не меняются.
+- Регрессионная фиксация: независимая ветка `fix/r005-r001-handoff-safety`, отдельный Issue/PR; merge/release запрещены до coordinator review.
+
 ### R005-016 — Service handoff ошибочно отклоняет OOXML-журнал с UTF-8 BOM
 
 - Дата: `30.08.2026`

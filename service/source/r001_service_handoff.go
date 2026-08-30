@@ -76,6 +76,22 @@ type serviceHandoffCrossChecks struct {
 	PhysicalEvidenceBound       bool   `json:"physical_evidence_bound"`
 }
 
+type serviceR001HandoffSafety struct {
+	Mode             string `json:"mode"`
+	PostingRows      int    `json:"posting_rows"`
+	ReadyToUpload    bool   `json:"ready_to_upload"`
+	ReleaseAllowed   bool   `json:"release_allowed"`
+	ExecutionAllowed bool   `json:"execution_allowed"`
+	Live1CAllowed    bool   `json:"live_1c_allowed"`
+}
+
+func reportOnlyServiceR001HandoffSafety() serviceR001HandoffSafety {
+	return serviceR001HandoffSafety{
+		Mode: "REPORT_ONLY", PostingRows: 0, ReadyToUpload: false,
+		ReleaseAllowed: false, ExecutionAllowed: false, Live1CAllowed: false,
+	}
+}
+
 type serviceR001Handoff struct {
 	SchemaVersion    string                         `json:"schema_version"`
 	ArtifactType     string                         `json:"artifact_type"`
@@ -89,7 +105,7 @@ type serviceR001Handoff struct {
 	Structural       serviceHandoffStructural       `json:"structural"`
 	PhysicalEvidence serviceHandoffPhysicalEvidence `json:"physical_evidence"`
 	CrossChecks      serviceHandoffCrossChecks      `json:"cross_checks"`
-	Safety           SafetyState                    `json:"safety"`
+	Safety           serviceR001HandoffSafety       `json:"safety"`
 }
 
 type serviceR001HandoffRef struct {
@@ -171,7 +187,7 @@ func materializeServiceR001Handoff(run Run, contextValue Context, runDir, erpPat
 			ScopeVerified: true, SourceHashesVerified: true, R005HashesVerified: true,
 			StructuralInventoryVerified: true, StructuralProofVerified: true, PhysicalEvidenceBound: true,
 		},
-		Safety: reportOnlySafety(),
+		Safety: reportOnlyServiceR001HandoffSafety(),
 	}
 	_ = manifest
 
@@ -222,7 +238,7 @@ func verifyServiceR001Handoff(path, expectedSHA string, run Run, contextValue Co
 		document.RunID != run.ID || document.SourceRunID != run.ID || document.ContextID != contextValue.ID ||
 		document.Organization.ID != contextValue.OrganizationID || document.Organization.Name != contextValue.OrganizationName ||
 		document.Organization.HierarchyPath != contextValue.OrganizationPath || document.Period != contextValue.Period ||
-		document.Safety != reportOnlySafety() {
+		document.Safety != reportOnlyServiceR001HandoffSafety() {
 		return serviceR001Handoff{}, errors.New("service handoff scope or REPORT_ONLY safety mismatch")
 	}
 	checks := document.CrossChecks

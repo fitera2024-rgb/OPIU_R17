@@ -630,6 +630,19 @@
 - Точная причина подтверждена сопоставлением package/runtime с `d3a4eb2` и текущего `HEAD`: пакет не содержит persistence export/call из `701f2ee`. `materializeServiceR001Handoff` достигает `handoffJournal`; `handoffArtifact` не находит удалённый journal и возвращает raw guard error `R005 physical ERP journal SHA-256 mismatch`, после чего handoff не записывается и verifier/R001 не вызываются. В runtime-логах нового прогона raw exception не сохранён; безопасно отображён только `R005_HANDOFF`, поэтому raw текст зафиксирован как source-correlated guard error, а не как отдельная строка лога.
 - Источник ZIP не изменялся; `REPORT_ONLY=true`, `rules_service=false`, `posting_rows=0`, `ready_to_upload=false`, `release_allowed=false`, `live_1c_allowed=false`, no upload/posting to 1С сохранены. Нового defect ID нет; запись подтверждает R005-015 и stale package/runtime.
 
+### R005-020 — Service validator не принимает канонический R001 workbook `Сверка.xlsx`
+
+- Дата: `30.08.2026`
+- Статус: `OPEN_FIX_PR`
+- Обнаружено: итоговый комбинированный source-Service QA-прогон `run_4d6b0a08a4c48b96687a1c88`, организация `9 Управляющая компания` (`ERP-000000224`), период `2025-10`, после R005-016…R005-019.
+- Наблюдаемое поведение: R001 wrapper/core формирует полный безопасный комплект, включая `Сверка.xlsx`, но Service завершает `FAILED / R001` сообщением `R001 не сформировал полный безопасный диагностический комплект`; Go validator не считает `Сверка.xlsx` reconciliation workbook.
+- Доказательство: `r001/…/technical/manifest.json` регистрирует `Решения.xlsx`, два `РЕЕСТР/*.xlsx`, `Сверка.xlsx` и `УДАЛЕНИЕ/*.xlsx`; `validateR001ReportOnlyPackage` признаёт reconciliation только при `lower == "reconciliation.xlsx"`. R001 core пишет `Сверка.xlsx` и возвращает `posting_rows=0`, `materialized_posting_rows=0`, `execution_allowed=false`, `ready_to_upload=false`, `release_allowed=false`, `live_1c_allowed=false`.
+- Ожидаемое поведение: Service принимает exact canonical `Сверка.xlsx` и сохраняет поддержку прежнего `reconciliation.xlsx`; missing/unregistered/invalid workbook, неверный SHA, unsafe path и zero-route loader workbooks остаются fail-closed.
+- Затронутые пункты контракта: §§10–13; A01–A04, A10–A15.
+- Обязательный регрессионный тест: package с `Сверка.xlsx` проходит текущие manifest/SHA/OOXML/safety checks; прежний `reconciliation.xlsx` проходит; отсутствующий/unsafe/loader case блокируется. Сквозной R005→R001 остаётся `REPORT_ONLY`, без posting/upload.
+- Допустимый scope фикса: имя canonical reconciliation workbook в Go R001 package validator и focused regression; финансовая логика, BOM/OOXML validation, physical journal persistence, authority, R005/R001 semantics, rules service и 1С не меняются.
+- Регрессионная фиксация: независимая ветка `fix/r001-canonical-reconciliation-workbook-name`, отдельный Issue/PR; merge/release запрещены до coordinator review.
+
 ### R005-019 — Service validator не принимает канонический R001 workbook `Решения.xlsx`
 
 - Дата: `30.08.2026`

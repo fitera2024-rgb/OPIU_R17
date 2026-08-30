@@ -395,7 +395,7 @@ func TestValidateR001ReportOnlyPackageAcceptsCanonicalDecisionWorkbookName(t *te
 	outputs[newRelative] = hash
 	writeOrchestrationJSON(t, manifestPath, manifest)
 	if err := validateR001ReportOnlyPackage(r001Dir); err != nil {
-		t.Fatalf("canonical Рeшения.xlsx workbook was rejected: %v", err)
+		t.Fatalf("canonical Решения.xlsx workbook was rejected: %v", err)
 	}
 }
 
@@ -434,6 +434,79 @@ func TestValidateR001ReportOnlyPackageRejectsCanonicalDecisionWorkbookInSubdirec
 	writeOrchestrationJSON(t, manifestPath, manifest)
 	if err := validateR001ReportOnlyPackage(r001Dir); err == nil {
 		t.Fatal("canonical Рeшения.xlsx workbook in a subdirectory was accepted")
+	}
+}
+
+func TestValidateR001ReportOnlyPackageAcceptsCanonicalReconciliationWorkbookName(t *testing.T) {
+	r001Dir := t.TempDir()
+	writeFailSoftR001PackageFixture(t, r001Dir)
+	manifestPath, err := findR001Manifest(r001Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageDir := filepath.Dir(filepath.Dir(manifestPath))
+	oldRelative := "reconciliation.xlsx"
+	newRelative := "Сверка.xlsx"
+	oldPath := filepath.Join(packageDir, oldRelative)
+	newPath := filepath.Join(packageDir, newRelative)
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err := readJSONFile(manifestPath, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	outputs, ok := manifest["outputs"].(map[string]any)
+	if !ok {
+		t.Fatal("R001 fixture outputs are missing")
+	}
+	hash, ok := outputs[oldRelative].(string)
+	if !ok {
+		t.Fatal("R001 fixture reconciliation workbook hash is missing")
+	}
+	delete(outputs, oldRelative)
+	outputs[newRelative] = hash
+	writeOrchestrationJSON(t, manifestPath, manifest)
+	if err := validateR001ReportOnlyPackage(r001Dir); err != nil {
+		t.Fatalf("canonical Сверка.xlsx workbook was rejected: %v", err)
+	}
+}
+
+func TestValidateR001ReportOnlyPackageRejectsCanonicalReconciliationWorkbookInSubdirectory(t *testing.T) {
+	r001Dir := t.TempDir()
+	writeFailSoftR001PackageFixture(t, r001Dir)
+	manifestPath, err := findR001Manifest(r001Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageDir := filepath.Dir(filepath.Dir(manifestPath))
+	legacyRelative := "reconciliation.xlsx"
+	canonicalRelative := filepath.Join("foreign", "Сверка.xlsx")
+	legacyPath := filepath.Join(packageDir, legacyRelative)
+	canonicalPath := filepath.Join(packageDir, canonicalRelative)
+	if err := os.MkdirAll(filepath.Dir(canonicalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(legacyPath, canonicalPath); err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err := readJSONFile(manifestPath, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	outputs, ok := manifest["outputs"].(map[string]any)
+	if !ok {
+		t.Fatal("R001 fixture outputs are missing")
+	}
+	hash, ok := outputs[legacyRelative].(string)
+	if !ok {
+		t.Fatal("R001 fixture reconciliation workbook hash is missing")
+	}
+	delete(outputs, legacyRelative)
+	outputs[filepath.ToSlash(canonicalRelative)] = hash
+	writeOrchestrationJSON(t, manifestPath, manifest)
+	if err := validateR001ReportOnlyPackage(r001Dir); err == nil {
+		t.Fatal("canonical Сверка.xlsx workbook in a subdirectory was accepted")
 	}
 }
 

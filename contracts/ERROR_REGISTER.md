@@ -642,3 +642,16 @@
 - Обязательный регрессионный тест: Go handoff содержит `execution_allowed=false`; R001 exact-schema wrapper принимает handoff и формирует безопасный комплект; unsafe/missing/extra safety keys по-прежнему блокируются.
 - Допустимый scope фикса: `SafetyState`/`reportOnlySafety()` и focused handoff integration test; финансовая логика, BOM/OOXML validation, physical journal persistence, authority, R005/R001 semantics, rules service и 1С не меняются.
 - Регрессионная фиксация: независимая ветка `fix/r005-r001-handoff-safety`, отдельный Issue/PR; merge/release запрещены до coordinator review.
+
+### APPROVAL-004 — article-approval fixture оставляет устаревший `report_sha256` после замены XLSX
+
+- Дата: `30.08.2026`
+- Статус: `VERIFIED`
+- Сообщил: пользовательская диагностика stale test fixture
+- Наблюдаемое поведение: целевые Go-тесты article approvals завершаются безопасной ошибкой `ARTICLE_APPROVAL_R005_ANCHOR_INVALID` во время подготовки фикстуры. Фикстура заменяет `reconciliation.xlsx`, обновляет `codex["output_sha256"]`, но оставляет `codex["report_sha256"]` от прежнего placeholder report.
+- Ожидаемое поведение: после замены итогового XLSX Codex input должен содержать актуальные `report_path` и `report_sha256`; последующая rebinding-цепочка должна оставаться валидной и позволять тесту дойти до проверяемого поведения.
+- Доказательство: независимые свежие прогоны в двух временных исходных деревьях воспроизводят одинаковый `ARTICLE_APPROVAL_R005_ANCHOR_INVALID`; строгий валидатор проверяет `report_path`/`report_sha256` против фактического `reconciliation.xlsx` в `service/source/structural_control_inventory_anchor.go`.
+- Затронутые пункты контракта: §§6–7, 9.5–9.6, 13–14, 16; приложение B. Финансовый барьер, `REPORT_ONLY=true` и `rules_service=false` не изменяются.
+- Обязательный регрессионный тест: article-approval fixture synchronizes Codex `report_sha256` with the replaced report, then targeted approval tests and the canonical Go test gate no longer fail at stale R005 anchor setup.
+- Реализация: `service/source/article_approvals_test.go` синхронизирует `codex["report_sha256"]` с хэшем заменённого XLSX перед сохранением Codex input; существующая rebinding-цепочка `output_sha256`/manifest/inventory/binding сохранена.
+- Протокол проверки: targeted article approvals — `12` top-level tests / `15` cases including subtests, all `PASS`; `TestUI010StructuralCrossLinksUseRoleSpecificReportFields` — `PASS`; canonical staged `go test -count=1 ./...` с pinned Go `go1.22.12`, Node `v24.14.0` и verified `node_modules` — `ok`, exit code `0`. `git diff --check` — `PASS`.

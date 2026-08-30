@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { SpreadsheetFile, Workbook } from "@oai/artifact-tool";
 
 import { financialCoverageNonzeroRows } from "./r001_structural_root_coverage.mjs";
+import { verifyServiceR001Handoff } from "./service_r005_r001_handoff.mjs";
 import { prepareOwnerR001Input, runCore } from "./service_r001_owner_wrapper.mjs";
 
 const PERIOD = "2025-10";
@@ -208,6 +209,65 @@ test("wrapper delegates the pinned Service handoff through the actual core", asy
   await fs.writeFile(handoffPath, `${JSON.stringify(handoff)}\n`);
   const handoffSha256 = (await artifact(handoffPath)).sha256;
   await fs.writeFile(`${handoffPath}.sha256`, `${handoffSha256}\n`);
+
+  await assert.doesNotReject(
+    verifyServiceR001Handoff({ handoffPath, handoffSha256 }),
+    "canonical run-relative proof-binding paths were rejected",
+  );
+
+  const originalBinding = JSON.parse(await fs.readFile(proofBinding.path, "utf8"));
+  const originalHandoff = JSON.parse(JSON.stringify(handoff));
+  const originalBindingBytes = await fs.readFile(proofBinding.path);
+  const originalHandoffBytes = await fs.readFile(handoffPath);
+  const originalSidecarBytes = await fs.readFile(`${handoffPath}.sha256`);
+  const canonicalCodexPath = path.relative(root, codex.path).split(path.sep).join("/");
+  const canonicalProofPath = path.relative(root, proof.path).split(path.sep).join("/");
+
+  async function assertProofBindingBlocked(label, mutate) {
+    await t.test(label, async () => {
+      const changedBinding = JSON.parse(JSON.stringify(originalBinding));
+      mutate(changedBinding);
+      await fs.writeFile(proofBinding.path, `${JSON.stringify(changedBinding)}\n`);
+      const changedBindingRef = await artifact(proofBinding.path);
+      const changedHandoff = JSON.parse(JSON.stringify(originalHandoff));
+      changedHandoff.structural.proof_binding = changedBindingRef;
+      await fs.writeFile(handoffPath, `${JSON.stringify(changedHandoff)}\n`);
+      const changedHandoffRef = await artifact(handoffPath);
+      await fs.writeFile(`${handoffPath}.sha256`, `${changedHandoffRef.sha256}\n`);
+
+      await assert.rejects(
+        verifyServiceR001Handoff({ handoffPath, handoffSha256: changedHandoffRef.sha256 }),
+        /SERVICE_HANDOFF_STRUCTURAL_PROOF_BINDING_MISMATCH/u,
+      );
+
+      await fs.writeFile(proofBinding.path, originalBindingBytes);
+      await fs.writeFile(handoffPath, originalHandoffBytes);
+      await fs.writeFile(`${handoffPath}.sha256`, originalSidecarBytes);
+    });
+  }
+
+  await assertProofBindingBlocked("B ../ traversal BLOCKED", (binding) => {
+    binding.codex_input.path = "../reconciliation.codex-input.json";
+  });
+  await assertProofBindingBlocked("C ./ dot-segment BLOCKED", (binding) => {
+    binding.codex_input.path = "./reconciliation.codex-input.json";
+  });
+  await assertProofBindingBlocked("D nested .. traversal BLOCKED", (binding) => {
+    binding.proof.path = "nested/../structural-control-proof.json";
+  });
+  await assertProofBindingBlocked("E foreign run-root relative path BLOCKED", (binding) => {
+    binding.codex_input.path = "foreign-run/reconciliation.codex-input.json";
+  });
+  await assertProofBindingBlocked("F wrong absolute path BLOCKED", (binding) => {
+    binding.proof.path = path.resolve(root, "foreign-run", "structural-control-proof.json");
+  });
+  await assertProofBindingBlocked("G SHA drift remains BLOCKED", (binding) => {
+    binding.codex_input.sha256 = "A".repeat(64);
+  });
+  await assertProofBindingBlocked("H proof/codex-input path swap remains BLOCKED", (binding) => {
+    binding.codex_input.path = canonicalProofPath;
+    binding.proof.path = canonicalCodexPath;
+  });
 
   const prepared = await prepareOwnerR001Input({ handoffPath, handoffSha256 });
   const result = await runCore(prepared, { outputDir: path.join(root, "outputs") });

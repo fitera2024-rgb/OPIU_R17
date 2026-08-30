@@ -630,6 +630,19 @@
 - Точная причина подтверждена сопоставлением package/runtime с `d3a4eb2` и текущего `HEAD`: пакет не содержит persistence export/call из `701f2ee`. `materializeServiceR001Handoff` достигает `handoffJournal`; `handoffArtifact` не находит удалённый journal и возвращает raw guard error `R005 physical ERP journal SHA-256 mismatch`, после чего handoff не записывается и verifier/R001 не вызываются. В runtime-логах нового прогона raw exception не сохранён; безопасно отображён только `R005_HANDOFF`, поэтому raw текст зафиксирован как source-correlated guard error, а не как отдельная строка лога.
 - Источник ZIP не изменялся; `REPORT_ONLY=true`, `rules_service=false`, `posting_rows=0`, `ready_to_upload=false`, `release_allowed=false`, `live_1c_allowed=false`, no upload/posting to 1С сохранены. Нового defect ID нет; запись подтверждает R005-015 и stale package/runtime.
 
+### R005-019 — Service validator не принимает канонический R001 workbook `Решения.xlsx`
+
+- Дата: `30.08.2026`
+- Статус: `OPEN_FIX_PR`
+- Обнаружено: комбинированный source-Service QA-прогон после R005-016, R005-017 и R005-018, `run_9daeafe1b19f1c08f05cc52f`, организация `9 Управляющая компания` (`ERP-000000224`), период `2025-10`.
+- Наблюдаемое поведение: R001 wrapper принимает handoff и core формирует пять безопасных XLSX/manifest, но Service завершает `FAILED / R001` сообщением `R001 не сформировал полный безопасный диагностический комплект`; полный R001 output package отвергнут Go validator.
+- Доказательство: R001 `technical/manifest.json` регистрирует `Решения.xlsx`, два `РЕЕСТР/*.xlsx`, `Сверка.xlsx` и `УДАЛЕНИЕ/*.xlsx`; `validateR001ReportOnlyPackage` ищет только имя, содержащее `решения_корректировок_ввод_r001`, поэтому реальный canonical `Решения.xlsx` не засчитывается как decision workbook. R001 core сам завершил с `posting_rows=0`, `materialized_posting_rows=0`, `execution_allowed=false`, `ready_to_upload=false`, `release_allowed=false`, `live_1c_allowed=false`.
+- Ожидаемое поведение: Service принимает ровно зарегистрированный canonical R001 decision workbook `Решения.xlsx` и сохраняет поддержку прежнего безопасного имени; отсутствующий/не-XLSX/не зарегистрированный decision workbook, неверный SHA, unsafe output path или loader workbook при zero-route по-прежнему блокируются.
+- Затронутые пункты контракта: §§10–13; A01–A04, A10–A15.
+- Обязательный регрессионный тест: package с `Решения.xlsx` проходит все текущие manifest/SHA/OOXML/safety checks; прежний synthetic long name проходит; missing/unsafe/loader cases остаются fail-closed. Сквозной R005→R001 остаётся `REPORT_ONLY`, без posting/upload.
+- Допустимый scope фикса: имя canonical decision workbook в Go R001 package validator и focused regression; финансовая логика, BOM/OOXML validation, physical journal persistence, authority, R005/R001 semantics, rules service и 1С не меняются.
+- Регрессионная фиксация: независимая ветка `fix/r001-canonical-decision-workbook-name`, отдельный Issue/PR; merge/release запрещены до coordinator review.
+
 ### R005-018 — R001 wrapper неверно разрешает relative proof-binding paths
 
 - Дата: `30.08.2026`

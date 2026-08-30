@@ -294,7 +294,8 @@ func validateR001ReportOnlyPackage(r001Dir string) error {
 			return fmt.Errorf("registered R001 artifact hash mismatch: %s", relative)
 		}
 		lower := strings.ToLower(filepath.ToSlash(relative))
-		hasDecisions = hasDecisions || (strings.Contains(lower, strings.ToLower("решения_корректировок_ввод_r001")) && strings.HasSuffix(lower, ".xlsx"))
+		hasDecisions = hasDecisions || lower == strings.ToLower("решения.xlsx") ||
+			lower == strings.ToLower("решения_корректировок_ввод_r001.xlsx")
 		hasRegistry = hasRegistry || (strings.Contains(lower, strings.ToLower("реестр")) && strings.HasSuffix(lower, ".xlsx"))
 		if lower == "reconciliation.xlsx" {
 			hasReconciliation = true

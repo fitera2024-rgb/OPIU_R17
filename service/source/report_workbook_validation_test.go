@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -79,6 +80,80 @@ func TestValidateExactXLSXSheetUsesOOXMLPartSemantics(t *testing.T) {
 				t.Fatalf("valid worksheet relationship was rejected: %v", err)
 			}
 		})
+	}
+}
+
+func TestValidateExactXLSXSheetAcceptsUTF8BOM(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "journal.xlsx")
+	writeXLSXValidationFixture(t, filePath, "Journal", xlsxWorksheetRelationshipType,
+		"worksheets/sheet1.xml", "", "xl/worksheets/sheet1.xml", xlsxWorksheetContentType,
+		`<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>`)
+	prependXLSXMember(t, filePath, "xl/workbook.xml", []byte{0xef, 0xbb, 0xbf})
+	if err := validateExactXLSXSheet(filePath, "Journal"); err != nil {
+		t.Fatalf("valid OOXML UTF-8 BOM was rejected: %v", err)
+	}
+}
+
+func TestValidateExactXLSXSheetRejectsNonBOMPrefix(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "journal.xlsx")
+	writeXLSXValidationFixture(t, filePath, "Journal", xlsxWorksheetRelationshipType,
+		"worksheets/sheet1.xml", "", "xl/worksheets/sheet1.xml", xlsxWorksheetContentType,
+		`<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>`)
+	prependXLSXMember(t, filePath, "xl/workbook.xml", []byte(" \ufeff"))
+	if err := validateExactXLSXSheet(filePath, "Journal"); err == nil {
+		t.Fatal("non-leading UTF-8 BOM was accepted")
+	}
+}
+
+func prependXLSXMember(t *testing.T, filePath, member string, prefix []byte) {
+	t.Helper()
+	source, err := zip.OpenReader(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpPath := filepath.Join(t.TempDir(), "rewritten.xlsx")
+	tmp, err := os.Create(tmpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(tmp)
+	for _, sourceEntry := range source.File {
+		entry, err := writer.Create(sourceEntry.Name)
+		if err != nil {
+			tmp.Close()
+			t.Fatal(err)
+		}
+		data, err := sourceEntry.Open()
+		if err != nil {
+			tmp.Close()
+			t.Fatal(err)
+		}
+		if sourceEntry.Name == member {
+			if _, err := entry.Write(prefix); err != nil {
+				data.Close()
+				tmp.Close()
+				t.Fatal(err)
+			}
+		}
+		if _, err := io.Copy(entry, data); err != nil {
+			data.Close()
+			tmp.Close()
+			t.Fatal(err)
+		}
+		data.Close()
+	}
+	if err := writer.Close(); err != nil {
+		tmp.Close()
+		t.Fatal(err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -630,6 +630,19 @@
 - Точная причина подтверждена сопоставлением package/runtime с `d3a4eb2` и текущего `HEAD`: пакет не содержит persistence export/call из `701f2ee`. `materializeServiceR001Handoff` достигает `handoffJournal`; `handoffArtifact` не находит удалённый journal и возвращает raw guard error `R005 physical ERP journal SHA-256 mismatch`, после чего handoff не записывается и verifier/R001 не вызываются. В runtime-логах нового прогона raw exception не сохранён; безопасно отображён только `R005_HANDOFF`, поэтому raw текст зафиксирован как source-correlated guard error, а не как отдельная строка лога.
 - Источник ZIP не изменялся; `REPORT_ONLY=true`, `rules_service=false`, `posting_rows=0`, `ready_to_upload=false`, `release_allowed=false`, `live_1c_allowed=false`, no upload/posting to 1С сохранены. Нового defect ID нет; запись подтверждает R005-015 и stale package/runtime.
 
+### R005-016 — Service handoff ошибочно отклоняет OOXML-журнал с UTF-8 BOM
+
+- Дата: `30.08.2026`
+- Статус: `OPEN_FIX_PR`
+- Обнаружено: новый изолированный source-Service прогон `run_8c9d08ec126532923d875ed6`, организация `9 Управляющая компания` (`ERP-000000224`), период `2025-10`, с исходными ZIP-копиями без изменений.
+- Наблюдаемое поведение: R005 создаёт полный безопасный комплект, включая persistent `r005/physical-evidence/erp-journal.xlsx` и точные SHA/лист `Лист_1`, но Service останавливается на `FAILED / R005_HANDOFF`; `materializeServiceR001Handoff` возвращает `R005 physical ERP journal sheet mismatch: OOXML member xl/workbook.xml has content before root element`, R001 не запускается.
+- Доказательство: в `xl/workbook.xml` persistent журнала первые байты `EF BB BF 3C 3F 78 6D 6C` — UTF-8 BOM перед XML declaration; после BOM документ содержит единственный корень `workbook`, лист `Лист_1`, `r:id=rId1`, relationship типа worksheet и существующую часть `xl/worksheets/sheet1.xml`. Ошибка воспроизведена прямым вызовом `materializeServiceR001Handoff` на реальном комплекте; synthetic OOXML tests проходят.
+- Ожидаемое поведение: валидный UTF-8 BOM допускается перед XML declaration/root element; exact worksheet name, relationship type/target, content type, root namespace и все текущие fail-closed checks должны сохраняться. Невалидное содержимое после BOM/до корня по-прежнему блокируется.
+- Затронутые пункты контракта: §§6, 8.1, 10–14; A05–A07, A10–A15.
+- Обязательный регрессионный тест: `validateExactXLSXSheet` принимает workbook/relationships/content-types/worksheet XML с UTF-8 BOM; тот же guard отвергает неизвестный non-whitespace prefix, неверный корень, wrong worksheet relationship/type/target и недостающую часть. Сквозной R005→R001 handoff на данном журнале должен пройти только в `REPORT_ONLY`, без posting/upload.
+- Допустимый scope фикса: tolerant handling только BOM в XML decoder для OOXML package parts и focused regression; финансовая логика, physical journal persistence, authority, R005/R001 semantics, rules service и 1С не меняются.
+- Регрессионная фиксация: независимая ветка `fix/xlsx-bom-worksheet-validation`, отдельный Issue/PR; merge/release запрещены до coordinator review.
+
 ### APPROVAL-004 — article-approval fixture оставляет устаревший `report_sha256` после замены XLSX
 
 - Дата: `30.08.2026`

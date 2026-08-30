@@ -161,6 +161,7 @@ func articleApprovalRebindR005Fixture(t *testing.T, store *Store, run Run) strin
 	reportSHA := articleApprovalFixtureSHA(t, reportPath)
 	codex := articleApprovalReadMap(t, codexPath)
 	codex["output_sha256"] = reportSHA
+	codex["report_sha256"] = reportSHA
 	if err := atomicWriteJSON(codexPath, codex); err != nil {
 		t.Fatal(err)
 	}

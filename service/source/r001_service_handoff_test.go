@@ -49,7 +49,7 @@ func TestServiceR001HandoffProducerAndVerifier(t *testing.T) {
 	}
 	if document.SourceRunID != run.ID || document.RunID != run.ID || document.ContextID != contextValue.ID ||
 		document.Organization.ID != contextValue.OrganizationID || document.Period != contextValue.Period ||
-		document.Safety != reportOnlySafety() || document.PhysicalEvidence.ReuseCount != 0 ||
+		document.Safety != reportOnlyServiceR001HandoffSafety() || document.PhysicalEvidence.ReuseCount != 0 ||
 		!validUpperSHA256(document.PhysicalEvidence.SourceRowIDsSHA256) {
 		t.Fatalf("handoff lost exact scope, physical digest, or REPORT_ONLY closure: %#v", document)
 	}

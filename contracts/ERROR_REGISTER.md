@@ -630,6 +630,19 @@
 - Точная причина подтверждена сопоставлением package/runtime с `d3a4eb2` и текущего `HEAD`: пакет не содержит persistence export/call из `701f2ee`. `materializeServiceR001Handoff` достигает `handoffJournal`; `handoffArtifact` не находит удалённый journal и возвращает raw guard error `R005 physical ERP journal SHA-256 mismatch`, после чего handoff не записывается и verifier/R001 не вызываются. В runtime-логах нового прогона raw exception не сохранён; безопасно отображён только `R005_HANDOFF`, поэтому raw текст зафиксирован как source-correlated guard error, а не как отдельная строка лога.
 - Источник ZIP не изменялся; `REPORT_ONLY=true`, `rules_service=false`, `posting_rows=0`, `ready_to_upload=false`, `release_allowed=false`, `live_1c_allowed=false`, no upload/posting to 1С сохранены. Нового defect ID нет; запись подтверждает R005-015 и stale package/runtime.
 
+### R005-018 — R001 wrapper неверно разрешает relative proof-binding paths
+
+- Дата: `30.08.2026`
+- Статус: `OPEN_FIX_PR`
+- Обнаружено: комбинированный source-Service QA-прогон после R005-016 и R005-017, `run_c4230052d9062afcc9edf98f`, организация `9 Управляющая компания` (`ERP-000000224`), период `2025-10`.
+- Наблюдаемое поведение: R005, persistent journal и Go handoff успешно завершены; R001 wrapper отклоняет корректный proof binding с `SERVICE_HANDOFF_STRUCTURAL_PROOF_BINDING_MISMATCH` на относительных путях `r005/reconciliation.codex-input.json` и `r005/structural-control-proof.json`.
+- Доказательство: Go `materializeStructuralControlProof` формирует proof-binding с canonical run-relative paths; handoff содержит абсолютные run-owned paths и их точные SHA. `service_r001_owner_wrapper.mjs` запускается с runtime root, поэтому текущий `samePath(relative, absolute)` разрешает relative path от process cwd и сравнение ошибочно не совпадает с run root.
+- Ожидаемое поведение: R001 разрешает relative proof-binding artifact paths только относительно canonical Service run root (`dirname(dirname(handoffPath))`), принимает exact canonical `r005/...` paths и отвергает traversal, чужой run root, absolute drift, SHA/scope/proof mismatch.
+- Затронутые пункты контракта: §§6, 8.1, 10–13; A01–A07, A10–A15.
+- Обязательный регрессионный тест: service handoff с relative `proof_binding.codex_input.path`/`proof.path` проходит; `../`, чужой run, absolute подмена, неверный SHA и scope по-прежнему блокируются; полный R005→R001 остаётся `REPORT_ONLY`, без posting/upload.
+- Допустимый scope фикса: run-root-aware path resolution только для двух proof-binding references в Node handoff verifier и focused regression; финансовая логика, BOM/OOXML validation, physical journal persistence, authority, R005/R001 semantics, rules service и 1С не меняются.
+- Регрессионная фиксация: независимая ветка `fix/r001-proof-binding-relative-path`, отдельный Issue/PR; merge/release запрещены до coordinator review.
+
 ### R005-017 — Service handoff не содержит обязательный `execution_allowed=false`
 
 - Дата: `30.08.2026`

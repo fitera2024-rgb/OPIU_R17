@@ -102,6 +102,13 @@ function samePath(left, right) {
   };
   return normalize(left) === normalize(right);
 }
+function sameRunPath(value, expected, runRoot) {
+  const candidate = text(value);
+  if (!candidate) return false;
+  if (path.isAbsolute(candidate)) return samePath(candidate, expected);
+  if (candidate.replaceAll("\\", "/").split("/").some((segment) => segment === "." || segment === "..")) return false;
+  return samePath(path.resolve(runRoot, candidate), expected);
+}
 async function verifyArtifact(ref, label) {
   exactKeys(ref, ["path", "size", "sha256"], label);
   const resolved = path.resolve(text(ref.path));
@@ -176,6 +183,7 @@ export async function verifyServiceR001Handoff({ handoffPath, handoffSha256 } = 
     fail("SERVICE_HANDOFF_PATH_NOT_CANONICAL");
   }
   const raw = await fs.readFile(resolvedHandoff, "utf8").catch((error) => fail("SERVICE_HANDOFF_UNREADABLE", error.message));
+  const runRoot = path.resolve(path.dirname(path.dirname(resolvedHandoff)));
   const actualHash = crypto.createHash("sha256").update(Buffer.from(raw, "utf8")).digest("hex").toUpperCase();
   if (actualHash !== expectedHash) fail("SERVICE_HANDOFF_HASH_MISMATCH");
   const sidecar = text(await fs.readFile(`${resolvedHandoff}.sha256`, "utf8").catch(() => ""));
@@ -231,8 +239,8 @@ export async function verifyServiceR001Handoff({ handoffPath, handoffSha256 } = 
   if (proof.schema_version !== "opiu-structural-control-proof.v1" || proof.report_only !== true || proof.financial_rows !== 0 || proof.posting_rows !== 0 || proof.correction_authority !== false || proof.execution_allowed !== false) fail("SERVICE_HANDOFF_STRUCTURAL_PROOF_UNSAFE");
   if (proofBinding.schema_version !== "opiu-service-structural-control-proof-binding.v1" || proofBinding.run_id !== handoff.run_id || proofBinding.context_id !== handoff.context_id ||
     proofBinding.organization_id !== handoff.organization.id || proofBinding.organization_name !== handoff.organization.name || proofBinding.organization_path !== handoff.organization.hierarchy_path || proofBinding.period !== handoff.period ||
-    !samePath(proofBinding.codex_input?.path, codexPath) || text(proofBinding.codex_input?.sha256).toUpperCase() !== handoff.r005.codex_input.sha256 ||
-    !samePath(proofBinding.proof?.path, proofPath) || text(proofBinding.proof?.sha256).toUpperCase() !== handoff.structural.proof.sha256) fail("SERVICE_HANDOFF_STRUCTURAL_PROOF_BINDING_MISMATCH");
+    !sameRunPath(proofBinding.codex_input?.path, codexPath, runRoot) || text(proofBinding.codex_input?.sha256).toUpperCase() !== handoff.r005.codex_input.sha256 ||
+    !sameRunPath(proofBinding.proof?.path, proofPath, runRoot) || text(proofBinding.proof?.sha256).toUpperCase() !== handoff.structural.proof.sha256) fail("SERVICE_HANDOFF_STRUCTURAL_PROOF_BINDING_MISMATCH");
 
   const physical = handoff.physical_evidence;
   if (physical.status !== "VERIFIED_JOURNAL_REPORT_ONLY" || physical.reuse_count !== 0 || !Array.isArray(physical.source_row_ids) ||

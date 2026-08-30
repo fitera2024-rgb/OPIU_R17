@@ -141,6 +141,7 @@ func (archive *xlsxArchive) decodeRoot(name, expectedLocal string, namespaceOK f
 	defer reader.Close()
 	decoder := xml.NewDecoder(io.LimitReader(reader, 32<<20))
 	var start xml.StartElement
+	allowUTF8BOM := true
 	for {
 		token, tokenErr := decoder.Token()
 		if tokenErr != nil {
@@ -150,9 +151,20 @@ func (archive *xlsxArchive) decodeRoot(name, expectedLocal string, namespaceOK f
 			start = candidate
 			break
 		}
-		if characterData, ok := token.(xml.CharData); ok && strings.TrimSpace(string(characterData)) != "" {
-			return fmt.Errorf("OOXML member %s has content before root element", name)
+		if characterData, ok := token.(xml.CharData); ok {
+			text := string(characterData)
+			if allowUTF8BOM && strings.HasPrefix(text, "\ufeff") {
+				text = strings.TrimPrefix(text, "\ufeff")
+				allowUTF8BOM = false
+			} else if allowUTF8BOM && text != "" {
+				allowUTF8BOM = false
+			}
+			if strings.TrimSpace(text) != "" {
+				return fmt.Errorf("OOXML member %s has content before root element", name)
+			}
+			continue
 		}
+		allowUTF8BOM = false
 	}
 	if start.Name.Local != expectedLocal || namespaceOK == nil || !namespaceOK(start.Name.Space) {
 		return fmt.Errorf("OOXML member %s has unexpected root element", name)

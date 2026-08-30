@@ -364,6 +364,41 @@ func writeFailSoftR001PackageFixture(t *testing.T, r001Dir string) {
 	writeFailSoftR001PackageFixtureForRun(t, r001Dir, Run{}, Context{})
 }
 
+func TestValidateR001ReportOnlyPackageAcceptsCanonicalDecisionWorkbookName(t *testing.T) {
+	r001Dir := t.TempDir()
+	writeFailSoftR001PackageFixture(t, r001Dir)
+	manifestPath, err := findR001Manifest(r001Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageDir := filepath.Dir(filepath.Dir(manifestPath))
+	oldRelative := "Решения_корректировок_ввод_R001.xlsx"
+	newRelative := "Решения.xlsx"
+	oldPath := filepath.Join(packageDir, oldRelative)
+	newPath := filepath.Join(packageDir, newRelative)
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err := readJSONFile(manifestPath, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	outputs, ok := manifest["outputs"].(map[string]any)
+	if !ok {
+		t.Fatal("R001 fixture outputs are missing")
+	}
+	hash, ok := outputs[oldRelative].(string)
+	if !ok {
+		t.Fatal("R001 fixture decision workbook hash is missing")
+	}
+	delete(outputs, oldRelative)
+	outputs[newRelative] = hash
+	writeOrchestrationJSON(t, manifestPath, manifest)
+	if err := validateR001ReportOnlyPackage(r001Dir); err != nil {
+		t.Fatalf("canonical Рeшения.xlsx workbook was rejected: %v", err)
+	}
+}
+
 func writeFailSoftR001PackageFixtureForRun(t *testing.T, r001Dir string, run Run, contextValue Context) {
 	t.Helper()
 	packageDir := filepath.Join(r001Dir, "OPIU_CORRECTIONS_R001_SYNTHETIC")

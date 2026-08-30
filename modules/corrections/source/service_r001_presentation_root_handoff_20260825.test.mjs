@@ -182,7 +182,8 @@ test("wrapper delegates the pinned Service handoff through the actual core", asy
   const proofBinding = await writeJSON("structural-control-proof.binding.json", {
     schema_version: "opiu-service-structural-control-proof-binding.v1", run_id: "RUN-E2E", context_id: "CTX-E2E",
     organization_id: "ORG-1", organization_name: "Organization 1", organization_path: "Holding / Organization 1", period: PERIOD,
-    codex_input: codex, proof,
+    codex_input: { ...codex, path: path.relative(root, codex.path) },
+    proof: { ...proof, path: path.relative(root, proof.path) },
   });
   const emptyIDs = [];
   const handoff = {

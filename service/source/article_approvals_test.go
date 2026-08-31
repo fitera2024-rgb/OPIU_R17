@@ -128,6 +128,115 @@ func articleApprovalWriteTestXLSX(t *testing.T, path string, rows []articleAppro
 	}
 }
 
+func articleApprovalRelationshipTestXLSX(t *testing.T, target, relationshipType, targetMode string, members []string) []byte {
+	t.Helper()
+	var data bytes.Buffer
+	archive := zip.NewWriter(&data)
+	write := func(name, value string) {
+		entry, err := archive.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(value)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("xl/workbook.xml", `<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="01_Правила" sheetId="1" r:id="rId8"/></sheets></workbook>`)
+	mode := ""
+	if targetMode != "" {
+		mode = fmt.Sprintf(` TargetMode="%s"`, articleApprovalXMLText(t, targetMode))
+	}
+	write("xl/_rels/workbook.xml.rels", fmt.Sprintf(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId8" Type="%s" Target="%s"%s/></Relationships>`, articleApprovalXMLText(t, relationshipType), articleApprovalXMLText(t, target), mode))
+	for _, member := range members {
+		write(member, `<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>ok</t></is></c></row></sheetData></worksheet>`)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return data.Bytes()
+}
+
+func TestApproval005OPCWorksheetRelationshipProductionForm(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		target string
+	}{
+		{name: "relative worksheet target", target: "worksheets/sheet8.xml"},
+		{name: "package-absolute worksheet target", target: "/xl/worksheets/sheet8.xml"},
+		{name: "already canonical worksheet target", target: "xl/worksheets/sheet8.xml"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := articleApprovalRelationshipTestXLSX(t, test.target, xlsxWorksheetRelationshipType, "", []string{"xl/worksheets/sheet8.xml"})
+			rows, err := articleApprovalXLSXRowsData(data, "01_Правила")
+			if err != nil {
+				t.Fatalf("valid OPC worksheet target %q rejected: %v", test.target, err)
+			}
+			if len(rows) != 1 || rows[0][1] != "ok" {
+				t.Fatalf("worksheet rows=%#v", rows)
+			}
+		})
+	}
+}
+
+func TestApproval005OPCWorksheetRelationshipRejectsUnsafeOrMissingTargets(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		target           string
+		relationshipType string
+		targetMode       string
+		members          []string
+	}{
+		{
+			name:             "missing target",
+			relationshipType: xlsxWorksheetRelationshipType,
+			members:          []string{"xl/worksheets/sheet8.xml"},
+		},
+		{
+			name:             "missing ZIP member",
+			target:           "worksheets/sheet8.xml",
+			relationshipType: xlsxWorksheetRelationshipType,
+		},
+		{
+			name:             "traversal target",
+			target:           "../escape.xml",
+			relationshipType: xlsxWorksheetRelationshipType,
+			members:          []string{"escape.xml"},
+		},
+		{
+			name:             "external URL target",
+			target:           "https://example.invalid/sheet8.xml",
+			relationshipType: xlsxWorksheetRelationshipType,
+			members:          []string{"xl/https:/example.invalid/sheet8.xml"},
+		},
+		{
+			name:             "external target mode",
+			target:           "worksheets/sheet8.xml",
+			relationshipType: xlsxWorksheetRelationshipType,
+			targetMode:       "External",
+			members:          []string{"xl/worksheets/sheet8.xml"},
+		},
+		{
+			name:             "non-worksheet relationship",
+			target:           "worksheets/sheet8.xml",
+			relationshipType: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink",
+			members:          []string{"xl/worksheets/sheet8.xml"},
+		},
+		{
+			name:             "duplicate package entry",
+			target:           "worksheets/sheet8.xml",
+			relationshipType: xlsxWorksheetRelationshipType,
+			members:          []string{"xl/worksheets/sheet8.xml", "xl/worksheets/sheet8.xml"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := articleApprovalRelationshipTestXLSX(t, test.target, test.relationshipType, test.targetMode, test.members)
+			if rows, err := articleApprovalXLSXRowsData(data, "01_Правила"); err == nil {
+				t.Fatalf("unsafe or missing relationship accepted: rows=%#v", rows)
+			}
+		})
+	}
+}
+
 func articleApprovalReadMap(t *testing.T, path string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(path)

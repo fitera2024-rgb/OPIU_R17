@@ -49,7 +49,7 @@
 - Для года пользователь последовательно запускает `YYYY-01` … `YYYY-12`; автоматический fan-out не планируется.
 - Каждая месячная задача независимо проверяет organization/period, R005 evidence, `SourceRowID`/provenance, handoff, R001 result и approval scope. Межмесячное смешение, неттирование и повторное evidence запрещены.
 - `FY-001` больше не требует технической реализации годового Service fan-out. Это замена продуктового требования, а не заявление об исправлении annual execution.
-- PR #19 `FY-001: register blocked annual structural-control fan-out` не объединяется. Его диагностика остаётся историческим свидетельством.
+- PR #19 `FY-001: register blocked annual structural-control fan-out` никогда не должен быть объединён. После объединения контракта v0.5 в `release/r17` PR #19 закрывается без merge как superseded; его диагностика остаётся историческим свидетельством.
 
 ## Текущее распределение APPROVAL-001
 

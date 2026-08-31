@@ -26,6 +26,25 @@ import (
 
 const articleApprovalSchema = "opiu-article-approval.v1"
 const articleApprovalQueueSchema = "opiu-article-approval-queue.v1"
+const articleApprovalDiagnosticSchema = "opiu-article-approval-diagnostics.v1"
+const articleApprovalFallbackDiagnosticCode = "ARTICLE_APPROVAL_VERSION_REJECTED_FALLBACK"
+
+const (
+	articleApprovalRejectionPublicationRead = "PUBLICATION_READ_FAILED"
+	articleApprovalRejectionSidecarMissing  = "SIDECAR_MISSING"
+	articleApprovalRejectionSidecarRead     = "SIDECAR_READ_FAILED"
+	articleApprovalRejectionSidecarInvalid  = "SIDECAR_INVALID"
+	articleApprovalRejectionSHA256Mismatch  = "SHA256_MISMATCH"
+	articleApprovalRejectionMalformedJSON   = "MALFORMED_JSON"
+	articleApprovalRejectionUnsafeMetadata  = "UNSAFE_METADATA"
+	articleApprovalRejectionMetadataInvalid = "METADATA_INVALID"
+	articleApprovalRejectionVersionMismatch = "VERSION_MISMATCH"
+	articleApprovalRejectionScopeMismatch   = "SCOPE_MISMATCH"
+	articleApprovalRejectionSourceInvalid   = "SOURCE_OR_PERIOD_INVALID"
+	articleApprovalRejectionDecisions       = "INVALID_DECISIONS"
+	articleApprovalRejectionSourceBinding   = "SOURCE_BINDING_INVALID"
+	articleApprovalRejectionValidation      = "VALIDATION_REJECTED"
+)
 
 var articleApprovalDecisionList = []string{
 	"УТВЕРЖДАЮ",
@@ -143,6 +162,81 @@ type articleApprovalDocument struct {
 	FixedAt           time.Time               `json:"fixed_at"`
 	Decisions         []articleApprovalRow    `json:"decisions"`
 	Safety            articleApprovalSafety   `json:"safety"`
+}
+
+type articleApprovalDiagnostic struct {
+	Code                       string `json:"code"`
+	RejectionCode              string `json:"rejection_code"`
+	RejectedPublication        string `json:"rejected_publication"`
+	RejectedApprovalID         string `json:"rejected_approval_id,omitempty"`
+	RejectedVersion            int    `json:"rejected_version"`
+	SelectedFallbackApprovalID string `json:"selected_fallback_approval_id"`
+	SelectedFallbackVersion    int    `json:"selected_fallback_version"`
+	SelectedFallbackSHA256     string `json:"selected_fallback_sha256"`
+	OrganizationID             string `json:"organization_id"`
+	OrganizationName           string `json:"organization_name"`
+	OrganizationPath           string `json:"organization_hierarchy_path"`
+	Period                     string `json:"period"`
+	FallbackOccurred           bool   `json:"fallback_occurred"`
+}
+
+type articleApprovalDiagnosticArtifact struct {
+	SchemaVersion string                      `json:"schema_version"`
+	RunID         string                      `json:"run_id"`
+	ContextID     string                      `json:"context_id"`
+	Diagnostics   []articleApprovalDiagnostic `json:"diagnostics"`
+}
+
+type articleApprovalSelection struct {
+	Document    articleApprovalDocument
+	Path        string
+	SHA256      string
+	Diagnostics []articleApprovalDiagnostic
+}
+
+type articleApprovalRejectedCandidate struct {
+	Publication string
+	ApprovalID  string
+	Version     int
+	Code        string
+}
+
+type articleApprovalRejectionError struct {
+	code string
+	err  error
+}
+
+func (e *articleApprovalRejectionError) Error() string {
+	return e.err.Error()
+}
+
+func (e *articleApprovalRejectionError) Unwrap() error {
+	return e.err
+}
+
+func newArticleApprovalRejection(code string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &articleApprovalRejectionError{code: code, err: err}
+}
+
+func articleApprovalRejectionCode(err error) string {
+	var rejection *articleApprovalRejectionError
+	if errors.As(err, &rejection) && rejection.code != "" {
+		return rejection.code
+	}
+	return articleApprovalRejectionValidation
+}
+
+func articleApprovalDiagnosticApprovalID(document articleApprovalDocument) string {
+	value := cleanBusinessText(document.ApprovalID, 160)
+	base, err := secureBaseName(value)
+	if err != nil || base != value {
+		digest := sha256.Sum256([]byte(document.ApprovalID))
+		return "approval_id_sha256_" + strings.ToUpper(hex.EncodeToString(digest[:]))
+	}
+	return value
 }
 
 type articleApprovalRequest struct {
@@ -1111,33 +1205,61 @@ func articleApprovalPublicationVersionPattern(slug string) *regexp.Regexp {
 	return regexp.MustCompile(`^article_registry_` + regexp.QuoteMeta(slug) + `_v([0-9]+)\.approved\.json(?:\.sha256)?$`)
 }
 
-func articleApprovalReadFile(path string) (articleApprovalDocument, string, error) {
+func articleApprovalReadFileBytes(path string) (articleApprovalDocument, string, []byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return articleApprovalDocument{}, "", nil, newArticleApprovalRejection(articleApprovalRejectionPublicationRead, err)
+	}
+	if !info.Mode().IsRegular() {
+		return articleApprovalDocument{}, "", nil, newArticleApprovalRejection(articleApprovalRejectionPublicationRead, errors.New("approved publication is not a regular file"))
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return articleApprovalDocument{}, "", err
+		return articleApprovalDocument{}, "", nil, newArticleApprovalRejection(articleApprovalRejectionPublicationRead, err)
+	}
+	sidecarInfo, err := os.Lstat(path + ".sha256")
+	if err != nil {
+		code := articleApprovalRejectionSidecarRead
+		if errors.Is(err, os.ErrNotExist) {
+			code = articleApprovalRejectionSidecarMissing
+		}
+		return articleApprovalDocument{}, "", nil, newArticleApprovalRejection(code, fmt.Errorf("approved SHA-256 sidecar is missing: %w", err))
+	}
+	if !sidecarInfo.Mode().IsRegular() {
+		return articleApprovalDocument{}, "", nil, newArticleApprovalRejection(articleApprovalRejectionSidecarRead, errors.New("approved SHA-256 sidecar is not a regular file"))
 	}
 	sidecar, err := os.ReadFile(path + ".sha256")
 	if err != nil {
-		return articleApprovalDocument{}, "", fmt.Errorf("approved SHA-256 sidecar is missing: %w", err)
+		code := articleApprovalRejectionSidecarRead
+		if errors.Is(err, os.ErrNotExist) {
+			code = articleApprovalRejectionSidecarMissing
+		}
+		return articleApprovalDocument{}, "", nil, newArticleApprovalRejection(code, fmt.Errorf("approved SHA-256 sidecar is missing: %w", err))
 	}
 	actual := sha256.Sum256(data)
 	actualSHA := strings.ToUpper(hex.EncodeToString(actual[:]))
 	fields := strings.Fields(string(sidecar))
 	if len(fields) != 2 || fields[1] != filepath.Base(path) {
-		return articleApprovalDocument{}, "", errors.New("approved SHA-256 sidecar metadata is invalid")
+		return articleApprovalDocument{}, "", nil, newArticleApprovalRejection(articleApprovalRejectionSidecarInvalid, errors.New("approved SHA-256 sidecar metadata is invalid"))
 	}
 	declared := strings.ToUpper(fields[0])
 	if !articleApprovalSHA.MatchString(declared) || declared != actualSHA {
-		return articleApprovalDocument{}, "", errors.New("approved SHA-256 does not match JSON")
+		return articleApprovalDocument{}, "", nil, newArticleApprovalRejection(articleApprovalRejectionSHA256Mismatch, errors.New("approved SHA-256 does not match JSON"))
 	}
 	var document articleApprovalDocument
 	if err := decodeStrictJSON(data, &document); err != nil {
-		return articleApprovalDocument{}, "", err
+		return articleApprovalDocument{}, "", nil, newArticleApprovalRejection(articleApprovalRejectionMalformedJSON, err)
 	}
 	if err := validateArticleApprovalRawSafety(data); err != nil {
-		return articleApprovalDocument{}, "", err
+		return document, "", nil, newArticleApprovalRejection(articleApprovalRejectionUnsafeMetadata, err)
 	}
-	return document, actualSHA, nil
+	return document, actualSHA, data, nil
+
+}
+
+func articleApprovalReadFile(path string) (articleApprovalDocument, string, error) {
+	document, digest, _, err := articleApprovalReadFileBytes(path)
+	return document, digest, err
 }
 
 func validateArticleApprovalRawSafety(data []byte) error {
@@ -1179,20 +1301,20 @@ func validateArticleApprovalRawSafety(data []byte) error {
 
 func validateArticleApprovalDocument(document articleApprovalDocument, scope articleApprovalScope) error {
 	if document.SchemaVersion != articleApprovalSchema || document.Version < 1 || document.ApprovalID == "" || !articleApprovalActor.MatchString(document.Actor) {
-		return errors.New("approved document metadata is invalid")
+		return newArticleApprovalRejection(articleApprovalRejectionMetadataInvalid, errors.New("approved document metadata is invalid"))
 	}
 	if !articleApprovalScopeEqual(document.OrganizationScope, scope) || document.Validity.From != scope.Period || document.Validity.To != scope.Period {
-		return errors.New("approved document organization or period scope mismatch")
+		return newArticleApprovalRejection(articleApprovalRejectionScopeMismatch, errors.New("approved document organization or period scope mismatch"))
 	}
 	if !articleApprovalMonth.MatchString(document.Validity.From) || document.Source.XLSX == "" || !articleApprovalSHA.MatchString(document.Source.SHA256) {
-		return errors.New("approved document source or period is invalid")
+		return newArticleApprovalRejection(articleApprovalRejectionSourceInvalid, errors.New("approved document source or period is invalid"))
 	}
 	if document.Safety.Mode != "REPORT_ONLY" || document.Safety.DecisionType != "CLASSIFICATION_ONLY" || document.Safety.FinancialRows != 0 || document.Safety.PostingRows != 0 || document.Safety.ReadyToUpload || document.Safety.ReleaseAllowed || document.Safety.Live1CAllowed {
-		return errors.New("approved document opens financial authority")
+		return newArticleApprovalRejection(articleApprovalRejectionUnsafeMetadata, errors.New("approved document opens financial authority"))
 	}
 	issues := articleApprovalValidateRows(document.Decisions, scope, nil, false)
 	if len(issues) > 0 {
-		return fmt.Errorf("approved document contains invalid decisions: %s", issues[0].Code)
+		return newArticleApprovalRejection(articleApprovalRejectionDecisions, fmt.Errorf("approved document contains invalid decisions: %s", issues[0].Code))
 	}
 	return nil
 }
@@ -1200,22 +1322,22 @@ func validateArticleApprovalDocument(document articleApprovalDocument, scope art
 func validateArticleApprovalStoredSource(store *Store, source articleApprovalSource) error {
 	resolved, _, err := articleApprovalResolveSource(store, source.XLSX, source.SHA256)
 	if err != nil {
-		return err
+		return newArticleApprovalRejection(articleApprovalRejectionSourceBinding, err)
 	}
 	if resolved.XLSX != source.XLSX || resolved.SHA256 != source.SHA256 {
-		return errors.New("approved document source binding is not canonical")
+		return newArticleApprovalRejection(articleApprovalRejectionSourceBinding, errors.New("approved document source binding is not canonical"))
 	}
 	return nil
 }
 
-func articleApprovalLatest(store *Store, scope articleApprovalScope) (articleApprovalDocument, string, error) {
+func articleApprovalLatestSelection(store *Store, scope articleApprovalScope) (articleApprovalSelection, error) {
 	slug := articleApprovalOrganizationSlug(scope)
 	entries, err := os.ReadDir(articleApprovalDirectory(store))
 	if errors.Is(err, os.ErrNotExist) {
-		return articleApprovalDocument{}, "", nil
+		return articleApprovalSelection{}, nil
 	}
 	if err != nil {
-		return articleApprovalDocument{}, "", err
+		return articleApprovalSelection{}, err
 	}
 	pattern := articleApprovalVersionPattern(slug)
 	type candidate struct {
@@ -1235,12 +1357,27 @@ func articleApprovalLatest(store *Store, scope articleApprovalScope) (articleApp
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].version > candidates[j].version })
 	var firstError error
+	rejected := []articleApprovalRejectedCandidate{}
 	for _, item := range candidates {
-		document, _, readErr := articleApprovalReadFile(item.path)
+		document, publicationSHA, readErr := articleApprovalReadFile(item.path)
 		if readErr != nil {
 			if firstError == nil {
 				firstError = readErr
 			}
+			rejected = append(rejected, articleApprovalRejectedCandidate{
+				Publication: filepath.Base(item.path), Version: item.version, Code: articleApprovalRejectionCode(readErr),
+			})
+			continue
+		}
+		if document.Version != item.version {
+			versionErr := newArticleApprovalRejection(articleApprovalRejectionVersionMismatch, errors.New("approved document version does not match publication name"))
+			if firstError == nil {
+				firstError = versionErr
+			}
+			rejected = append(rejected, articleApprovalRejectedCandidate{
+				Publication: filepath.Base(item.path), ApprovalID: articleApprovalDiagnosticApprovalID(document),
+				Version: item.version, Code: articleApprovalRejectionCode(versionErr),
+			})
 			continue
 		}
 		validationScope := scope
@@ -1252,23 +1389,46 @@ func articleApprovalLatest(store *Store, scope articleApprovalScope) (articleApp
 			if firstError == nil {
 				firstError = validateErr
 			}
+			rejected = append(rejected, articleApprovalRejectedCandidate{
+				Publication: filepath.Base(item.path), Version: item.version, Code: articleApprovalRejectionCode(validateErr),
+			})
 			continue
 		}
 		if validateErr := validateArticleApprovalStoredSource(store, document.Source); validateErr != nil {
 			if firstError == nil {
 				firstError = validateErr
 			}
+			rejected = append(rejected, articleApprovalRejectedCandidate{
+				Publication: filepath.Base(item.path), ApprovalID: articleApprovalDiagnosticApprovalID(document),
+				Version: item.version, Code: articleApprovalRejectionCode(validateErr),
+			})
 			continue
 		}
 		if otherMonth {
 			continue
 		}
-		return document, item.path, nil
+		diagnostics := make([]articleApprovalDiagnostic, 0, len(rejected))
+		for _, item := range rejected {
+			diagnostics = append(diagnostics, articleApprovalDiagnostic{
+				Code: articleApprovalFallbackDiagnosticCode, RejectionCode: item.Code,
+				RejectedPublication: item.Publication, RejectedApprovalID: item.ApprovalID, RejectedVersion: item.Version,
+				SelectedFallbackApprovalID: articleApprovalDiagnosticApprovalID(document), SelectedFallbackVersion: document.Version,
+				SelectedFallbackSHA256: publicationSHA, OrganizationID: scope.OrganizationID,
+				OrganizationName: scope.OrganizationName, OrganizationPath: scope.OrganizationPath,
+				Period: scope.Period, FallbackOccurred: true,
+			})
+		}
+		return articleApprovalSelection{Document: document, Path: item.path, SHA256: publicationSHA, Diagnostics: diagnostics}, nil
 	}
 	if firstError != nil {
-		return articleApprovalDocument{}, "", firstError
+		return articleApprovalSelection{}, firstError
 	}
-	return articleApprovalDocument{}, "", nil
+	return articleApprovalSelection{}, nil
+}
+
+func articleApprovalLatest(store *Store, scope articleApprovalScope) (articleApprovalDocument, string, error) {
+	selection, err := articleApprovalLatestSelection(store, scope)
+	return selection.Document, selection.Path, err
 }
 
 func articleApprovalDocumentBytes(document articleApprovalDocument) ([]byte, string, error) {
@@ -1279,6 +1439,137 @@ func articleApprovalDocumentBytes(document articleApprovalDocument) ([]byte, str
 	data = append(data, '\n')
 	digest := sha256.Sum256(data)
 	return data, strings.ToUpper(hex.EncodeToString(digest[:])), nil
+}
+
+func articleApprovalVerifiedPublicationBytes(store *Store, selection articleApprovalSelection, scope articleApprovalScope) ([]byte, error) {
+	if selection.Path == "" || !articleApprovalSHA.MatchString(selection.SHA256) {
+		return nil, errors.New("selected article approval publication identity is incomplete")
+	}
+	document, actual, data, err := articleApprovalReadFileBytes(selection.Path)
+	if err != nil {
+		return nil, err
+	}
+	if actual != selection.SHA256 || document.Version != selection.Document.Version || document.ApprovalID != selection.Document.ApprovalID {
+		return nil, errors.New("selected article approval publication changed after validation")
+	}
+	if err := validateArticleApprovalDocument(document, scope); err != nil {
+		return nil, err
+	}
+	if err := validateArticleApprovalStoredSource(store, document.Source); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func articleApprovalDiagnosticArtifactBytes(run Run, diagnostics []articleApprovalDiagnostic) ([]byte, string, error) {
+	artifact := articleApprovalDiagnosticArtifact{
+		SchemaVersion: articleApprovalDiagnosticSchema, RunID: run.ID, ContextID: run.ContextID, Diagnostics: diagnostics,
+	}
+	data, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		return nil, "", err
+	}
+	data = append(data, '\n')
+	digest := sha256.Sum256(data)
+	return data, strings.ToUpper(hex.EncodeToString(digest[:])), nil
+}
+
+func articleApprovalDiagnosticArtifactPath(runDir string) string {
+	return filepath.Join(runDir, "r005-input", "article-approval-fallback-diagnostics.json")
+}
+
+func articleApprovalReadVerifiedPair(path string) ([]byte, string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, "", err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, "", errors.New("immutable JSON publication is not a regular file")
+	}
+	sidecarPath := path + ".sha256"
+	sidecarInfo, err := os.Lstat(sidecarPath)
+	if err != nil {
+		return nil, "", err
+	}
+	if !sidecarInfo.Mode().IsRegular() {
+		return nil, "", errors.New("immutable SHA-256 sidecar is not a regular file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", err
+	}
+	sidecar, err := os.ReadFile(sidecarPath)
+	if err != nil {
+		return nil, "", err
+	}
+	digest := sha256.Sum256(data)
+	actual := strings.ToUpper(hex.EncodeToString(digest[:]))
+	fields := strings.Fields(string(sidecar))
+	if len(fields) != 2 || fields[1] != filepath.Base(path) || !articleApprovalSHA.MatchString(fields[0]) || strings.ToUpper(fields[0]) != actual {
+		return nil, "", errors.New("immutable SHA-256 sidecar does not match JSON")
+	}
+	return data, actual, nil
+}
+
+func articleApprovalKnownRejectionCode(code string) bool {
+	switch code {
+	case articleApprovalRejectionPublicationRead, articleApprovalRejectionSidecarMissing,
+		articleApprovalRejectionSidecarRead, articleApprovalRejectionSidecarInvalid,
+		articleApprovalRejectionSHA256Mismatch, articleApprovalRejectionMalformedJSON,
+		articleApprovalRejectionUnsafeMetadata, articleApprovalRejectionMetadataInvalid,
+		articleApprovalRejectionVersionMismatch, articleApprovalRejectionScopeMismatch,
+		articleApprovalRejectionSourceInvalid, articleApprovalRejectionDecisions,
+		articleApprovalRejectionSourceBinding, articleApprovalRejectionValidation:
+		return true
+	default:
+		return false
+	}
+}
+
+func articleApprovalReadDiagnosticArtifact(runDir string, run Run, contextValue *Context) ([]articleApprovalDiagnostic, error) {
+	diagnosticPath := articleApprovalDiagnosticArtifactPath(runDir)
+	_, diagnosticErr := os.Lstat(diagnosticPath)
+	_, sidecarErr := os.Lstat(diagnosticPath + ".sha256")
+	if errors.Is(diagnosticErr, os.ErrNotExist) && errors.Is(sidecarErr, os.ErrNotExist) {
+		return nil, nil
+	}
+	if diagnosticErr != nil || sidecarErr != nil || contextValue == nil {
+		return nil, errors.New("article approval diagnostic identity is incomplete")
+	}
+	data, _, err := articleApprovalReadVerifiedPair(diagnosticPath)
+	if err != nil {
+		return nil, err
+	}
+	var artifact articleApprovalDiagnosticArtifact
+	if err := decodeStrictJSON(data, &artifact); err != nil || artifact.SchemaVersion != articleApprovalDiagnosticSchema ||
+		artifact.RunID != run.ID || artifact.ContextID != run.ContextID || len(artifact.Diagnostics) == 0 {
+		return nil, errors.New("article approval diagnostic artifact metadata is invalid")
+	}
+	settingsPath := filepath.Join(runDir, "r005-input", "article-approval-settings.json")
+	settingsData, settingsSHA, err := articleApprovalReadVerifiedPair(settingsPath)
+	if err != nil {
+		return nil, err
+	}
+	var settings articleApprovalDocument
+	if err := decodeStrictJSON(settingsData, &settings); err != nil || validateArticleApprovalRawSafety(settingsData) != nil {
+		return nil, errors.New("article approval settings artifact is invalid")
+	}
+	scope := articleApprovalScopeFromContext(*contextValue)
+	if err := validateArticleApprovalDocument(settings, scope); err != nil {
+		return nil, errors.New("article approval settings scope is invalid")
+	}
+	selectedApprovalID := articleApprovalDiagnosticApprovalID(settings)
+	for _, diagnostic := range artifact.Diagnostics {
+		if diagnostic.Code != articleApprovalFallbackDiagnosticCode || !articleApprovalKnownRejectionCode(diagnostic.RejectionCode) ||
+			diagnostic.RejectedPublication == "" || filepath.Base(diagnostic.RejectedPublication) != diagnostic.RejectedPublication ||
+			diagnostic.RejectedVersion < 1 || selectedApprovalID == "" || diagnostic.SelectedFallbackApprovalID != selectedApprovalID ||
+			diagnostic.SelectedFallbackVersion != settings.Version || diagnostic.SelectedFallbackSHA256 != settingsSHA ||
+			diagnostic.OrganizationID != scope.OrganizationID || diagnostic.OrganizationName != scope.OrganizationName ||
+			diagnostic.OrganizationPath != scope.OrganizationPath || diagnostic.Period != scope.Period || !diagnostic.FallbackOccurred {
+			return nil, errors.New("article approval diagnostic evidence does not match run settings")
+		}
+	}
+	return artifact.Diagnostics, nil
 }
 
 func createArticleApprovalImmutableFile(path string, data []byte) error {
@@ -1504,16 +1795,23 @@ func (s *Server) handleArticleApprovals(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "ARTICLE_APPROVAL_SCOPE_INVALID"})
 			return
 		}
-		document, filePath, err := articleApprovalLatest(s.store, scope)
+		selection, err := articleApprovalLatestSelection(s.store, scope)
 		if err != nil {
 			writeJSON(w, http.StatusConflict, apiError{Error: "ARTICLE_APPROVAL_VERSION_REJECTED"})
 			return
 		}
-		if filePath == "" {
+		if selection.Path == "" {
 			writeJSON(w, http.StatusOK, map[string]any{"status": "NONE", "organization_scope": scope, "safety": reportOnlySafety()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "PASS", "path": filePath, "document": document, "safety": reportOnlySafety()})
+		payload := map[string]any{
+			"status": "PASS", "file_name": filepath.Base(selection.Path), "document": selection.Document,
+			"safety": reportOnlySafety(),
+		}
+		if len(selection.Diagnostics) > 0 {
+			payload["diagnostics"] = selection.Diagnostics
+		}
+		writeJSON(w, http.StatusOK, payload)
 	case http.MethodPost:
 		var request articleApprovalQueueRequest
 		if err := readJSON(r, &request); err != nil {
@@ -1619,20 +1917,22 @@ func (p *Pipeline) materializeActiveArticleApprovalSettings(run Run, contextValu
 		return "", errors.New("article approval settings escaped exact run root")
 	}
 	scope := articleApprovalScopeFromContext(contextValue)
-	document, _, err := articleApprovalLatest(p.store, scope)
+	selection, err := articleApprovalLatestSelection(p.store, scope)
 	if err != nil {
 		return "", err
 	}
+	document := selection.Document
 	if document.Version == 0 {
 		return "", nil
 	}
 	if err := validateArticleApprovalDocument(document, scope); err != nil {
 		return "", err
 	}
-	data, digest, err := articleApprovalDocumentBytes(document)
+	data, err := articleApprovalVerifiedPublicationBytes(p.store, selection, scope)
 	if err != nil {
 		return "", err
 	}
+	digest := selection.SHA256
 	if digest == "" {
 		return "", errors.New("article approval settings digest is empty")
 	}
@@ -1642,6 +1942,25 @@ func (p *Pipeline) materializeActiveArticleApprovalSettings(run Run, contextValu
 	}
 	if err := createArticleApprovalImmutablePair(destination, data, []byte(digest+"  "+filepath.Base(destination)+"\n")); err != nil {
 		return "", err
+	}
+	if len(selection.Diagnostics) > 0 {
+		diagnosticData, diagnosticSHA, err := articleApprovalDiagnosticArtifactBytes(run, selection.Diagnostics)
+		if err == nil {
+			diagnosticPath := articleApprovalDiagnosticArtifactPath(expectedRunDir)
+			err = createArticleApprovalImmutablePair(diagnosticPath, diagnosticData, []byte(diagnosticSHA+"  "+filepath.Base(diagnosticPath)+"\n"))
+		}
+		if err != nil {
+			cleanupErrors := []error{}
+			for _, path := range []string{destination, destination + ".sha256"} {
+				if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					cleanupErrors = append(cleanupErrors, removeErr)
+				}
+			}
+			if cleanupErr := errors.Join(cleanupErrors...); cleanupErr != nil {
+				return "", errors.Join(err, fmt.Errorf("cleanup unpublished article approval settings: %w", cleanupErr))
+			}
+			return "", err
+		}
 	}
 	return destination, nil
 }

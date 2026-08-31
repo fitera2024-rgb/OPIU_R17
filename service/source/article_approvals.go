@@ -994,6 +994,11 @@ func articleApprovalScopeEqual(left, right articleApprovalScope) bool {
 		left.OrganizationPath == right.OrganizationPath && left.Period == right.Period
 }
 
+func articleApprovalOrganizationScopeEqual(left, right articleApprovalScope) bool {
+	return left.OrganizationID == right.OrganizationID && left.OrganizationName == right.OrganizationName &&
+		left.OrganizationPath == right.OrganizationPath
+}
+
 func articleApprovalTarget(row articleApprovalRow) (string, string, string) {
 	if row.UserDecision == "ИЗМЕНИТЬ" {
 		return cleanBusinessText(row.CorrectBlockERP, 300), cleanBusinessText(row.CorrectArticleERP, 300), cleanBusinessText(row.CorrectCodeERP, 200)
@@ -1238,7 +1243,12 @@ func articleApprovalLatest(store *Store, scope articleApprovalScope) (articleApp
 			}
 			continue
 		}
-		if validateErr := validateArticleApprovalDocument(document, scope); validateErr != nil {
+		validationScope := scope
+		otherMonth := articleApprovalOrganizationScopeEqual(document.OrganizationScope, scope) && document.OrganizationScope.Period != scope.Period
+		if otherMonth {
+			validationScope = document.OrganizationScope
+		}
+		if validateErr := validateArticleApprovalDocument(document, validationScope); validateErr != nil {
 			if firstError == nil {
 				firstError = validateErr
 			}
@@ -1248,6 +1258,9 @@ func articleApprovalLatest(store *Store, scope articleApprovalScope) (articleApp
 			if firstError == nil {
 				firstError = validateErr
 			}
+			continue
+		}
+		if otherMonth {
 			continue
 		}
 		return document, item.path, nil

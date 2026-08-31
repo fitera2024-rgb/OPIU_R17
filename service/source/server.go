@@ -153,6 +153,10 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		}
 		run, err := s.store.CreateRun(strings.TrimSpace(request.ContextID))
 		if err != nil {
+			if errors.Is(err, errMonthlyPeriodRequired) {
+				writeJSON(w, http.StatusBadRequest, apiError{Error: err.Error()})
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, apiError{Error: "Активный контекст недоступен"})
 			return
 		}

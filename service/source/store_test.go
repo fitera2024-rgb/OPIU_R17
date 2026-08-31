@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -71,16 +72,89 @@ func TestContextPreservesExactSelectedSources(t *testing.T) {
 	}
 }
 
-func TestPeriodContractSupportsMonthQuarterAndYear(t *testing.T) {
-	for _, period := range []string{"2026-08", "2026-Q3", "2026"} {
+func TestPeriodContractSupportsOnlyConcreteMonth(t *testing.T) {
+	for _, period := range []string{"2025-01", "2025-10", "2026-12"} {
 		if !acceptedPeriod.MatchString(period) {
 			t.Errorf("period %q was rejected", period)
 		}
 	}
-	for _, period := range []string{"2026-13", "2026-Q5", "26-08", "latest"} {
+	for _, period := range []string{
+		"2025", "2025-Q1", "2025-Q4", "2025-13", "25-10",
+		"2025-10..2025-11", "2025-10/2025-11", "", "latest",
+	} {
 		if acceptedPeriod.MatchString(period) {
 			t.Errorf("invalid period %q was accepted", period)
 		}
+	}
+}
+
+func TestMonthlyContextAcceptsAnnualSourceContainers(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	erp := addTestSource(t, store, SourceERP, "ERP_Полный_год_2025.zip")
+	intalev := addTestSource(t, store, SourceIntalev, "Инталев_20250101_20251231.zip")
+
+	contextValue, err := store.CreateContext(createContextRequest{
+		Organization:  "9 Управляющая компания",
+		Period:        "2025-10",
+		ERPFileID:     erp.ID,
+		IntalevFileID: intalev.ID,
+	})
+	if err != nil {
+		t.Fatalf("annual source containers were rejected for a concrete month: %v", err)
+	}
+	if contextValue.Period != "2025-10" || contextValue.ERPFileID != erp.ID || contextValue.IntalevFileID != intalev.ID {
+		t.Fatalf("monthly source-container scope changed: %+v", contextValue)
+	}
+}
+
+func TestLegacyNonMonthlyContextCannotCreateRun(t *testing.T) {
+	for _, period := range []string{"2025", "2025-Q1"} {
+		t.Run(period, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := OpenStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			erp := addTestSource(t, store, SourceERP, "erp.xlsx")
+			intalev := addTestSource(t, store, SourceIntalev, "intalev.xlsx")
+			contextValue, err := store.CreateContext(createContextRequest{
+				Organization:  "9 Управляющая компания",
+				Period:        "2025-10",
+				ERPFileID:     erp.ID,
+				IntalevFileID: intalev.ID,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			store.mu.Lock()
+			legacy := store.state.Contexts[contextValue.ID]
+			legacy.Period = period
+			store.state.Contexts[contextValue.ID] = legacy
+			err = store.saveLocked()
+			store.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			reopened, err := OpenStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reopened.CreateRun(contextValue.ID); !errors.Is(err, errMonthlyPeriodRequired) {
+				t.Fatalf("legacy period %q created a run: %v", period, err)
+			}
+			preserved, ok := reopened.Context(contextValue.ID)
+			if !ok || preserved.Period != period {
+				t.Fatalf("legacy context was mutated: ok=%v context=%+v", ok, preserved)
+			}
+			if got := len(reopened.Snapshot(false).Runs); got != 0 {
+				t.Fatalf("legacy period %q entered the pipeline: runs=%d", period, got)
+			}
+		})
 	}
 }
 

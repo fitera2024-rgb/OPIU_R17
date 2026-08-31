@@ -144,12 +144,84 @@ func TestContextRunStopsAtUnconfiguredEngineAdapter(t *testing.T) {
 	t.Fatal("run did not finish preflight")
 }
 
+func TestContextsAPIRejectsUnsupportedPeriodsFailClosed(t *testing.T) {
+	server, store, _ := testServer(t)
+	erp := addTestSource(t, store, SourceERP, "erp.xlsx")
+	intalev := addTestSource(t, store, SourceIntalev, "intalev.xlsx")
+
+	for _, period := range []string{"2025", "2025-Q1", "2025-Q4", "2025-10..2025-11", "arbitrary"} {
+		t.Run(period, func(t *testing.T) {
+			body, err := json.Marshal(createContextRequest{
+				Organization:  "9 Управляющая компания",
+				Period:        period,
+				ERPFileID:     erp.ID,
+				IntalevFileID: intalev.ID,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/contexts", bytes.NewReader(body)))
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("period %q status = %d, body = %s", period, recorder.Code, recorder.Body.String())
+			}
+			if !strings.Contains(recorder.Body.String(), monthlyPeriodRequiredMessage) {
+				t.Fatalf("period %q returned an unclear error: %s", period, recorder.Body.String())
+			}
+		})
+	}
+	if got := len(store.Snapshot(false).Contexts); got != 0 {
+		t.Fatalf("unsupported periods persisted contexts: %d", got)
+	}
+}
+
+func TestRunsAPIRejectsLegacyNonMonthlyContextBeforePipeline(t *testing.T) {
+	for _, period := range []string{"2025", "2025-Q1"} {
+		t.Run(period, func(t *testing.T) {
+			server, store, _ := testServer(t)
+			erp := addTestSource(t, store, SourceERP, "erp.xlsx")
+			intalev := addTestSource(t, store, SourceIntalev, "intalev.xlsx")
+			contextValue, err := store.CreateContext(createContextRequest{
+				Organization:  "9 Управляющая компания",
+				Period:        "2025-10",
+				ERPFileID:     erp.ID,
+				IntalevFileID: intalev.ID,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.mu.Lock()
+			legacy := store.state.Contexts[contextValue.ID]
+			legacy.Period = period
+			store.state.Contexts[contextValue.ID] = legacy
+			err = store.saveLocked()
+			store.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			body, err := json.Marshal(createRunRequest{ContextID: contextValue.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorder := httptest.NewRecorder()
+			server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/runs", bytes.NewReader(body)))
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), monthlyPeriodRequiredMessage) {
+				t.Fatalf("legacy period %q was not rejected clearly: status=%d body=%s", period, recorder.Code, recorder.Body.String())
+			}
+			if got := len(store.Snapshot(false).Runs); got != 0 {
+				t.Fatalf("legacy period %q entered the pipeline: runs=%d", period, got)
+			}
+		})
+	}
+}
+
 func TestEmbeddedUIUsesBusinessLanguage(t *testing.T) {
 	server, _, _ := testServer(t)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := recorder.Body.String()
-	for _, required := range []string{"Перевыбрать пакеты ERP и Инталев", "Запись в 1С отключена", "Запустить сверку"} {
+	for _, required := range []string{"Перевыбрать пакеты ERP и Инталев", "Месяц расчёта", "Запись в 1С отключена", "Запустить сверку"} {
 		if !strings.Contains(body, required) {
 			t.Errorf("UI is missing %q", required)
 		}

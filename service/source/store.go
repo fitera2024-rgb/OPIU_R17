@@ -13,7 +13,12 @@ import (
 	"time"
 )
 
-var acceptedPeriod = regexp.MustCompile(`^\d{4}(?:-(?:0[1-9]|1[0-2])|-Q[1-4])?$`)
+const monthlyPeriodRequiredMessage = "Поддерживается расчёт только за один календарный месяц в формате YYYY-MM"
+
+var (
+	acceptedPeriod           = regexp.MustCompile(`^\d{4}-(?:0[1-9]|1[0-2])$`)
+	errMonthlyPeriodRequired = errors.New(monthlyPeriodRequiredMessage)
+)
 
 var storeStateFileMu sync.Mutex
 
@@ -348,7 +353,7 @@ func (s *Store) CreateContext(request createContextRequest) (Context, error) {
 		}
 	}
 	if !acceptedPeriod.MatchString(period) {
-		return Context{}, errors.New("period must be YYYY, YYYY-Q1..Q4, or YYYY-MM")
+		return Context{}, errMonthlyPeriodRequired
 	}
 
 	s.mu.Lock()
@@ -438,6 +443,9 @@ func (s *Store) CreateRun(contextID string) (Run, error) {
 	context, ok := s.state.Contexts[contextID]
 	if !ok || context.Archived {
 		return Run{}, errors.New("active context is unavailable")
+	}
+	if !acceptedPeriod.MatchString(context.Period) {
+		return Run{}, errMonthlyPeriodRequired
 	}
 	id, err := newOpaqueID("run")
 	if err != nil {

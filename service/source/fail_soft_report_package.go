@@ -236,6 +236,17 @@ func findR001Manifest(r001Dir string) (string, error) {
 	return manifests[0], nil
 }
 
+func registeredR001ReconciliationPath(packageDir string, outputs map[string]string) (string, bool) {
+	for _, acceptedName := range []string{"Сверка.xlsx", "reconciliation.xlsx"} {
+		for relative := range outputs {
+			if strings.EqualFold(filepath.ToSlash(relative), acceptedName) {
+				return filepath.Join(packageDir, filepath.FromSlash(relative)), true
+			}
+		}
+	}
+	return "", false
+}
+
 func validateR001ReportOnlyPackage(r001Dir string) error {
 	manifestPath, err := findR001Manifest(r001Dir)
 	if err != nil {
@@ -270,8 +281,7 @@ func validateR001ReportOnlyPackage(r001Dir string) error {
 	if len(manifest.Outputs) == 0 {
 		return errors.New("R001 output registry is empty")
 	}
-	hasDecisions, hasRegistry, hasReconciliation := false, false, false
-	reconciliationPath := ""
+	hasDecisions, hasRegistry := false, false
 	for relative, expectedSHA := range manifest.Outputs {
 		cleanRelative := filepath.Clean(filepath.FromSlash(relative))
 		if cleanRelative == "." || filepath.IsAbs(cleanRelative) || cleanRelative == ".." || strings.HasPrefix(cleanRelative, ".."+string(os.PathSeparator)) {
@@ -297,11 +307,8 @@ func validateR001ReportOnlyPackage(r001Dir string) error {
 		hasDecisions = hasDecisions || lower == strings.ToLower("решения.xlsx") ||
 			lower == strings.ToLower("решения_корректировок_ввод_r001.xlsx")
 		hasRegistry = hasRegistry || (strings.Contains(lower, strings.ToLower("реестр")) && strings.HasSuffix(lower, ".xlsx"))
-		if lower == "reconciliation.xlsx" || lower == "сверка.xlsx" {
-			hasReconciliation = true
-			reconciliationPath = artifactPath
-		}
 	}
+	reconciliationPath, hasReconciliation := registeredR001ReconciliationPath(packageDir, manifest.Outputs)
 	if !hasDecisions || !hasRegistry || !hasReconciliation {
 		return errors.New("R001 diagnostic workbook, registry or reconciliation is missing")
 	}
@@ -395,7 +402,11 @@ func validateR001ReportOnlyPackageForRun(r001Dir string, run Run, contextValue C
 	}
 	if manifest.Results.CanonicalRows != nil && *manifest.Results.CanonicalRows > 0 {
 		packageDir := filepath.Dir(filepath.Dir(manifestPath))
-		rows, err := readMaterializationTable(filepath.Join(packageDir, "reconciliation.xlsx"))
+		reconciliationPath, ok := registeredR001ReconciliationPath(packageDir, manifest.Outputs)
+		if !ok {
+			return errors.New("R001 reconciliation workbook is not registered")
+		}
+		rows, err := readMaterializationTable(reconciliationPath)
 		if err != nil {
 			return err
 		}

@@ -510,6 +510,149 @@ func TestValidateR001ReportOnlyPackageRejectsCanonicalReconciliationWorkbookInSu
 	}
 }
 
+func TestR005020RunValidatorAcceptsRegisteredReconciliationWorkbook(t *testing.T) {
+	for _, workbookName := range []string{"Сверка.xlsx", "reconciliation.xlsx"} {
+		t.Run(workbookName, func(t *testing.T) {
+			_, run, contextValue, runDir, _ := buildVerifiedServiceHandoffFixture(t)
+			r001Dir := filepath.Join(runDir, "r001")
+			writePhysicalRoutingFixture(t, r001Dir, run, contextValue, "SPORNO", false, false, false, false)
+			if workbookName != "reconciliation.xlsx" {
+				relocateR001ReconciliationFixture(t, r001Dir, workbookName, true)
+			}
+
+			if err := validateR001ReportOnlyPackageForRun(r001Dir, run, contextValue); err != nil {
+				t.Fatalf("registered root-level %s was rejected: %v", workbookName, err)
+			}
+		})
+	}
+}
+
+func TestR005020RunValidatorRejectsUnsafeOrUnregisteredReconciliationWorkbook(t *testing.T) {
+	tests := []struct {
+		name          string
+		mutate        func(*testing.T, string)
+		errorContains string
+	}{
+		{
+			name: "no reconciliation workbook registered",
+			mutate: func(t *testing.T, r001Dir string) {
+				manifestPath, packageDir, manifest, outputs := r001OutputFixture(t, r001Dir)
+				delete(outputs, "reconciliation.xlsx")
+				if err := os.Remove(filepath.Join(packageDir, "reconciliation.xlsx")); err != nil {
+					t.Fatal(err)
+				}
+				writeOrchestrationJSON(t, manifestPath, manifest)
+			},
+			errorContains: "missing",
+		},
+		{
+			name: "canonical workbook exists but is unregistered",
+			mutate: func(t *testing.T, r001Dir string) {
+				relocateR001ReconciliationFixture(t, r001Dir, "Сверка.xlsx", false)
+			},
+			errorContains: "missing",
+		},
+		{
+			name: "canonical workbook is registered in a subdirectory",
+			mutate: func(t *testing.T, r001Dir string) {
+				relocateR001ReconciliationFixture(t, r001Dir, filepath.Join("x", "Сверка.xlsx"), true)
+			},
+			errorContains: "missing",
+		},
+		{
+			name: "canonical workbook uses traversal path",
+			mutate: func(t *testing.T, r001Dir string) {
+				manifestPath, _, manifest, outputs := r001OutputFixture(t, r001Dir)
+				hash := outputs["reconciliation.xlsx"]
+				delete(outputs, "reconciliation.xlsx")
+				outputs["../Сверка.xlsx"] = hash
+				writeOrchestrationJSON(t, manifestPath, manifest)
+			},
+			errorContains: "unsafe R001 output path",
+		},
+		{
+			name: "registered workbook hash mismatches content",
+			mutate: func(t *testing.T, r001Dir string) {
+				manifestPath, _, manifest, outputs := r001OutputFixture(t, r001Dir)
+				outputs["reconciliation.xlsx"] = strings.Repeat("F", 64)
+				writeOrchestrationJSON(t, manifestPath, manifest)
+			},
+			errorContains: "hash mismatch",
+		},
+		{
+			name: "registered workbook is not valid XLSX",
+			mutate: func(t *testing.T, r001Dir string) {
+				manifestPath, packageDir, manifest, outputs := r001OutputFixture(t, r001Dir)
+				workbookPath := filepath.Join(packageDir, "reconciliation.xlsx")
+				if err := os.WriteFile(workbookPath, []byte("not an OOXML workbook"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				hash, err := sha256File(workbookPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				outputs["reconciliation.xlsx"] = hash
+				writeOrchestrationJSON(t, manifestPath, manifest)
+			},
+			errorContains: "workbook is invalid",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, run, contextValue, runDir, _ := buildVerifiedServiceHandoffFixture(t)
+			r001Dir := filepath.Join(runDir, "r001")
+			writePhysicalRoutingFixture(t, r001Dir, run, contextValue, "SPORNO", false, false, false, false)
+			test.mutate(t, r001Dir)
+
+			err := validateR001ReportOnlyPackageForRun(r001Dir, run, contextValue)
+			if err == nil || !strings.Contains(err.Error(), test.errorContains) {
+				t.Fatalf("unsafe or unregistered workbook was not rejected as expected: %v", err)
+			}
+		})
+	}
+}
+
+func r001OutputFixture(t *testing.T, r001Dir string) (string, string, map[string]any, map[string]any) {
+	t.Helper()
+	manifestPath, err := findR001Manifest(r001Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageDir := filepath.Dir(filepath.Dir(manifestPath))
+	var manifest map[string]any
+	if err := readJSONFile(manifestPath, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	outputs, ok := manifest["outputs"].(map[string]any)
+	if !ok {
+		t.Fatal("R001 fixture outputs are missing")
+	}
+	return manifestPath, packageDir, manifest, outputs
+}
+
+func relocateR001ReconciliationFixture(t *testing.T, r001Dir, newRelative string, register bool) {
+	t.Helper()
+	manifestPath, packageDir, manifest, outputs := r001OutputFixture(t, r001Dir)
+	oldRelative := "reconciliation.xlsx"
+	hash, ok := outputs[oldRelative].(string)
+	if !ok {
+		t.Fatal("R001 fixture reconciliation workbook hash is missing")
+	}
+	newPath := filepath.Join(packageDir, newRelative)
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(packageDir, oldRelative), newPath); err != nil {
+		t.Fatal(err)
+	}
+	delete(outputs, oldRelative)
+	if register {
+		outputs[filepath.ToSlash(newRelative)] = hash
+	}
+	writeOrchestrationJSON(t, manifestPath, manifest)
+}
+
 func writeFailSoftR001PackageFixtureForRun(t *testing.T, r001Dir string, run Run, contextValue Context) {
 	t.Helper()
 	packageDir := filepath.Join(r001Dir, "OPIU_CORRECTIONS_R001_SYNTHETIC")

@@ -633,15 +633,18 @@
 ### R005-020 — Service validator не принимает канонический R001 workbook `Сверка.xlsx`
 
 - Дата: `30.08.2026`
-- Статус: `OPEN_FIX_PR`
+- Статус: `IMPLEMENTED`
 - Обнаружено: итоговый комбинированный source-Service QA-прогон `run_4d6b0a08a4c48b96687a1c88`, организация `9 Управляющая компания` (`ERP-000000224`), период `2025-10`, после R005-016…R005-019.
 - Наблюдаемое поведение: R001 wrapper/core формирует полный безопасный комплект, включая `Сверка.xlsx`, но Service завершает `FAILED / R001` сообщением `R001 не сформировал полный безопасный диагностический комплект`; Go validator не считает `Сверка.xlsx` reconciliation workbook.
-- Доказательство: `r001/…/technical/manifest.json` регистрирует `Решения.xlsx`, два `РЕЕСТР/*.xlsx`, `Сверка.xlsx` и `УДАЛЕНИЕ/*.xlsx`; `validateR001ReportOnlyPackage` признаёт reconciliation только при `lower == "reconciliation.xlsx"`. R001 core пишет `Сверка.xlsx` и возвращает `posting_rows=0`, `materialized_posting_rows=0`, `execution_allowed=false`, `ready_to_upload=false`, `release_allowed=false`, `live_1c_allowed=false`.
+- Подтверждённая первопричина: общий `validateR001ReportOnlyPackage` уже проверяет manifest registry, SHA-256, OOXML и принимает root-level `Сверка.xlsx`/`reconciliation.xlsx`, но `validateR001ReportOnlyPackageForRun` при повторном чтении materialization audit отбрасывал проверенный registry path и жёстко открывал `packageDir/reconciliation.xlsx`. Поэтому зарегистрированный и прошедший integrity-проверки canonical `Сверка.xlsx` отклонялся только на run-scoped этапе.
 - Ожидаемое поведение: Service принимает exact canonical `Сверка.xlsx` и сохраняет поддержку прежнего `reconciliation.xlsx`; missing/unregistered/invalid workbook, неверный SHA, unsafe path и zero-route loader workbooks остаются fail-closed.
 - Затронутые пункты контракта: §§10–13; A01–A04, A10–A15.
 - Обязательный регрессионный тест: package с `Сверка.xlsx` проходит текущие manifest/SHA/OOXML/safety checks; прежний `reconciliation.xlsx` проходит; отсутствующий/unsafe/loader case блокируется. Сквозной R005→R001 остаётся `REPORT_ONLY`, без posting/upload.
 - Допустимый scope фикса: имя canonical reconciliation workbook в Go R001 package validator и focused regression; финансовая логика, BOM/OOXML validation, physical journal persistence, authority, R005/R001 semantics, rules service и 1С не меняются.
-- Регрессионная фиксация: независимая ветка `fix/r001-canonical-reconciliation-workbook-name`, отдельный Issue/PR; merge/release запрещены до coordinator review.
+- Реализация: run-scoped validator получает reconciliation workbook только из уже проверенного `manifest.outputs`; детерминированно поддерживаются exact root-level `Сверка.xlsx` и backward-compatible `reconciliation.xlsx`, без filesystem scan и без выбора незарегистрированного файла. Общие manifest/SHA/path/OOXML/safety guards не ослаблены.
+- Изменённые файлы: `service/source/fail_soft_report_package.go`, `service/source/fail_soft_report_package_test.go`, `contracts/ERROR_REGISTER.md` (только R005-020).
+- Регрессионное доказательство: до production-фикса новый run-scoped `Сверка.xlsx` test воспроизвёл FAIL на hardcoded `reconciliation.xlsx`; после фикса 2 positive name cases, 6 negative path/registration/integrity/OOXML cases и существующий zero-route loader guard — PASS. Весь `fail_soft_report_package` — 30 PASS, 0 FAIL, 0 SKIP; `go test -count=1 ./...` — PASS, exit `0`; `go vet ./...` — PASS, exit `0`; service/web Node — 21 PASS; полный R001 Node — 263 PASS; полный R005 Node — 242 PASS, 0 FAIL, 1 штатный external-golden SKIP; production JS/MJS syntax — 99 PASS; `git diff --check` — PASS.
+- Implementation commit: `9e707450d55b1b87e6e5a14dbcf3de9c95f92939`. Ветка `fix/r005-service-canonical-sverka-run-validator`; merge/release запрещены до coordinator review.
 
 ### R005-019 — Service validator не принимает канонический R001 workbook `Решения.xlsx`
 

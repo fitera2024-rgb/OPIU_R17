@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/user"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -227,8 +229,10 @@ type articleApprovalPrepared struct {
 }
 
 type articleApprovalXLSXRelationship struct {
-	ID     string `xml:"Id,attr"`
-	Target string `xml:"Target,attr"`
+	ID         string `xml:"Id,attr"`
+	Type       string `xml:"Type,attr"`
+	Target     string `xml:"Target,attr"`
+	TargetMode string `xml:"TargetMode,attr"`
 }
 
 type articleApprovalXLSXRelationships struct {
@@ -389,11 +393,13 @@ func articleApprovalResolveSource(store *Store, requestedPath, declaredSHA strin
 }
 
 func articleApprovalZIPRead(archive *zip.Reader, name string) ([]byte, error) {
-	name = filepath.ToSlash(filepath.Clean(name))
-	name = strings.TrimPrefix(name, "/")
+	canonicalName, err := canonicalXLSXPackagePart(name)
+	if err != nil {
+		return nil, fmt.Errorf("source XLSX package member is unsafe: %w", err)
+	}
 	var matched *zip.File
 	for _, item := range archive.File {
-		if filepath.ToSlash(item.Name) != name {
+		if item.Name != canonicalName {
 			continue
 		}
 		if matched != nil {
@@ -414,6 +420,43 @@ func articleApprovalZIPRead(archive *zip.Reader, name string) ([]byte, error) {
 		return data, closeErr
 	}
 	return nil, os.ErrNotExist
+}
+
+func articleApprovalResolveXLSXWorksheetTarget(relation articleApprovalXLSXRelationship) (string, error) {
+	if !isXLSXWorksheetRelationshipType(relation.Type) {
+		return "", errors.New("source XLSX worksheet relationship type is unsupported")
+	}
+	target := relation.Target
+	if strings.TrimSpace(target) != target || target == "" || strings.Contains(target, "\\") {
+		return "", errors.New("source XLSX worksheet relationship target is empty or non-canonical")
+	}
+	if mode := strings.TrimSpace(relation.TargetMode); mode != "" && !strings.EqualFold(mode, "Internal") {
+		return "", errors.New("source XLSX worksheet relationship target is external")
+	}
+	parsed, err := url.Parse(target)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(target, "%") {
+		return "", errors.New("source XLSX worksheet relationship target is not an internal package URI")
+	}
+	targetPath := parsed.Path
+	if targetPath == "" {
+		return "", errors.New("source XLSX worksheet relationship target path is empty")
+	}
+	for _, component := range strings.Split(strings.TrimPrefix(targetPath, "/"), "/") {
+		if component == "" || component == "." || component == ".." {
+			return "", errors.New("source XLSX worksheet relationship target contains traversal or non-canonical components")
+		}
+	}
+	resolved := targetPath
+	if strings.HasPrefix(targetPath, "/") {
+		resolved = strings.TrimPrefix(targetPath, "/")
+	} else if !strings.HasPrefix(targetPath, "xl/") {
+		resolved = path.Join(path.Dir("xl/workbook.xml"), targetPath)
+	}
+	canonical, err := canonicalXLSXPackagePart(resolved)
+	if err != nil {
+		return "", fmt.Errorf("source XLSX worksheet relationship target is unsafe: %w", err)
+	}
+	return canonical, nil
 }
 
 func articleApprovalXLSXStrings(archive *zip.Reader) ([]string, error) {
@@ -479,22 +522,30 @@ func articleApprovalXLSXRowsData(data []byte, sheetName string) ([]map[int]strin
 	if err := xml.Unmarshal(relationshipData, &relationships); err != nil {
 		return nil, err
 	}
-	relationshipByID := map[string]string{}
+	relationshipByID := map[string]articleApprovalXLSXRelationship{}
 	for _, item := range relationships.Items {
-		relationshipByID[item.ID] = item.Target
+		if strings.TrimSpace(item.ID) == "" {
+			return nil, errors.New("source XLSX workbook relationship is malformed")
+		}
+		if _, exists := relationshipByID[item.ID]; exists {
+			return nil, fmt.Errorf("source XLSX workbook relationship id is duplicated: %s", item.ID)
+		}
+		relationshipByID[item.ID] = item
 	}
-	target := ""
+	var relationship articleApprovalXLSXRelationship
+	foundRelationship := false
 	for _, sheet := range workbook.Sheets {
 		if sheet.Name == sheetName {
-			target = relationshipByID[sheet.ID]
+			relationship, foundRelationship = relationshipByID[sheet.ID]
 			break
 		}
 	}
-	if target == "" {
+	if !foundRelationship {
 		return nil, fmt.Errorf("required XLSX sheet %q is missing", sheetName)
 	}
-	if !strings.HasPrefix(filepath.ToSlash(target), "xl/") {
-		target = filepath.ToSlash(filepath.Join("xl", target))
+	target, err := articleApprovalResolveXLSXWorksheetTarget(relationship)
+	if err != nil {
+		return nil, fmt.Errorf("required XLSX sheet %q relationship is invalid: %w", sheetName, err)
 	}
 	sheetData, err := articleApprovalZIPRead(archive, target)
 	if err != nil {

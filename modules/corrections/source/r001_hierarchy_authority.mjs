@@ -863,7 +863,7 @@ async function deriveHierarchyResidualSettlementAuthority({
  *   `settlement -> liability` for the same organization/employee/amount;
  * - the unmatched liability rows add exactly to the positive hierarchy delta;
  * - every unmatched liability has exactly one complete physical expense row
- *   for the same organization/employee in the direct parent article.
+ *   for the same organization/employee in the same proved business block.
  *
  * The parent expense may be larger than the classified part.  The liability
  * row proves the exact partial amount; the parent expense row proves the exact
@@ -934,6 +934,7 @@ function derivePairedLiabilityClassificationAuthority({
     if (eligibleGroups.length !== 1) continue;
 
     const group = eligibleGroups[0];
+    const targetBlock = normalized(contexts.get(target.code)?.block);
     const claimedSources = new Set();
     const local = [];
     for (const liability of group.unmatched) {
@@ -942,7 +943,8 @@ function derivePairedLiabilityClassificationAuthority({
       const liabilityAmountCents = Math.abs(cents(liability.row?.["Физическая сумма"]) ?? 0);
       const settlementAccount = canonicalAccount(liability.row?.["Дт"]);
       const sourceMatches = topology.physical.filter((item) =>
-        item.owner.code === target.parentCode
+        (item.owner.code === target.parentCode
+          || (targetBlock && normalized(contexts.get(item.owner.code)?.block) === targetBlock))
         && nonClosing(item.row)
         && (signedAmount(item.row) ?? 0) > 0
         && normalized(item.row?.["Организация"]) === liabilityOrganization

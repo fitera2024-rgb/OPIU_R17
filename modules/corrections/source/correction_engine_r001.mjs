@@ -20,7 +20,10 @@ import {
   deriveCurrentRunCanonicalAuthority,
   stripExternalCanonicalAuthority,
 } from "./r001_current_run_authority.mjs";
-import { normalizeEmbeddedReconciliationDecisions } from "./r001_reconciliation_workbook_adapter.mjs";
+import {
+  normalizeEmbeddedReconciliationDecisions,
+  normalizeReconciliationHierarchyRows,
+} from "./r001_reconciliation_workbook_adapter.mjs";
 import { catalogNodesFromReconciliationRows } from "./r001_group_scoped_posting_rule.mjs";
 import { evaluateGroupScopedDecision } from "./r001_group_scoped_materialization.mjs";
 import {
@@ -533,7 +536,9 @@ async function readReconciliation(reconciliationPath) {
   const treeSheet = workbook.worksheets.items.find((item) => /сверка.*дерево/i.test(item.name));
   const treeValues = treeSheet?.getUsedRange()?.values ?? [];
   const treeHeader = treeValues.findIndex((row) => row.some((value) => clean(value) === "Код / PairID") && row.some((value) => clean(value) === "Тип строки") && row.some((value) => clean(value) === "Организация"));
-  const treeAllRecords = treeHeader < 0 ? [] : recordsFromMatrix(treeValues, treeHeader);
+  const treeAllRecords = treeHeader < 0
+    ? []
+    : normalizeReconciliationHierarchyRows(recordsFromMatrix(treeValues, treeHeader));
   const catalogContext = embeddedCatalogContext(workbook, treeAllRecords);
   const treeRecords = treeAllRecords.filter((row) => {
     const type = clean(row["Тип строки"]).toUpperCase();
@@ -2534,9 +2539,19 @@ async function main() {
     ?? stripExternalCanonicalAuthority(decision).decision);
   const isolatedDecisions = inputIsolatedDecisions.map((decision) => stripExternalCanonicalAuthority(decision).decision);
 
+  const physicalSourceUsageCounts = new Map();
+  for (const decision of trustedActionDecisions) {
+    if (decision.SOURCE_OPERATION_PROVEN !== true) continue;
+    const sourceRowId = clean(decision.source_row_id).toUpperCase();
+    if (sourceRowId) physicalSourceUsageCounts.set(sourceRowId, (physicalSourceUsageCounts.get(sourceRowId) ?? 0) + 1);
+  }
   const groupScopedEvaluationByDecision = new Map();
   for (const decision of trustedActionDecisions) {
-    if (clean(decision.role).toUpperCase() !== "RECLASS_SOURCE") continue;
+    const decisionRole = clean(decision.role).toUpperCase();
+    const carriesUniquePhysicalSource = decision.SOURCE_OPERATION_PROVEN === true
+      && decision.PHYSICAL_SOURCE_UNIQUE === true;
+    if (decisionRole === "RECLASS_TARGET"
+      || (decisionRole !== "RECLASS_SOURCE" && !carriesUniquePhysicalSource)) continue;
     const embeddedContext = reconciliation.intalevBlockByCode?.get(clean(decision.reconciliation_row));
     const context = embeddedContext?.block
       ? embeddedContext
@@ -2547,8 +2562,16 @@ async function main() {
           intalevAmount: numberValue(decision.intalev_amount),
         };
     if (!context?.block || !clean(decision.group || decision.source_article)) continue;
+    const sourceRowId = clean(decision.source_row_id).toUpperCase();
+    const currentRunHierarchySource = decisionRole.startsWith("HIERARCHY_")
+      && carriesUniquePhysicalSource
+      && sourceRowId
+      && physicalSourceUsageCounts.get(sourceRowId) === 1;
+    const evaluatedDecision = currentRunHierarchySource
+      ? { ...decision, pinned_source_reopened: true, source_reuse_checked: true }
+      : decision;
     groupScopedEvaluationByDecision.set(decision, evaluateGroupScopedDecision({
-      decision,
+      decision: evaluatedDecision,
       catalogNodes: reconciliation.erpCatalogNodes ?? [],
       intalevBlock: context.block,
       intalevPath: context.path,

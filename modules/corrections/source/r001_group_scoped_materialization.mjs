@@ -83,6 +83,14 @@ function caseFor({ decision, action, role, operation, targetAccounting, targetAr
     output_route: "SPORNO",
     physical_source: operation,
     target_accounting: targetAccounting,
+    physical_proof: {
+      declared: true,
+      source_operation_proven: bool(decision?.SOURCE_OPERATION_PROVEN),
+      physical_source_unique: bool(decision?.PHYSICAL_SOURCE_UNIQUE),
+      target_classification_proven: true,
+      pinned_source_reopened: bool(decision?.pinned_source_reopened),
+      source_reuse_checked: bool(decision?.source_reuse_checked),
+    },
     analytical_basis: {
       reconciliation_row: text(decision.reconciliation_row),
       analytical_basis_id: text(decision.case_id),

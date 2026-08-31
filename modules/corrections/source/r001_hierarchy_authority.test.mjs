@@ -5,6 +5,7 @@ import {
   deriveHierarchyExactAmountAuthority,
   hierarchyContextByCode,
 } from "./r001_hierarchy_authority.mjs";
+import { normalizeReconciliationHierarchyRows } from "./r001_reconciliation_workbook_adapter.mjs";
 import { evaluateGroupScopedDecision } from "./r001_group_scoped_materialization.mjs";
 import { collectCanonicalFinancialOutput } from "./r001_canonical_output_contract.mjs";
 
@@ -125,6 +126,52 @@ test("one exact non-closing physical child becomes authoritative despite the old
   assert.equal(decision.intalev_path, "Административные расходы / ФЗП и компенсационные выплаты / Компенсации");
 });
 
+test("current R005 hierarchy schema preserves parentage for exact physical authority", async () => {
+  const currentSchemaRows = [
+    {
+      ...structural({ row: 7, code: "R001", level: 1, label: "Административные расходы", type: "БЛОК" }),
+      "Уровень": undefined,
+      "Положение в дереве Инталев": "БЛОК ИНТАЛЕВ",
+      "Строка ОПИУ / операция": undefined,
+      "Статья ОПИУ / строка источника": "Административные расходы",
+    },
+    {
+      ...structural({ row: 103, code: "R033", level: 2, label: "ФЗП и компенсационные выплаты", type: "СТАТЬЯ" }),
+      "Уровень": undefined,
+      "Положение в дереве Инталев": "ВНУТРИ R001",
+      "Строка ОПИУ / операция": undefined,
+      "Статья ОПИУ / строка источника": "   ФЗП и компенсационные выплаты",
+    },
+    {
+      ...structural({ row: 104, code: "R034", level: 3, label: "Компенсации", delta: 750 }),
+      "Уровень": undefined,
+      "Положение в дереве Инталев": "ВНУТРИ R033",
+      "Строка ОПИУ / операция": undefined,
+      "Статья ОПИУ / строка источника": "      Компенсации",
+    },
+    {
+      ...physical({ row: 105 }),
+      "Уровень": undefined,
+      "Положение в дереве Инталев": "4 — CANDIDATE_EXCLUDED",
+      "Строка ОПИУ / операция": undefined,
+      "Статья ОПИУ / строка источника": "         Компенсации",
+    },
+  ];
+  const normalizedRows = normalizeReconciliationHierarchyRows(currentSchemaRows);
+  assert.deepEqual(normalizedRows.map((row) => Number.parseInt(row["Уровень"], 10)), [1, 2, 3, 4]);
+  const result = await deriveHierarchyExactAmountAuthority({
+    treeRows: normalizedRows,
+    period: "2025-10",
+    reconciliationOrganization: "9 Управляющая компания",
+    sourceArchiveSha256: SHA,
+    sourceSheet: "Лист_1",
+    reconciliationSha256: "E".repeat(64),
+  });
+  assert.equal(result.decisions.length, 1);
+  assert.equal(result.decisions[0].source_row_id, ROW_ID);
+  assert.equal(result.decisions[0].intalev_path, "Административные расходы / ФЗП и компенсационные выплаты / Компенсации");
+});
+
 test("two non-closing exact children remain blocked as ambiguous", async () => {
   const result = await deriveHierarchyExactAmountAuthority({
     treeRows: rows([physical({ row: 106, code: "SRC-SECOND", rowId: "F".repeat(64) })]),
@@ -166,6 +213,36 @@ test("paired liability gap generically reclassifies exact employee parts from th
   assert.ok(paired.every((item) => item.source_article === "Базовая статья"));
   assert.ok(paired.every((item) => item.target_article === "Целевая классификация"));
   assert.ok(paired.every((item) => item.ECONOMIC_CORRECTION_PROVEN === true));
+});
+
+test("paired liability gap finds a unique expense source in a sibling article of the same business block", async () => {
+  const sourceA = "1".repeat(64);
+  const sourceB = "2".repeat(64);
+  const result = await deriveHierarchyExactAmountAuthority({
+    treeRows: [
+      structural({ row: 1, code: "R001", level: 1, label: "Административные расходы", type: "БЛОК" }),
+      structural({ row: 10, code: "R011", level: 2, label: "Налоги зарплатные", type: "СТАТЬЯ" }),
+      structural({ row: 20, code: "R035", level: 3, label: "НДФЛ", delta: 120 }),
+      pairedPhysical({ row: 21, level: 4, amount: 10, debit: "26", credit: "70.1", debitAnalytics: "НДФЛ", creditAnalytics: "Сотрудник В", rowId: "3".repeat(64) }),
+      pairedPhysical({ row: 22, level: 4, amount: 10, debit: "70.1", credit: "68.2", debitAnalytics: "Сотрудник В", creditAnalytics: "НДФЛ", rowId: "4".repeat(64) }),
+      pairedPhysical({ row: 23, level: 4, amount: 20, debit: "26", credit: "70.1", debitAnalytics: "НДФЛ", creditAnalytics: "Сотрудник Г", rowId: "5".repeat(64) }),
+      pairedPhysical({ row: 24, level: 4, amount: 20, debit: "70.1", credit: "68.2", debitAnalytics: "Сотрудник Г", creditAnalytics: "НДФЛ", rowId: "6".repeat(64) }),
+      pairedPhysical({ row: 25, level: 4, amount: 70, debit: "70.1", credit: "68.2", debitAnalytics: "Сотрудник А", creditAnalytics: "НДФЛ", rowId: "7".repeat(64) }),
+      pairedPhysical({ row: 26, level: 4, amount: 50, debit: "70.1", credit: "68.2", debitAnalytics: "Сотрудник Б", creditAnalytics: "НДФЛ", rowId: "8".repeat(64) }),
+      structural({ row: 30, code: "R033", level: 2, label: "ФЗП и компенсационные выплаты", type: "СТАТЬЯ" }),
+      structural({ row: 31, code: "R036", level: 3, label: "ФЗП" }),
+      pairedPhysical({ row: 32, level: 4, amount: 500, debit: "26", credit: "70.1", debitAnalytics: "ФЗП", creditAnalytics: "Сотрудник А", rowId: sourceA }),
+      pairedPhysical({ row: 33, level: 4, amount: 400, debit: "26", credit: "70.1", debitAnalytics: "ФЗП", creditAnalytics: "Сотрудник Б", rowId: sourceB }),
+    ],
+    period: "2025-10",
+    reconciliationOrganization: "УК",
+    sourceArchiveSha256: SHA,
+    sourceSheet: "Лист_1",
+    reconciliationSha256: "E".repeat(64),
+  });
+  const paired = result.decisions.filter((item) => item.partial_source_amount_proven === true);
+  assert.deepEqual(paired.map((item) => item.correction_amount).sort((a, b) => a - b), [50, 70]);
+  assert.deepEqual(paired.map((item) => item.source_row_id).sort(), [sourceA, sourceB]);
 });
 
 test("competing exact and paired-liability proofs for one residual remain review evidence without financial pairs", async () => {

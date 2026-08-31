@@ -395,7 +395,18 @@ func validateR001ReportOnlyPackageForRun(r001Dir string, run Run, contextValue C
 	}
 	if manifest.Results.CanonicalRows != nil && *manifest.Results.CanonicalRows > 0 {
 		packageDir := filepath.Dir(filepath.Dir(manifestPath))
-		rows, err := readMaterializationTable(filepath.Join(packageDir, "reconciliation.xlsx"))
+		reconciliationPath := ""
+		for relative := range manifest.Outputs {
+			lower := strings.ToLower(filepath.ToSlash(relative))
+			if lower == "reconciliation.xlsx" || lower == "сверка.xlsx" {
+				reconciliationPath = filepath.Join(packageDir, filepath.Clean(filepath.FromSlash(relative)))
+				break
+			}
+		}
+		if reconciliationPath == "" {
+			return errors.New("R001 reconciliation workbook is not registered")
+		}
+		rows, err := readMaterializationTable(reconciliationPath)
 		if err != nil {
 			return err
 		}

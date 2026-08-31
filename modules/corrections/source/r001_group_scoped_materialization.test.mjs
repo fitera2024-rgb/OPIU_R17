@@ -89,6 +89,23 @@ test("generic group-scoped materialization creates sparse SPORNO STORNO and REPO
   assert.ok(result.canonical_posting_rows.every((row) => row.source.source_row_id === ""));
 });
 
+test("current-run reopened unique hierarchy source keeps its physical identity in SPORNO drafts", () => {
+  const result = evaluateGroupScopedDecision({
+    decision: decision({
+      pinned_source_reopened: true,
+      source_reuse_checked: true,
+    }),
+    catalogNodes,
+    intalevBlock: "Административные расходы",
+    intalevPath: "ОПИУ / Административные расходы / Командировочные",
+  });
+  assert.equal(result.status, "MATERIALIZED_GROUP_SCOPED_STORNO_REPOST");
+  assert.ok(result.canonical_posting_rows.every((row) => row.source.source_row_id === "ERP-20"));
+  assert.ok(result.canonical_posting_rows.every((row) => row.source.source_organization === "ООО УК"));
+  assert.deepEqual(result.canonical_posting_rows.map((row) => row.loader["СчетДт"]), ["44.1", "44.1"]);
+  assert.deepEqual(result.canonical_posting_rows.map((row) => row.loader["СчетКт"]), ["71.1", "71.1"]);
+});
+
 test("resolved target remains review-only when exact physical authority is absent", () => {
   const result = evaluateGroupScopedDecision({
     decision: decision({ SOURCE_OPERATION_PROVEN: false, source_row_id: "" }),

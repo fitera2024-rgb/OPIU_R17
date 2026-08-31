@@ -21,6 +21,51 @@ function first(...values) { return values.map(text).find(Boolean) ?? ""; }
 
 function joined(values) { return [...new Set(values.map(text).filter(Boolean))].join("; "); }
 
+function leadingIndentLevel(value) {
+  const raw = String(value ?? "").replace(/\u00A0/g, " ").replace(/\t/g, "   ");
+  const leadingSpaces = raw.match(/^ */u)?.[0].length ?? 0;
+  return Math.floor(leadingSpaces / 3) + 1;
+}
+
+/**
+ * R005 renamed the hierarchy columns and replaced numeric structural levels
+ * with semantic positions such as "БЛОК ИНТАЛЕВ" and "ВНУТРИ R001". Restore
+ * the legacy semantic keys at the R005→R001 boundary so every downstream
+ * authority rule continues to operate on one canonical hierarchy schema.
+ */
+export function normalizeReconciliationHierarchyRows(rows = []) {
+  const depthByCode = new Map();
+  return rows.map((row) => {
+    const legacyLabel = first(row?.["Строка ОПИУ / операция"]);
+    const currentLabelRaw = row?.["Статья ОПИУ / строка источника"];
+    const currentLabel = first(currentLabelRaw);
+    const position = first(row?.["Положение в дереве Инталев"]);
+    const existingLevel = first(row?.["Уровень"]);
+    let level = Number.parseInt(existingLevel, 10);
+    let levelDescriptor = existingLevel;
+    if (!Number.isFinite(level)) {
+      level = Number.parseInt(position, 10);
+      if (Number.isFinite(level)) {
+        levelDescriptor = position;
+      } else {
+        const parentCode = upper(position.match(/^ВНУТРИ\s+(R\d+)$/iu)?.[1]);
+        const parentLevel = depthByCode.get(parentCode);
+        if (Number.isFinite(parentLevel)) level = parentLevel + 1;
+        else if (/БЛОК/iu.test(position) || upper(row?.["Тип строки"]) === "БЛОК") level = 1;
+        else if (currentLabel) level = leadingIndentLevel(currentLabelRaw);
+        if (Number.isFinite(level)) levelDescriptor = `${level} — ${position || first(row?.["Тип строки"])}`;
+      }
+    }
+    const code = upper(row?.["Код / PairID"]);
+    if (/^R\d+$/u.test(code) && Number.isFinite(level)) depthByCode.set(code, level);
+    return {
+      ...row,
+      ...(legacyLabel || !currentLabel ? {} : { "Строка ОПИУ / операция": currentLabelRaw }),
+      ...(existingLevel || !levelDescriptor ? {} : { "Уровень": levelDescriptor }),
+    };
+  });
+}
+
 function normalizedEmbeddedDecision(row, { period, organization }) {
   const decisionType = upper(first(row.decision_type, row["Тип решения"]));
   const role = upper(first(row.role, row["Роль"], row["Роль доказательства"]));

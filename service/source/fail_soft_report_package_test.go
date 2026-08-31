@@ -472,6 +472,34 @@ func TestValidateR001ReportOnlyPackageAcceptsCanonicalReconciliationWorkbookName
 	}
 }
 
+func TestValidateR001ReportOnlyPackageForRunReadsCanonicalReconciliationWorkbookName(t *testing.T) {
+	_, run, contextValue, runDir, _ := buildVerifiedServiceHandoffFixture(t)
+	r001Dir := filepath.Join(runDir, "r001")
+	writePhysicalRoutingFixture(t, r001Dir, run, contextValue, "SPORNO", false, false, false, false)
+	manifestPath, err := findR001Manifest(r001Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageDir := filepath.Dir(filepath.Dir(manifestPath))
+	oldRelative := "reconciliation.xlsx"
+	newRelative := "Сверка.xlsx"
+	if err := os.Rename(filepath.Join(packageDir, oldRelative), filepath.Join(packageDir, newRelative)); err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err := readJSONFile(manifestPath, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	outputs := manifest["outputs"].(map[string]any)
+	hash := outputs[oldRelative]
+	delete(outputs, oldRelative)
+	outputs[newRelative] = hash
+	writeOrchestrationJSON(t, manifestPath, manifest)
+	if err := validateR001ReportOnlyPackageForRun(r001Dir, run, contextValue); err != nil {
+		t.Fatalf("run-scoped canonical Сверка.xlsx workbook was rejected: %v", err)
+	}
+}
+
 func TestValidateR001ReportOnlyPackageRejectsCanonicalReconciliationWorkbookInSubdirectory(t *testing.T) {
 	r001Dir := t.TempDir()
 	writeFailSoftR001PackageFixture(t, r001Dir)

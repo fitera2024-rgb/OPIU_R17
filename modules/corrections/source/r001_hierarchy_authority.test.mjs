@@ -245,6 +245,107 @@ test("paired liability gap finds a unique expense source in a sibling article of
   assert.deepEqual(paired.map((item) => item.source_row_id).sort(), [sourceA, sourceB]);
 });
 
+test("paired liability gap rejects two eligible expense sources for one liability identity in the same business block", async () => {
+  const result = await deriveHierarchyExactAmountAuthority({
+    treeRows: [
+      structural({ row: 1, code: "R001", level: 1, label: "Административные расходы", type: "БЛОК" }),
+      structural({ row: 10, code: "R011", level: 2, label: "Налоги зарплатные", type: "СТАТЬЯ" }),
+      structural({ row: 20, code: "R035", level: 3, label: "НДФЛ", delta: 120 }),
+      pairedPhysical({ row: 21, level: 4, amount: 10, debit: "26", credit: "70.1", debitAnalytics: "НДФЛ", creditAnalytics: "Сотрудник В", rowId: "3".repeat(64) }),
+      pairedPhysical({ row: 22, level: 4, amount: 10, debit: "70.1", credit: "68.2", debitAnalytics: "Сотрудник В", creditAnalytics: "НДФЛ", rowId: "4".repeat(64) }),
+      pairedPhysical({ row: 23, level: 4, amount: 20, debit: "26", credit: "70.1", debitAnalytics: "НДФЛ", creditAnalytics: "Сотрудник Г", rowId: "5".repeat(64) }),
+      pairedPhysical({ row: 24, level: 4, amount: 20, debit: "70.1", credit: "68.2", debitAnalytics: "Сотрудник Г", creditAnalytics: "НДФЛ", rowId: "6".repeat(64) }),
+      pairedPhysical({ row: 25, level: 4, amount: 70, debit: "70.1", credit: "68.2", debitAnalytics: "Сотрудник А", creditAnalytics: "НДФЛ", rowId: "7".repeat(64) }),
+      pairedPhysical({ row: 26, level: 4, amount: 50, debit: "70.1", credit: "68.2", debitAnalytics: "Сотрудник Б", creditAnalytics: "НДФЛ", rowId: "8".repeat(64) }),
+      structural({ row: 30, code: "R033", level: 2, label: "ФЗП и компенсационные выплаты", type: "СТАТЬЯ" }),
+      structural({ row: 31, code: "R036", level: 3, label: "ФЗП" }),
+      pairedPhysical({ row: 32, level: 4, amount: 500, debit: "26", credit: "70.1", debitAnalytics: "ФЗП", creditAnalytics: "Сотрудник А", rowId: "1".repeat(64) }),
+      pairedPhysical({ row: 33, level: 4, amount: 600, debit: "26", credit: "70.1", debitAnalytics: "ФЗП", creditAnalytics: "Сотрудник А", rowId: "2".repeat(64) }),
+      pairedPhysical({ row: 34, level: 4, amount: 400, debit: "26", credit: "70.1", debitAnalytics: "ФЗП", creditAnalytics: "Сотрудник Б", rowId: "9".repeat(64) }),
+    ],
+    period: "2025-10",
+    reconciliationOrganization: "УК",
+    sourceArchiveSha256: SHA,
+    sourceSheet: "Лист_1",
+    reconciliationSha256: "E".repeat(64),
+  });
+  const ambiguous = result.blockers.find((item) =>
+    item.reconciliation_row === "R035"
+    && item.reason === "PAIRED_LIABILITY_PARENT_SOURCE_AMBIGUOUS"
+    && item.liability_source_row_id === "7".repeat(64));
+  assert.equal(ambiguous?.candidate_count, 2);
+  assert.equal(result.decisions.length, 0);
+  assert.equal(result.audit.paired_liability_decisions, 0);
+  assert.equal(result.audit.actionable_hierarchy_authority_decisions, 0);
+
+  const canonicalRows = result.decisions.flatMap((decision) => evaluateGroupScopedDecision({
+    decision,
+    catalogNodes: [{
+      label: "НДФЛ",
+      full_path: "Административные расходы / Налоги зарплатные / НДФЛ",
+      catalog_entries: [{ code: "ERP-NDFL", account: "26" }],
+    }],
+    intalevBlock: decision.intalev_block,
+    intalevPath: decision.intalev_path,
+  }).canonical_posting_rows);
+  const canonicalOutput = collectCanonicalFinancialOutput(canonicalRows);
+  assert.equal(canonicalOutput.rows.length, 0);
+  assert.equal(canonicalOutput.groups.length, 0);
+  assert.equal(canonicalOutput.counters.canonical_financial_rows_total, 0);
+  assert.equal(canonicalOutput.counters.posting_rows, 0);
+});
+
+test("paired liability gap rejects the only matching expense source from a different business block", async () => {
+  const crossBlockSource = "1".repeat(64);
+  const result = await deriveHierarchyExactAmountAuthority({
+    treeRows: [
+      structural({ row: 1, code: "R001", level: 1, label: "Административные расходы", type: "БЛОК" }),
+      structural({ row: 10, code: "R011", level: 2, label: "Налоги зарплатные", type: "СТАТЬЯ" }),
+      structural({ row: 20, code: "R035", level: 3, label: "НДФЛ", delta: 120 }),
+      pairedPhysical({ row: 21, level: 4, amount: 10, debit: "26", credit: "70.1", debitAnalytics: "НДФЛ", creditAnalytics: "Сотрудник В", rowId: "3".repeat(64) }),
+      pairedPhysical({ row: 22, level: 4, amount: 10, debit: "70.1", credit: "68.2", debitAnalytics: "Сотрудник В", creditAnalytics: "НДФЛ", rowId: "4".repeat(64) }),
+      pairedPhysical({ row: 23, level: 4, amount: 20, debit: "26", credit: "70.1", debitAnalytics: "НДФЛ", creditAnalytics: "Сотрудник Г", rowId: "5".repeat(64) }),
+      pairedPhysical({ row: 24, level: 4, amount: 20, debit: "70.1", credit: "68.2", debitAnalytics: "Сотрудник Г", creditAnalytics: "НДФЛ", rowId: "6".repeat(64) }),
+      pairedPhysical({ row: 25, level: 4, amount: 70, debit: "70.1", credit: "68.2", debitAnalytics: "Сотрудник А", creditAnalytics: "НДФЛ", rowId: "7".repeat(64) }),
+      pairedPhysical({ row: 26, level: 4, amount: 50, debit: "70.1", credit: "68.2", debitAnalytics: "Сотрудник А", creditAnalytics: "НДФЛ", rowId: "8".repeat(64) }),
+      structural({ row: 30, code: "R002", level: 1, label: "Коммерческие расходы", type: "БЛОК" }),
+      structural({ row: 31, code: "R033", level: 2, label: "ФЗП и компенсационные выплаты", type: "СТАТЬЯ" }),
+      structural({ row: 32, code: "R036", level: 3, label: "ФЗП" }),
+      pairedPhysical({ row: 33, level: 4, amount: 500, debit: "26", credit: "70.1", debitAnalytics: "ФЗП", creditAnalytics: "Сотрудник А", rowId: crossBlockSource }),
+    ],
+    period: "2025-10",
+    reconciliationOrganization: "УК",
+    sourceArchiveSha256: SHA,
+    sourceSheet: "Лист_1",
+    reconciliationSha256: "E".repeat(64),
+  });
+  const crossBlockMisses = result.blockers.filter((item) =>
+    item.reconciliation_row === "R035"
+    && item.reason === "PAIRED_LIABILITY_PARENT_SOURCE_NOT_FOUND");
+  assert.equal(crossBlockMisses.length, 2);
+  assert.ok(crossBlockMisses.every((item) => item.candidate_count === 0));
+  assert.equal(result.decisions.length, 0);
+  assert.equal(result.decisions.some((item) => item.source_row_id === crossBlockSource), false);
+  assert.equal(result.audit.paired_liability_decisions, 0);
+  assert.equal(result.audit.actionable_hierarchy_authority_decisions, 0);
+
+  const canonicalRows = result.decisions.flatMap((decision) => evaluateGroupScopedDecision({
+    decision,
+    catalogNodes: [{
+      label: "НДФЛ",
+      full_path: "Административные расходы / Налоги зарплатные / НДФЛ",
+      catalog_entries: [{ code: "ERP-NDFL", account: "26" }],
+    }],
+    intalevBlock: decision.intalev_block,
+    intalevPath: decision.intalev_path,
+  }).canonical_posting_rows);
+  const canonicalOutput = collectCanonicalFinancialOutput(canonicalRows);
+  assert.equal(canonicalOutput.rows.length, 0);
+  assert.equal(canonicalOutput.groups.length, 0);
+  assert.equal(canonicalOutput.counters.canonical_financial_rows_total, 0);
+  assert.equal(canonicalOutput.counters.posting_rows, 0);
+});
+
 test("competing exact and paired-liability proofs for one residual remain review evidence without financial pairs", async () => {
   const exactSource = "9".repeat(64);
   const parentSourceA = "1".repeat(64);

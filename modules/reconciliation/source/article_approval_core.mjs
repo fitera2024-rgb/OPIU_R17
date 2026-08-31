@@ -112,6 +112,14 @@ function sourceRows(input) {
   return input?.aggregateRows ?? input?.rows ?? [];
 }
 
+function isHierarchyRepairSourceRow(row) {
+  return text(row?.intalev_live_hierarchy_status) === "UNPROVEN"
+    || (
+      text(row?.classification) === "HIERARCHY_REPAIR"
+      && text(row?.priority_stage) === "HIERARCHY_REPAIR"
+    );
+}
+
 function hierarchyPath(row) {
   return pathText(row?.hierarchy_path ?? row?.intalev?.path ?? row?.intalev_path);
 }
@@ -302,7 +310,9 @@ function rowFromSource(row, input) {
 
 export function buildArticleApprovalRows(input = {}) {
   const scope = makeScope(input);
-  const rows = sourceRows(input).map((row) => rowFromSource(row, input));
+  const rows = sourceRows(input)
+    .filter((row) => !isHierarchyRepairSourceRow(row))
+    .map((row) => rowFromSource(row, input));
   const unique = new Map();
   for (const row of rows) {
     if (!row.ПериодС || !row.СтатьяИнталев) continue;

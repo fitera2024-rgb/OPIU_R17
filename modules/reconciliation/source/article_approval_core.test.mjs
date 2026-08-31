@@ -170,6 +170,64 @@ test("A17: 01_Правила has exact columns and only one valid candidate is p
   assert.equal(audit.sheet, "01_Правила");
 });
 
+test("APPROVAL-006: exact-scope candidates pass while hierarchy-repair rows are excluded semantically", () => {
+  const valid = sourceRow({
+    classification: "RECONCILED",
+    priority_stage: "EXACT_SOURCE_TARGET_PROOF",
+    intalev_live_hierarchy_status: "PROVEN",
+  });
+  const hierarchyRepair = sourceRow({
+    code: "R-HIERARCHY-REPAIR",
+    intalev_live_hierarchy_status: "UNPROVEN",
+    hierarchy_status: "BLOCKED_TEMPLATE_CATALOG_MISMATCH",
+    hierarchy_path: [],
+    intalev_label: "Строка ремонта иерархии",
+  });
+  const rows = buildArticleApprovalRows({
+    ...scope,
+    aggregateRows: [valid, hierarchyRepair],
+    erpCatalog: catalog,
+  });
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].СтатьяИнталев, "Реклама");
+  assert.equal(validateArticleApprovalRows(rows, {
+    ...scope,
+    sourceSha256: sha,
+    erpCatalog: catalog,
+  }).status, "PASS");
+});
+
+test("APPROVAL-006: blank fields do not exclude a genuine approval candidate or evade fail-closed validation", () => {
+  for (const [field, source] of [
+    ["БлокИнталев", sourceRow({
+      hierarchy_path: undefined,
+      intalev: { path: ["Статьи ОПИУ 2025", "Коммерческие расходы", "Реклама"] },
+    })],
+    ["ПутьИнталев", sourceRow({ hierarchy_path: [], intalev_block: "Коммерческие расходы" })],
+  ]) {
+    const rows = buildArticleApprovalRows({
+      ...scope,
+      aggregateRows: [{
+        ...source,
+        classification: "RECONCILED",
+        priority_stage: "EXACT_SOURCE_TARGET_PROOF",
+        intalev_live_hierarchy_status: "PROVEN",
+      }],
+      erpCatalog: catalog,
+    });
+    assert.equal(rows.length, 1, `${field} blank must not silently drop an approval row`);
+    const validation = validateArticleApprovalRows(rows, {
+      ...scope,
+      sourceSha256: sha,
+      erpCatalog: catalog,
+    });
+    assert.equal(validation.status, "FAIL");
+    assert.ok(validation.errors.some((error) =>
+      error.code === "REQUIRED_FIELD_MISSING" && error.field === field));
+  }
+});
+
 test("A17/A24: production nodes[].catalog_entries resolve only in the authoritative parent block", () => {
   const rows = buildArticleApprovalRows({ ...scope, aggregateRows: [sourceRow()], erpCatalog: productionCatalog });
   assert.equal(rows[0].РешениеПользователя, "ПРЕДЛОЖЕНО ДВИЖКОМ");

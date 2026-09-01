@@ -57,3 +57,21 @@ Carrier содержит унаследованные абсолютные build
 Builder публикует только имена output-файлов, не абсолютные пути. Оба ZIP
 сначала формируются во временных файлах; при любой ошибке пара откатывается и
 ни один final output не остаётся.
+
+## Канонический контракт portable R17
+
+`r17_portable_policy.json` привязывает текущий пакет только к контракту v0.5:
+
+- Git source: `contracts/Контракт_ОПИУ_v0.5_зафиксированный.docx`;
+- путь в пакете: `contract/OPIU_v0.5.docx`;
+- SHA-256: `B2C7D11B8373E603D0FA0C9B9AF090CF3026085A4E80457B228336CEA3DFAB5A`.
+
+Builder извлекает контракт из exact Git blob, повторно проверяет staged SHA и
+записывает одну и ту же привязку в `R17_PACKAGE_MANIFEST.json`,
+`R17_BUILD_PROVENANCE.json` и `CONTRACT_SHA256.txt`. Независимый verifier не доверяет
+этим утверждениям: он требует ровно один текущий файл контракта, сам считает
+его SHA-256 и сверяет оба JSON-документа и sidecar. Пакет, включающий v0.4 вместо
+текущего v0.5, отклоняется.
+
+`baseline_source_commit` — историческая метка исходного packaging baseline; она не выбирает
+и не разрешает source. Авторитетными остаются exact `--source-head` и полный Git blob inventory.

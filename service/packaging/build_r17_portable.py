@@ -40,7 +40,7 @@ POLICY_SCHEMA = "opiu-r17-portable-policy.v1"
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 RUNTIME_LOGICAL_ROOT = "runtime"
 RUNTIME_EDGE_PATH_FORMAT = "POSIX_RELATIVE_TO_LOGICAL_ROOT"
-EXPECTED_POLICY_VALUE_SHA256 = "1C190E6EB730DBFA75BB48E6F20FC35C75290D1A373302BCC30B58C26F5C374F"
+EXPECTED_POLICY_VALUE_SHA256 = "71F45E284FBD39FDBA6DAD79A7FEF50EC862E48D82B9C6C989219C72D44D85EB"
 RELATIVE_IMPORT_PATTERNS = (
     re.compile(r'''(?:from\s+|import\s*\(\s*|require\s*\(\s*|new\s+URL\s*\(\s*)["'](\.[^"']+)["']'''),
     re.compile(r'''\bimport\s*["'](\.[^"']+)["']'''),
@@ -119,9 +119,11 @@ def validate_policy(policy: dict[str, Any]) -> None:
         if policy.get(field) != expected:
             raise BuildError(f"POLICY_CANONICAL_VALUE_INVALID:{field}")
     contract = policy.get("contract", {})
-    if contract.get("package_path") != "contract/OPIU_v0.4.docx" or contract.get("sha256") != (
-        "09AB635802E436C2C33E2FD39D8B35E62631376AB9AE8DA6F6EFC23EAF844BCD"
-    ):
+    if contract != {
+        "source": "contracts/Контракт_ОПИУ_v0.5_зафиксированный.docx",
+        "package_path": "contract/OPIU_v0.5.docx",
+        "sha256": "B2C7D11B8373E603D0FA0C9B9AF090CF3026085A4E80457B228336CEA3DFAB5A",
+    }:
         raise BuildError("POLICY_CONTRACT_BINDING_INVALID")
     go = policy.get("toolchains", {}).get("go", {})
     if (

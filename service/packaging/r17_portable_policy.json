@@ -12,9 +12,9 @@
     "regular": "100644"
   },
   "contract": {
-    "source": "contracts/Контракт_ОПИУ_v0.4_зафиксированный.docx",
-    "package_path": "contract/OPIU_v0.4.docx",
-    "sha256": "09AB635802E436C2C33E2FD39D8B35E62631376AB9AE8DA6F6EFC23EAF844BCD"
+    "source": "contracts/Контракт_ОПИУ_v0.5_зафиксированный.docx",
+    "package_path": "contract/OPIU_v0.5.docx",
+    "sha256": "B2C7D11B8373E603D0FA0C9B9AF090CF3026085A4E80457B228336CEA3DFAB5A"
   },
   "required_metadata": [
     "R17_PACKAGE_MANIFEST.json",

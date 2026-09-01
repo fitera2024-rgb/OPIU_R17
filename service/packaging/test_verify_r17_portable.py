@@ -181,6 +181,7 @@ def rebuild_manifests(
             "privacy": privacy, "legacy_rules_gate": legacy,
             "dependency_closure": dependency_closure,
             "runtime_exact_files": policy["runtime_exact_files"],
+            "contract": policy["contract"],
             "source_binding": binding,
         })
     package_record = VERIFIER.inventory_record(payloads, excluded=("R17_PACKAGE_MANIFEST.json",))
@@ -295,6 +296,66 @@ def test_positive_static_verification_and_identical_pair() -> None:
         pair = VERIFIER.verify_pair(archive, second, policy, policy_sha256=POLICY_SHA)
         assert pair["byte_identical"] is True
         assert pair["release_approved"] is False
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("v04_instead", "CONTRACT_FILE_SET_INVALID"),
+        ("v05_path_v04_bytes", "CONTRACT_SHA256_MISMATCH"),
+        ("wrong_sha_sidecar", "CONTRACT_SHA256_SIDECAR_INVALID"),
+        ("manifest_v04", "PACKAGE_BINDINGS_MISMATCH"),
+        ("provenance_v04", "PACKAGE_BINDINGS_MISMATCH"),
+        ("missing_canonical", "CONTRACT_FILE_SET_INVALID"),
+        ("extra_v04", "CONTRACT_FILE_SET_INVALID"),
+        ("tampered_v05", "CONTRACT_SHA256_MISMATCH"),
+    ],
+)
+def test_current_v05_contract_binding_rejects_stale_missing_or_tampered_packages(
+    mutation: str, expected: str,
+) -> None:
+    repository_root = Path(__file__).parents[2]
+    v04 = (
+        repository_root / "contracts/Контракт_ОПИУ_v0.4_зафиксированный.docx"
+    ).read_bytes()
+    assert VERIFIER.sha256_bytes(v04) == "09AB635802E436C2C33E2FD39D8B35E62631376AB9AE8DA6F6EFC23EAF844BCD"
+    stale = {
+        "source": "contracts/Контракт_ОПИУ_v0.4_зафиксированный.docx",
+        "package_path": "contract/OPIU_v0.4.docx",
+        "sha256": "09AB635802E436C2C33E2FD39D8B35E62631376AB9AE8DA6F6EFC23EAF844BCD",
+    }
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        _, policy, payloads = make_valid(root / "seed")
+        current_path = policy["contract"]["package_path"]
+        if mutation == "v04_instead":
+            payloads.pop(current_path)
+            payloads[stale["package_path"]] = v04
+        elif mutation == "v05_path_v04_bytes":
+            payloads[current_path] = v04
+        elif mutation == "wrong_sha_sidecar":
+            payloads["CONTRACT_SHA256.txt"] = (
+                f"{stale['sha256']} *{current_path}\r\n".encode("ascii")
+            )
+        elif mutation in {"manifest_v04", "provenance_v04"}:
+            name = (
+                "R17_PACKAGE_MANIFEST.json"
+                if mutation == "manifest_v04"
+                else "R17_BUILD_PROVENANCE.json"
+            )
+            document = json.loads(payloads[name])
+            document["contract"] = stale
+            payloads[name] = json_bytes(document)
+        elif mutation == "missing_canonical":
+            payloads.pop(current_path)
+        elif mutation == "extra_v04":
+            payloads[stale["package_path"]] = v04
+        else:
+            payloads[current_path] += b"tamper"
+        archive = root / mutation / "OPIU_R17.zip"
+        write_archive(archive, payloads, policy)
+        with pytest.raises(VERIFIER.VerificationError, match=expected):
+            VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
 
 
 def test_builder_closure_round_trips_through_independent_verifier_with_real_import() -> None:

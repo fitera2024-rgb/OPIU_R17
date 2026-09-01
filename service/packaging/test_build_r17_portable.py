@@ -21,6 +21,7 @@ SPEC.loader.exec_module(BUILDER)
 
 def make_git_source_fixture(root: Path) -> tuple[dict[str, object], str]:
     policy = copy.deepcopy(BUILDER.load_policy())
+    repository_root = Path(__file__).parents[2]
     files = {
         "service/source/go.mod": b"module example.invalid/opiu\n\ngo 1.22\n",
         "service/source/main.go": b"package main\nfunc main() {}\n",
@@ -28,7 +29,9 @@ def make_git_source_fixture(root: Path) -> tuple[dict[str, object], str]:
         "modules/reconciliation/source/safe.mjs": b"export const safe = true;\n",
         "resources/reference/ref.json": b"{}\n",
         "data/defaults/organizations.json": b"synthetic organizations\n",
-        policy["contract"]["source"]: b"synthetic contract",
+        policy["contract"]["source"]: (
+            repository_root / Path(policy["contract"]["source"])
+        ).read_bytes(),
         policy["unicode_settings"][0]["path"]: b"setting a",
         policy["unicode_settings"][1]["path"]: b"setting b",
         ".gitignore": b"service/source/ignored.bin\n",
@@ -54,7 +57,11 @@ def test_canonical_policy_contains_all_exact_pins_and_closed_gates() -> None:
     assert policy["archive_name"] == "OPIU_R17.zip"
     assert policy["archive_root"] == "OPIU_R17"
     assert policy["executable_name"] == "OPIU_R17.exe"
-    assert policy["contract"]["sha256"] == "09AB635802E436C2C33E2FD39D8B35E62631376AB9AE8DA6F6EFC23EAF844BCD"
+    assert policy["contract"] == {
+        "source": "contracts/Контракт_ОПИУ_v0.5_зафиксированный.docx",
+        "package_path": "contract/OPIU_v0.5.docx",
+        "sha256": "B2C7D11B8373E603D0FA0C9B9AF090CF3026085A4E80457B228336CEA3DFAB5A",
+    }
     assert policy["toolchains"]["go"]["file_count"] == 12900
     assert policy["toolchains"]["node"]["inventory_sha256"] == "EA2AF5CAFD6DACC3C9EFAC1FA03627053ECC8B54040202FCC7EA04ADCE261837"
     assert policy["toolchains"]["node_modules"]["packages"] == {
@@ -72,6 +79,75 @@ def test_canonical_policy_contains_all_exact_pins_and_closed_gates() -> None:
     assert policy["runtime_exact_files"] == BUILDER.expected_runtime_exact_files()
     assert "data/defaults" in policy["runtime_source_roots"]
     BUILDER.assert_closed_safety(policy["safety"])
+
+
+def test_builder_rejects_policy_rebound_to_v04_even_with_matching_value_hash() -> None:
+    policy = copy.deepcopy(BUILDER.load_policy())
+    policy["contract"] = {
+        "source": "contracts/Контракт_ОПИУ_v0.4_зафиксированный.docx",
+        "package_path": "contract/OPIU_v0.4.docx",
+        "sha256": "09AB635802E436C2C33E2FD39D8B35E62631376AB9AE8DA6F6EFC23EAF844BCD",
+    }
+    with (
+        patch.object(
+            BUILDER, "EXPECTED_POLICY_VALUE_SHA256", BUILDER.policy_value_sha256(policy),
+        ),
+        pytest.raises(BUILDER.BuildError, match="POLICY_CONTRACT_BINDING_INVALID"),
+    ):
+        BUILDER.validate_policy(policy)
+
+
+def test_contract_staging_uses_exact_v05_git_blob_and_preserves_historical_v04() -> None:
+    repository_root = Path(__file__).parents[2]
+    canonical = repository_root / "contracts/Контракт_ОПИУ_v0.5_зафиксированный.docx"
+    historical = repository_root / "contracts/Контракт_ОПИУ_v0.4_зафиксированный.docx"
+    assert BUILDER.sha256_file(canonical) == "B2C7D11B8373E603D0FA0C9B9AF090CF3026085A4E80457B228336CEA3DFAB5A"
+    assert BUILDER.sha256_file(historical) == "09AB635802E436C2C33E2FD39D8B35E62631376AB9AE8DA6F6EFC23EAF844BCD"
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        repository = root / "repository"
+        repository.mkdir()
+        policy, head = make_git_source_fixture(repository)
+        source_record = BUILDER.exact_git_source_inventory(repository, head, policy)
+        target = root / "stage" / Path(policy["contract"]["package_path"])
+        BUILDER.extract_git_file(
+            repository, source_record, policy["contract"]["source"], target,
+        )
+        assert target.as_posix().endswith("stage/contract/OPIU_v0.5.docx")
+        assert target.read_bytes() == canonical.read_bytes()
+        assert BUILDER.sha256_file(target) == policy["contract"]["sha256"]
+        contract_row = next(
+            row for row in source_record["files"]
+            if row["path"] == policy["contract"]["source"]
+        )
+        assert contract_row["sha256"] == policy["contract"]["sha256"]
+        assert policy["contract"]["source"] != historical.relative_to(repository_root).as_posix()
+
+
+def test_contract_metadata_materializes_exact_v05_binding() -> None:
+    policy = BUILDER.load_policy()
+    with tempfile.TemporaryDirectory() as raw:
+        stage = Path(raw) / "stage"
+        stage.mkdir()
+        BUILDER._write_metadata(
+            stage, policy, "b" * 40, "A" * 64,
+            {
+                "toolchain": {}, "go_test_passed": True,
+                "deterministic_double_build": True, "first_sha256": "C" * 64,
+                "second_sha256": "C" * 64, "size": 1,
+                "build_command": ["go", "build"], "test_command": ["go", "test"],
+            },
+            {}, {}, {}, {}, {},
+        )
+        manifest = json.loads((stage / "R17_PACKAGE_MANIFEST.json").read_text(encoding="utf-8"))
+        provenance = json.loads((stage / "R17_BUILD_PROVENANCE.json").read_text(encoding="utf-8"))
+        assert manifest["contract"] == policy["contract"]
+        assert provenance["contract"] == policy["contract"]
+        assert (stage / "CONTRACT_SHA256.txt").read_bytes() == (
+            b"B2C7D11B8373E603D0FA0C9B9AF090CF3026085A4E80457B228336CEA3DFAB5A "
+            b"*contract/OPIU_v0.5.docx\r\n"
+        )
 
 
 def test_organizations_policy_pin_matches_rel13b_golden_manifest() -> None:

@@ -431,7 +431,9 @@ func monitorServiceLifecycle(ctx context.Context, state *serviceLifecycleState, 
 			safeToStop := snapshot.InFlight == 0 && !hasActiveRun
 
 			if resultPending {
-				if !safeToStop {
+				if snapshot.UISessionSeen {
+					resultReadyAt = time.Time{}
+				} else if !safeToStop {
 					resultReadyAt = time.Time{}
 				} else if resultReadyAt.IsZero() {
 					resultReadyAt = now.Add(resultGrace)

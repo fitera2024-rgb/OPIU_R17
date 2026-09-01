@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -73,7 +74,13 @@ func (s *Server) handleRunResult(w http.ResponseWriter, r *http.Request, runID, 
 			return
 		}
 	}
-	files, err := collectStageResultFiles(root, runID, stage)
+	var files []resultFile
+	var err error
+	if stage == "r001" {
+		files, err = collectVerifiedR001ResultFiles(root, runID)
+	} else {
+		files, err = collectStageResultFiles(root, runID, stage)
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			writeJSON(w, http.StatusOK, runStageResult{Stage: strings.ToUpper(stage), Ready: false, Files: []resultFile{}})
@@ -134,22 +141,22 @@ func stageResultReady(run Run, stage string, files []resultFile) bool {
 		return false
 	}
 	manifestReady := false
-	decisionsReady := false
 	registryReady := false
 	for _, file := range files {
 		name := strings.ToLower(filepath.ToSlash(file.Name))
 		switch file.Kind {
 		case "manifest":
 			manifestReady = manifestReady || strings.HasSuffix(name, "/manifest.json") || name == "manifest.json"
-		case "decisions":
-			decisionsReady = strings.HasSuffix(name, ".xlsx")
 		case "registry":
 			if strings.HasSuffix(name, ".xlsx") {
 				registryReady = true
 			}
 		}
 	}
-	return manifestReady && decisionsReady && registryReady
+	// validateVisibleReportPackage has already proved that the immutable package
+	// contains its decision workbook and every registered engine output. Readiness
+	// must not regress merely because an owner-facing filename changes.
+	return manifestReady && registryReady
 }
 
 func (s *Server) writeStageResultArchive(w http.ResponseWriter, root string, files []resultFile) {
@@ -358,6 +365,82 @@ func collectStageResultFiles(root, runID, stage string) ([]resultFile, error) {
 	return items, nil
 }
 
+func collectVerifiedR001ResultFiles(root, runID string) ([]resultFile, error) {
+	technicalDir := filepath.Join(root, "service-report-package", "technical")
+	var packageManifest struct {
+		ArtifactRegistry visibleReportArtifact `json:"artifact_registry"`
+	}
+	packageManifestPath := filepath.Join(technicalDir, "report-package.manifest.json")
+	if err := readJSONFile(packageManifestPath, &packageManifest); err != nil {
+		return nil, err
+	}
+	var registry struct {
+		Artifacts []visibleReportArtifact `json:"artifacts"`
+	}
+	registryPath := filepath.Join(technicalDir, "artifact-registry.json")
+	if err := readJSONFile(registryPath, &registry); err != nil {
+		return nil, err
+	}
+	if len(registry.Artifacts) == 0 {
+		return nil, errors.New("verified R001 artifact registry is empty")
+	}
+	registrySHA256, err := sha256File(registryPath)
+	if err != nil || !validSHA256(packageManifest.ArtifactRegistry.SHA256) ||
+		!strings.EqualFold(registrySHA256, packageManifest.ArtifactRegistry.SHA256) {
+		return nil, errors.New("verified R001 artifact registry digest changed")
+	}
+
+	packageManifestInfo, err := os.Lstat(packageManifestPath)
+	if err != nil || !isReportArtifactModeAllowed(packageManifestInfo.Mode()) {
+		return nil, errors.New("verified R001 package manifest is not a regular file")
+	}
+	artifacts := []visibleReportArtifact{
+		{
+			Name: filepath.ToSlash(filepath.Join("r001", "service-report-package", "technical", "report-package.manifest.json")),
+			Kind: "manifest", Size: packageManifestInfo.Size(),
+		},
+		packageManifest.ArtifactRegistry,
+	}
+	const r001Prefix = "r001/"
+	for _, artifact := range registry.Artifacts {
+		if strings.HasPrefix(artifact.Name, r001Prefix) {
+			artifacts = append(artifacts, artifact)
+		}
+	}
+
+	items := make([]resultFile, 0, len(artifacts))
+	seen := make(map[string]bool, len(artifacts))
+	for _, artifact := range artifacts {
+		if !strings.HasPrefix(artifact.Name, r001Prefix) || artifact.Kind == "" || artifact.Size < 0 {
+			return nil, errors.New("verified R001 artifact descriptor is inconsistent")
+		}
+		relative := strings.TrimPrefix(artifact.Name, r001Prefix)
+		cleanRelative := filepath.Clean(filepath.FromSlash(relative))
+		if cleanRelative == "." || filepath.IsAbs(cleanRelative) || cleanRelative == ".." || strings.HasPrefix(cleanRelative, ".."+string(os.PathSeparator)) {
+			return nil, errors.New("verified R001 artifact path is unsafe")
+		}
+		relative = filepath.ToSlash(cleanRelative)
+		if seen[relative] {
+			return nil, fmt.Errorf("verified R001 artifact is duplicated: %s", relative)
+		}
+		seen[relative] = true
+
+		path := filepath.Join(root, cleanRelative)
+		info, err := os.Lstat(path)
+		if err != nil || !isReportArtifactModeAllowed(info.Mode()) || info.Size() != artifact.Size {
+			return nil, errors.New("verified R001 artifact is not the registered regular file")
+		}
+		items = append(items, resultFile{
+			Name: relative,
+			Kind: artifact.Kind,
+			Size: artifact.Size,
+			URL:  "/api/runs/" + runID + "/result/r001/file?path=" + urlQueryEscape(relative),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+	return items, nil
+}
+
 func resultKind(stage, rel string) string {
 	lower := strings.ToLower(filepath.ToSlash(rel))
 	if stage == "r005" {
@@ -377,6 +460,16 @@ func resultKind(stage, rel string) string {
 		return "diagnostics"
 	case strings.HasSuffix(lower, "/artifact-registry.json") || lower == "artifact-registry.json":
 		return "registry"
+	case strings.HasSuffix(lower, "/решения.xlsx") || lower == "решения.xlsx":
+		return "decisions"
+	case strings.HasPrefix(lower, "загрузка/") || strings.Contains(lower, "/загрузка/"):
+		return "upload"
+	case strings.HasPrefix(lower, "спорно/") || strings.Contains(lower, "/спорно/"):
+		return "disputed"
+	case strings.HasPrefix(lower, "удаление/") || strings.Contains(lower, "/удаление/"):
+		return "delete"
+	case strings.HasSuffix(lower, "/сверка.xlsx") || lower == "сверка.xlsx":
+		return "reconciliation"
 	case strings.Contains(lower, strings.ToLower("решения_корректировок_ввод_r001")) && strings.HasSuffix(lower, ".xlsx"):
 		return "decisions"
 	case strings.Contains(lower, strings.ToLower("реестр")):

@@ -1189,6 +1189,15 @@ func (s *Server) snapshotWithStructuralControlSetsForRun(exactRunID string) (Sna
 		}
 		snapshot.Runs[index].StructuralControlSets = []StructuralControlSetReference{}
 		if snapshot.Runs[index].HasStructuralInventory {
+			if snapshot.Runs[index].Status == RunFailed && snapshot.Runs[index].Stage == interruptedServiceRestartStage {
+				if exactRunID == snapshot.Runs[index].ID {
+					r005Root := filepath.Join(s.store.RunsDir(), snapshot.Runs[index].ID, "r005")
+					if _, err := s.validatedR005ResultAllowances(r005Root, snapshot.Runs[index]); err != nil {
+						snapshot.Runs[index].HasStructuralInventory = false
+					}
+				}
+				continue
+			}
 			needsRegistry = true
 		}
 	}

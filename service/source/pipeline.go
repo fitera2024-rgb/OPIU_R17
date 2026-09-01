@@ -343,11 +343,11 @@ func (p *Pipeline) executeExternal(run Run, contextValue Context, erpPath, intal
 		return
 	}
 	if err := p.runStage("R001", p.commands["R001"], values, runDir, ""); err != nil {
-		finish(RunFailed, "R001", "Этап завершился ошибкой; технические детали сохранены в журнале запуска")
+		finish(RunFailed, "R001", r001FailureMessage(err, nil))
 		return
 	}
 	if err := validateR001ReportOnlyPackageForRun(filepath.Join(runDir, "r001"), run, contextValue); err != nil {
-		finish(RunFailed, "R001", "R001 не сформировал полный безопасный комплект, привязанный к Service handoff")
+		finish(RunFailed, "R001", r001FailureMessage(nil, err))
 		return
 	}
 	finish(RunCompletedReportOnly, "DONE", "Отчётный запуск завершён; запись в 1С не выполнялась")
@@ -493,7 +493,7 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 	r001Err := p.runStage("R001", r001Command, nil, runDir, adapter.Root)
 	packageErr := validateR001ReportOnlyPackageForRun(r001Dir, run, contextValue)
 	if packageErr != nil {
-		finish(RunFailed, "R001", "R001 не сформировал полный безопасный диагностический комплект")
+		finish(RunFailed, "R001", r001FailureMessage(r001Err, packageErr))
 		return
 	}
 	blockerStatus := "PASS_R001"
@@ -507,7 +507,7 @@ func (p *Pipeline) executeRuntime(run Run, contextValue Context, erpPath, erpSHA
 		return
 	}
 	if r001Err != nil {
-		finish(RunFailed, "R001", "R001 вернул ненулевой exit без распознанного бизнес-блокера; диагностический комплект доступен, запись в 1С не выполнялась")
+		finish(RunFailed, "R001", r001FailureMessage(r001Err, nil)+"; диагностический комплект доступен, запись в 1С не выполнялась")
 		return
 	}
 	finish(RunCompletedReportOnly, "DONE", "Сверка R005 и диагностический комплект R001 завершены напрямую; запись в 1С не выполнялась")
@@ -612,6 +612,82 @@ func r005StageFailureMessage(runDir string) string {
 		return "R005 отклонил настройку группировки: целостность подтверждённых данных не доказана"
 	}
 	return generic
+}
+
+func r001FailureMessage(processErr, packageErr error) string {
+	reasons := make([]string, 0, 2)
+	if processErr != nil {
+		reasons = append(reasons, r001ProcessFailureReason(processErr))
+	}
+	if packageErr != nil {
+		reasons = append(reasons, r001PackageFailureReason(packageErr))
+	}
+	if len(reasons) == 0 {
+		reasons = append(reasons, "причина не определена; подробности сохранены в диагностике запуска")
+	}
+	return "R001 не сформирован: " + strings.Join(reasons, "; ")
+}
+
+func r001ProcessFailureReason(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timed out") {
+		return "превышен тайм-аут этапа R001"
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return fmt.Sprintf("процесс R001 завершился с ненулевым кодом %d", exitErr.ExitCode())
+	}
+	if reason := safeR001DiagnosticReason(err.Error()); reason != "" {
+		return reason
+	}
+	return "процесс R001 завершился ошибкой; подробности сохранены в журнале запуска"
+}
+
+func r001PackageFailureReason(err error) string {
+	text := strings.ToLower(err.Error())
+	known := []struct {
+		needle string
+		reason string
+	}{
+		{"expected one r001 technical manifest", "обязательный манифест R001 отсутствует или неоднозначен"},
+		{"read r001 manifest", "манифест R001 повреждён или нечитаем"},
+		{"manifest schema is not accepted", "схема манифеста R001 не поддерживается"},
+		{"unsafe r001 manifest", "манифест R001 нарушает ограничения REPORT_ONLY"},
+		{"route counts", "контрольные счётчики R001 отсутствуют или противоречат друг другу"},
+		{"output registry is empty", "реестр выходных файлов R001 пуст"},
+		{"unsafe r001 output path", "реестр R001 содержит небезопасный путь"},
+		{"registered r001 artifact is missing", "зарегистрированный файл R001 отсутствует"},
+		{"registered r001 workbook is invalid", "зарегистрированный файл R001 повреждён"},
+		{"artifact hash mismatch", "контрольная сумма файла R001 не совпадает"},
+		{"diagnostic workbook, registry or reconciliation is missing", "обязательный диагностический файл R001 отсутствует"},
+		{"canonical output integrity", "целостность канонического выхода R001 не доказана"},
+		{"escaped exact run or period scope", "комплект R001 не соответствует точному запуску или месяцу"},
+		{"exact reconciliation source", "комплект R001 не связан с точной сверкой R005"},
+		{"reconciliation source hash", "комплект R001 ссылается на изменённую сверку R005"},
+		{"mandatory service handoff", "комплект R001 не содержит обязательную передачу Service"},
+		{"handoff escaped the exact current run", "передача R005→R001 относится к другому запуску"},
+		{"handoff hash", "контрольная сумма передачи R005→R001 не совпадает"},
+		{"service handoff is invalid", "передача R005→R001 не прошла проверку целостности"},
+	}
+	for _, item := range known {
+		if strings.Contains(text, item.needle) {
+			return item.reason
+		}
+	}
+	return "выходной комплект R001 не прошёл проверку целостности"
+}
+
+func safeR001DiagnosticReason(text string) string {
+	allowed := map[string]string{
+		"FORCED_R001_FAILURE_AFTER_VALID_R005": "принудительная проверочная ошибка после успешной R005",
+	}
+	for _, token := range strings.FieldsFunc(text, func(value rune) bool {
+		return !((value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9') || value == '_')
+	}) {
+		if reason, ok := allowed[token]; ok {
+			return reason
+		}
+	}
+	return ""
 }
 
 func runStage(stage string, template []string, values map[string]string, runDir, runtimeRoot string) error {

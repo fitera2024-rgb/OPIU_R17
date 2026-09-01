@@ -47,9 +47,41 @@
     return a;
   }
 
-  function stageResultPresentation(stage, result) {
+  function makeRunDiagnosticsButton(run) {
+    const a = document.createElement("a");
+    a.className = "secondary result-download";
+    a.href = `/api/runs/${encodeURIComponent(run.id)}/diagnostics`;
+    a.textContent = "Скачать диагностику запуска";
+    a.setAttribute("download", "");
+    a.title = "Точная причина остановки и технический журнал запуска";
+    return a;
+  }
+
+  function terminalDownstreamR001Failure(run) {
+    const status = String(run?.status || "");
+    const stage = String(run?.stage || "").toUpperCase();
+    const retainedR005 = Boolean(run?.has_structural_inventory || run?.retained_r005_ready);
+    return status === "FAILED" && (stage.startsWith("R001") || (stage === "INTERRUPTED_SERVICE_RESTART" && retainedR005));
+  }
+
+  function r001FailureNote(run) {
+    const reason = String(run?.message || "").trim();
+    if (!reason) return "R001 не сформирован: точная причина сохранена в диагностике запуска.";
+    return /^R001\s+не\s+сформирован\s*:/i.test(reason) ? reason : `R001 не сформирован: ${reason}`;
+  }
+
+  function stageResultPresentation(stage, result, run) {
     if (result?.ready && result?.files?.length) {
       return { ready: true, badge: "Готово", note: "" };
+    }
+    if (stage === "r001" && terminalDownstreamR001Failure(run)) {
+      return {
+        ready: false,
+        failed: true,
+        diagnostic: Boolean(result?.verified_package_available && diagnosticResultFiles(result?.files).length),
+        badge: "Не сформирован",
+        note: r001FailureNote(run),
+      };
     }
     if (stage === "r001" && result?.verified_package_available && diagnosticResultFiles(result?.files).length) {
       return {
@@ -66,11 +98,11 @@
     };
   }
 
-  function stageBox(stage, result) {
+  function stageBox(stage, result, run) {
     const box = document.createElement("div");
     box.className = "run-result-box";
 
-    const presentation = stageResultPresentation(stage, result);
+    const presentation = stageResultPresentation(stage, result, run);
 
     const heading = document.createElement("div");
     heading.className = "run-result-heading";
@@ -82,7 +114,7 @@
     heading.append(title, badge);
     box.append(heading);
 
-    if (!presentation.ready && !presentation.diagnostic) {
+    if (!presentation.ready && !presentation.diagnostic && !presentation.failed) {
       const empty = document.createElement("span");
       empty.className = "list-meta";
       empty.textContent = presentation.note;
@@ -90,16 +122,28 @@
       return box;
     }
 
-    const visibleFiles = presentation.diagnostic ? diagnosticResultFiles(result.files) : result.files;
+    if (presentation.failed) {
+      const failure = document.createElement("span");
+      failure.className = "list-meta";
+      failure.textContent = presentation.note;
+      box.append(failure);
+    }
+
+    const visibleFiles = presentation.failed
+      ? (presentation.diagnostic ? diagnosticResultFiles(result?.files) : [])
+      : presentation.diagnostic ? diagnosticResultFiles(result?.files) : (result?.files || []);
     const actions = document.createElement("div");
     actions.className = "run-result-actions";
     if (presentation.ready && stage === "r001" && result.archive_url) actions.append(makeArchiveButton(result));
     for (const file of visibleFiles) actions.append(makeButton(file, stage));
+    if (presentation.failed && run?.id) actions.append(makeRunDiagnosticsButton(run));
     box.append(actions);
 
     const meta = document.createElement("span");
     meta.className = "list-meta";
-    meta.textContent = presentation.diagnostic
+    meta.textContent = presentation.failed
+      ? `R001 готов к загрузке: нет. Проверенных диагностических файлов: ${visibleFiles.length}.`
+      : presentation.diagnostic
       ? `Проверенных диагностических файлов: ${visibleFiles.length}. Готовность к загрузке: нет.`
       : stage === "r001" ? `В архиве: ${result.files.length} файлов` : `Файлов: ${result.files.length}`;
     box.append(meta);
@@ -138,7 +182,8 @@
         resultCache.set(run.id, { status: run.status || "", results });
       }
       const [r005, r001] = results;
-      const boxes = [stageBox("r005", r005), stageBox("r001", r001)];
+      const downstreamRun = { ...run, retained_r005_ready: Boolean(r005?.ready) };
+      const boxes = [stageBox("r005", r005, run), stageBox("r001", r001, downstreamRun)];
       holder.replaceChildren(...boxes);
     } catch (error) {
       holder.replaceChildren();

@@ -125,6 +125,14 @@ function renderActiveRunStatus(run) {
     link.href = `#run-${run.id}`;
     link.textContent = " Открыть результат";
     status.append(link);
+  } else if (terminal && run.status === "FAILED" && (
+    String(run.stage || "").toUpperCase().startsWith("R001") ||
+    (String(run.stage || "").toUpperCase() === "INTERRUPTED_SERVICE_RESTART" && run.has_structural_inventory)
+  )) {
+    const link = document.createElement("a");
+    link.href = `#run-${run.id}`;
+    link.textContent = " Открыть доступные результаты";
+    status.append(link);
   }
   if (terminal) {
     stopActiveRunPolling();

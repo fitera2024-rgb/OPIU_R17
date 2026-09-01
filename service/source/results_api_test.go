@@ -3,11 +3,16 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -339,6 +344,485 @@ func TestR001OwnerArchiveUsesActualOwnerFilesThroughDownloadRoute(t *testing.T) 
 	}
 	t.Logf("extracted R001 listing=%v", entries)
 	t.Logf("legacy root filenames=%d; ndjson next to owner XLSX=%d; UNPROVEN *_ОПИУ_ГОТОВО.xlsx=%d", legacyCount, ndjsonNextToOwnerCount, provenUploadCount)
+}
+
+func TestUI012CanonicalR001ResultDiscovery(t *testing.T) {
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextValue := Context{
+		ID:               "ctx_ui012_canonical",
+		Organization:     "9 Управляющая компания",
+		OrganizationID:   structuralSourceOrganizationID,
+		OrganizationName: "9 Управляющая компания",
+		OrganizationPath: "Холдинг / 9 Управляющая компания",
+		Period:           "2025-10",
+	}
+	run := Run{
+		ID:        "run_ui012_canonical",
+		ContextID: contextValue.ID,
+		Status:    RunCompletedReportOnly,
+		Stage:     "DONE",
+		StartedAt: time.Date(2025, 10, 31, 12, 0, 0, 0, time.UTC),
+		Safety:    reportOnlySafety(),
+	}
+	store.state.Runs[run.ID] = run
+	store.state.Contexts[contextValue.ID] = contextValue
+	if err := store.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+
+	runDir := filepath.Join(store.RunsDir(), run.ID)
+	prepareVerifiedServiceHandoffForRun(t, store, run, contextValue, runDir)
+	packageDir := writeUI012CanonicalR001PackageFixture(t, filepath.Join(runDir, "r001"), run, contextValue)
+	if err := materializeVisibleReportPackage(run, contextValue, runDir, filepath.Join(runDir, "r001"), "R001", "R001_COMPLETED_WITH_BLOCKERS", "Безопасный отчётный пакет"); err != nil {
+		t.Fatal(err)
+	}
+
+	server, err := NewServer(store, &Pipeline{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/runs/"+run.ID+"/result/r001", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var result runStageResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+
+	expected := map[string]string{
+		"Решения.xlsx": "decisions",
+		"СПОРНО/[ГК][31.10.2025]_ОПИУ_ГОТОВО_СПОРНО.xlsx":                          "disputed",
+		"СПОРНО/[ООО Группа компаний Планета][31.10.2025]_ОПИУ_ГОТОВО_СПОРНО.xlsx": "disputed",
+		"СПОРНО/[ООО Планета Инноваций][31.10.2025]_ОПИУ_ГОТОВО_СПОРНО.xlsx":       "disputed",
+	}
+	missing := make(map[string]string, len(expected))
+	for name, kind := range expected {
+		missing[name] = kind
+	}
+	decisions, disputed := 0, 0
+	for _, file := range result.Files {
+		name := strings.TrimPrefix(filepath.ToSlash(file.Name), filepath.Base(packageDir)+"/")
+		wantKind, ok := expected[name]
+		if !ok {
+			continue
+		}
+		if file.Kind != wantKind {
+			t.Errorf("canonical artifact %q kind=%q want=%q", name, file.Kind, wantKind)
+		}
+		info, err := os.Stat(filepath.Join(packageDir, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if file.Size != info.Size() || file.URL == "" {
+			t.Errorf("canonical artifact %q size=%d want=%d url=%q", name, file.Size, info.Size(), file.URL)
+		}
+		delete(missing, name)
+		if file.Kind == "decisions" {
+			decisions++
+		}
+		if file.Kind == "disputed" {
+			disputed++
+		}
+	}
+	if !result.Ready || !result.VerifiedPackageAvailable || result.ArchiveURL == "" || len(missing) != 0 || decisions != 1 || disputed != 3 {
+		t.Fatalf("UI012 canonical discovery: ready=%v verified=%v archive=%q listed=%d decisions=%d disputed=%d missing=%d (%v)", result.Ready, result.VerifiedPackageAvailable, result.ArchiveURL, len(result.Files), decisions, disputed, len(missing), missing)
+	}
+
+	var registry struct {
+		Artifacts []visibleReportArtifact `json:"artifacts"`
+	}
+	registryPath := filepath.Join(runDir, "r001", "service-report-package", "technical", "artifact-registry.json")
+	if err := readJSONFile(registryPath, &registry); err != nil {
+		t.Fatal(err)
+	}
+	registryByName := map[string]visibleReportArtifact{}
+	for _, artifact := range registry.Artifacts {
+		registryByName[strings.TrimPrefix(artifact.Name, "r001/")] = artifact
+	}
+	resultByName := map[string]resultFile{}
+	for _, file := range result.Files {
+		resultByName[file.Name] = file
+	}
+	for relative := range expected {
+		name := filepath.ToSlash(filepath.Join(filepath.Base(packageDir), filepath.FromSlash(relative)))
+		file, ok := resultByName[name]
+		if !ok {
+			t.Fatalf("canonical direct-download artifact missing from API: %s", name)
+		}
+		download := httptest.NewRecorder()
+		server.Handler().ServeHTTP(download, httptest.NewRequest(http.MethodGet, file.URL, nil))
+		if download.Code != http.StatusOK {
+			t.Fatalf("canonical direct download %q status=%d body=%s", name, download.Code, download.Body.String())
+		}
+		physical, err := os.ReadFile(filepath.Join(runDir, "r001", filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(download.Body.Bytes(), physical) {
+			t.Fatalf("canonical direct download bytes differ from physical artifact: %s", name)
+		}
+		downloadSHA256 := sha256.Sum256(download.Body.Bytes())
+		registered, ok := registryByName[name]
+		if !ok || !strings.EqualFold(fmt.Sprintf("%X", downloadSHA256), registered.SHA256) {
+			t.Fatalf("canonical direct download %q SHA=%X registered=%q", name, downloadSHA256, registered.SHA256)
+		}
+	}
+
+	unlistedNames := []string{
+		filepath.ToSlash(filepath.Join(filepath.Base(packageDir), "arbitrary-unlisted.xlsx")),
+		filepath.ToSlash(filepath.Join(filepath.Base(packageDir), "СПОРНО", "[FAKE][31.10.2025]_ОПИУ_ГОТОВО_СПОРНО.xlsx")),
+	}
+	for _, name := range unlistedNames {
+		writeSyntheticReportWorkbook(t, filepath.Join(runDir, "r001", filepath.FromSlash(name)), "Загрузка_A_AA", nil)
+	}
+	foreignPath := filepath.Join(store.RunsDir(), "run_ui012_foreign", "r001", "foreign-owner.xlsx")
+	writeSyntheticReportWorkbook(t, foreignPath, "Загрузка_A_AA", nil)
+
+	secondListing := httptest.NewRecorder()
+	server.Handler().ServeHTTP(secondListing, httptest.NewRequest(http.MethodGet, "/api/runs/"+run.ID+"/result/r001", nil))
+	if secondListing.Code != http.StatusOK {
+		t.Fatalf("listing with private files status=%d body=%s", secondListing.Code, secondListing.Body.String())
+	}
+	var listedAgain runStageResult
+	if err := json.Unmarshal(secondListing.Body.Bytes(), &listedAgain); err != nil {
+		t.Fatal(err)
+	}
+	if !listedAgain.Ready || len(listedAgain.Files) != len(result.Files) {
+		t.Fatalf("private/foreign files changed verified listing: before=%d after=%d ready=%v", len(result.Files), len(listedAgain.Files), listedAgain.Ready)
+	}
+	for _, file := range listedAgain.Files {
+		for _, unlisted := range unlistedNames {
+			if file.Name == unlisted {
+				t.Fatalf("unlisted result leaked into API: %s", unlisted)
+			}
+		}
+		if strings.Contains(file.Name, "foreign-owner.xlsx") {
+			t.Fatalf("foreign-run result leaked into API: %s", file.Name)
+		}
+	}
+	for _, name := range unlistedNames {
+		rejected := httptest.NewRecorder()
+		url := "/api/runs/" + run.ID + "/result/r001/file?path=" + urlQueryEscape(name)
+		server.Handler().ServeHTTP(rejected, httptest.NewRequest(http.MethodGet, url, nil))
+		if rejected.Code != http.StatusNotFound {
+			t.Fatalf("unlisted direct download %q status=%d body=%s", name, rejected.Code, rejected.Body.String())
+		}
+	}
+	traversal := httptest.NewRecorder()
+	server.Handler().ServeHTTP(traversal, httptest.NewRequest(http.MethodGet, "/api/runs/"+run.ID+"/result/r001/file?path=../../run_ui012_foreign/r001/foreign-owner.xlsx", nil))
+	if traversal.Code != http.StatusBadRequest {
+		t.Fatalf("path traversal status=%d body=%s", traversal.Code, traversal.Body.String())
+	}
+
+	archiveRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(archiveRecorder, httptest.NewRequest(http.MethodGet, result.ArchiveURL, nil))
+	if archiveRecorder.Code != http.StatusOK {
+		t.Fatalf("canonical archive status=%d body=%s", archiveRecorder.Code, archiveRecorder.Body.String())
+	}
+	archive, err := zip.NewReader(bytes.NewReader(archiveRecorder.Body.Bytes()), int64(archiveRecorder.Body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveNames := map[string]bool{}
+	for _, entry := range archive.File {
+		name := filepath.ToSlash(entry.Name)
+		if archiveNames[name] {
+			t.Fatalf("canonical archive duplicated %q", name)
+		}
+		archiveNames[name] = true
+		file, ok := resultByName[name]
+		if !ok {
+			t.Fatalf("canonical archive contained unexpected/unlisted artifact %q", name)
+		}
+		reader, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		archived, err := io.ReadAll(reader)
+		reader.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		physical, err := os.ReadFile(filepath.Join(runDir, "r001", filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(archived, physical) || int64(len(archived)) != file.Size {
+			t.Fatalf("canonical archive bytes/size differ for %q", name)
+		}
+	}
+	if len(archiveNames) != len(result.Files) {
+		t.Fatalf("canonical archive entries=%d API files=%d", len(archiveNames), len(result.Files))
+	}
+	for name := range resultByName {
+		if !archiveNames[name] {
+			t.Fatalf("canonical archive omitted API artifact %q", name)
+		}
+	}
+}
+
+func writeUI012CanonicalR001PackageFixture(t *testing.T, r001Dir string, run Run, contextValue Context) string {
+	t.Helper()
+	writeFailSoftR001PackageFixtureForRun(t, r001Dir, run, contextValue)
+	manifestPath, err := findR001Manifest(r001Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageDir := filepath.Dir(filepath.Dir(manifestPath))
+	var manifest map[string]any
+	if err := readJSONFile(manifestPath, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	outputs := manifest["outputs"].(map[string]any)
+	legacyDecision := "Решения_корректировок_ввод_R001.xlsx"
+	canonicalDecision := "Решения.xlsx"
+	if err := os.Rename(filepath.Join(packageDir, legacyDecision), filepath.Join(packageDir, canonicalDecision)); err != nil {
+		t.Fatal(err)
+	}
+	outputs[canonicalDecision] = outputs[legacyDecision]
+	delete(outputs, legacyDecision)
+
+	for _, relative := range []string{
+		"СПОРНО/[ГК][31.10.2025]_ОПИУ_ГОТОВО_СПОРНО.xlsx",
+		"СПОРНО/[ООО Группа компаний Планета][31.10.2025]_ОПИУ_ГОТОВО_СПОРНО.xlsx",
+		"СПОРНО/[ООО Планета Инноваций][31.10.2025]_ОПИУ_ГОТОВО_СПОРНО.xlsx",
+	} {
+		path := filepath.Join(packageDir, filepath.FromSlash(relative))
+		writeSyntheticReportWorkbook(t, path, "Загрузка_A_AA", nil)
+		hash, err := sha256File(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outputs[relative] = hash
+	}
+	writeOrchestrationJSON(t, manifestPath, manifest)
+	return packageDir
+}
+
+type ui012ResultFixture struct {
+	store      *Store
+	server     *Server
+	run        Run
+	context    Context
+	runDir     string
+	packageDir string
+}
+
+func newUI012ResultFixture(t *testing.T, suffix string, canonical bool) ui012ResultFixture {
+	t.Helper()
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextValue := Context{
+		ID: "ctx_ui012_" + suffix, Organization: "9 Управляющая компания",
+		OrganizationID: structuralSourceOrganizationID, OrganizationName: "9 Управляющая компания",
+		OrganizationPath: "Холдинг / 9 Управляющая компания", Period: "2025-10",
+	}
+	run := Run{
+		ID: "run_ui012_" + suffix, ContextID: contextValue.ID,
+		Status: RunCompletedReportOnly, Stage: "DONE",
+		StartedAt: time.Date(2025, 10, 31, 12, 0, 0, 0, time.UTC), Safety: reportOnlySafety(),
+	}
+	store.state.Runs[run.ID] = run
+	store.state.Contexts[contextValue.ID] = contextValue
+	if err := store.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(store.RunsDir(), run.ID)
+	prepareVerifiedServiceHandoffForRun(t, store, run, contextValue, runDir)
+	r001Dir := filepath.Join(runDir, "r001")
+	packageDir := filepath.Join(r001Dir, "OPIU_CORRECTIONS_R001_SYNTHETIC")
+	if canonical {
+		packageDir = writeUI012CanonicalR001PackageFixture(t, r001Dir, run, contextValue)
+	} else {
+		writeFailSoftR001PackageFixtureForRun(t, r001Dir, run, contextValue)
+	}
+	if err := materializeVisibleReportPackage(run, contextValue, runDir, r001Dir, "R001", "R001_COMPLETED_WITH_BLOCKERS", "Безопасный отчётный пакет"); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(store, &Pipeline{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ui012ResultFixture{store: store, server: server, run: run, context: contextValue, runDir: runDir, packageDir: packageDir}
+}
+
+func ui012Result(t *testing.T, fixture ui012ResultFixture) runStageResult {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	fixture.server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/runs/"+fixture.run.ID+"/result/r001", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("R001 result status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var result runStageResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func assertUI012MutatedResultRejected(t *testing.T, fixture ui012ResultFixture, relative string) {
+	t.Helper()
+	result := ui012Result(t, fixture)
+	if result.Ready || result.VerifiedPackageAvailable || result.ArchiveURL != "" || len(result.Files) != 0 {
+		t.Fatalf("unsafe/mutated result remained visible: %+v", result)
+	}
+	direct := httptest.NewRecorder()
+	url := "/api/runs/" + fixture.run.ID + "/result/r001/file?path=" + urlQueryEscape(relative)
+	fixture.server.Handler().ServeHTTP(direct, httptest.NewRequest(http.MethodGet, url, nil))
+	if direct.Code != http.StatusNotFound {
+		t.Fatalf("unsafe/mutated direct download status=%d body=%s", direct.Code, direct.Body.String())
+	}
+	archive := httptest.NewRecorder()
+	fixture.server.Handler().ServeHTTP(archive, httptest.NewRequest(http.MethodGet, "/api/runs/"+fixture.run.ID+"/result/r001?archive=1", nil))
+	if archive.Code != http.StatusNotFound {
+		t.Fatalf("unsafe/mutated archive status=%d body=%s", archive.Code, archive.Body.String())
+	}
+}
+
+func TestUI012CanonicalR001SecurityMatrix(t *testing.T) {
+	t.Run("N1_N2_N3_N9_unlisted_foreign_traversal_and_lookalike", func(t *testing.T) {
+		fixture := newUI012ResultFixture(t, "unlisted", true)
+		before := ui012Result(t, fixture)
+		if !before.Ready {
+			t.Fatalf("verified canonical fixture is not ready: %+v", before)
+		}
+		unlisted := []string{
+			filepath.ToSlash(filepath.Join(filepath.Base(fixture.packageDir), "arbitrary.xlsx")),
+			filepath.ToSlash(filepath.Join(filepath.Base(fixture.packageDir), "СПОРНО", "[FAKE]_ОПИУ_ГОТОВО_СПОРНО.xlsx")),
+		}
+		for _, name := range unlisted {
+			writeSyntheticReportWorkbook(t, filepath.Join(fixture.runDir, "r001", filepath.FromSlash(name)), "Загрузка_A_AA", nil)
+		}
+		foreignRelative := filepath.ToSlash(filepath.Join(filepath.Base(fixture.packageDir), "foreign-owner.xlsx"))
+		writeSyntheticReportWorkbook(t, filepath.Join(fixture.store.RunsDir(), "run_ui012_other", "r001", filepath.FromSlash(foreignRelative)), "Загрузка_A_AA", nil)
+		after := ui012Result(t, fixture)
+		if !after.Ready || len(after.Files) != len(before.Files) {
+			t.Fatalf("unlisted/foreign artifacts changed listing: before=%d after=%d ready=%v", len(before.Files), len(after.Files), after.Ready)
+		}
+		for _, file := range after.Files {
+			if file.Name == unlisted[0] || file.Name == unlisted[1] || file.Name == foreignRelative {
+				t.Fatalf("unlisted/foreign artifact leaked: %s", file.Name)
+			}
+		}
+		for _, name := range append(unlisted, foreignRelative) {
+			direct := httptest.NewRecorder()
+			fixture.server.Handler().ServeHTTP(direct, httptest.NewRequest(http.MethodGet, "/api/runs/"+fixture.run.ID+"/result/r001/file?path="+urlQueryEscape(name), nil))
+			if direct.Code != http.StatusNotFound {
+				t.Fatalf("unlisted/foreign %q direct status=%d", name, direct.Code)
+			}
+		}
+		traversal := httptest.NewRecorder()
+		fixture.server.Handler().ServeHTTP(traversal, httptest.NewRequest(http.MethodGet, "/api/runs/"+fixture.run.ID+"/result/r001/file?path=../../run_ui012_other/r001/"+urlQueryEscape(foreignRelative), nil))
+		if traversal.Code != http.StatusBadRequest {
+			t.Fatalf("traversal status=%d body=%s", traversal.Code, traversal.Body.String())
+		}
+	})
+
+	t.Run("N4_symlink", func(t *testing.T) {
+		fixture := newUI012ResultFixture(t, "symlink", true)
+		relative := filepath.ToSlash(filepath.Join(filepath.Base(fixture.packageDir), "Решения.xlsx"))
+		path := filepath.Join(fixture.runDir, "r001", filepath.FromSlash(relative))
+		target := path + ".target"
+		if err := os.Rename(path, target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("Windows symlink privilege unavailable: %v", err)
+		}
+		assertUI012MutatedResultRejected(t, fixture, relative)
+	})
+
+	t.Run("N5_reparse_point", func(t *testing.T) {
+		if runtime.GOOS != "windows" {
+			t.Skip("Windows reparse-point regression")
+		}
+		fixture := newUI012ResultFixture(t, "reparse", true)
+		target := filepath.Join(fixture.store.Root(), "ui012-reparse-target")
+		if err := os.Rename(fixture.packageDir, target); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", fixture.packageDir, target)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("create mandatory junction regression: %v output=%s", err, output)
+		}
+		defer os.Remove(fixture.packageDir)
+		relative := filepath.ToSlash(filepath.Join(filepath.Base(fixture.packageDir), "Решения.xlsx"))
+		assertUI012MutatedResultRejected(t, fixture, relative)
+	})
+
+	t.Run("N6_tampered_canonical_file", func(t *testing.T) {
+		fixture := newUI012ResultFixture(t, "tamper", true)
+		relative := filepath.ToSlash(filepath.Join(filepath.Base(fixture.packageDir), "Решения.xlsx"))
+		path := filepath.Join(fixture.runDir, "r001", filepath.FromSlash(relative))
+		if err := os.WriteFile(path, []byte("tampered canonical workbook"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertUI012MutatedResultRejected(t, fixture, relative)
+	})
+
+	t.Run("N7_size_mismatch", func(t *testing.T) {
+		fixture := newUI012ResultFixture(t, "size", true)
+		relative := filepath.ToSlash(filepath.Join(filepath.Base(fixture.packageDir), "Решения.xlsx"))
+		path := filepath.Join(fixture.runDir, "r001", filepath.FromSlash(relative))
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.Write([]byte{0}); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		assertUI012MutatedResultRejected(t, fixture, relative)
+	})
+
+	t.Run("N8_sha_mismatch", func(t *testing.T) {
+		fixture := newUI012ResultFixture(t, "sha", true)
+		relative := filepath.ToSlash(filepath.Join(filepath.Base(fixture.packageDir), "Решения.xlsx"))
+		path := filepath.Join(fixture.runDir, "r001", filepath.FromSlash(relative))
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data[len(data)/2] ^= 0x01
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertUI012MutatedResultRejected(t, fixture, relative)
+	})
+
+	t.Run("N10_verified_legacy_package_only", func(t *testing.T) {
+		fixture := newUI012ResultFixture(t, "legacy", false)
+		result := ui012Result(t, fixture)
+		legacyRelative := filepath.ToSlash(filepath.Join(filepath.Base(fixture.packageDir), "Решения_корректировок_ввод_R001.xlsx"))
+		legacyFound := false
+		for _, file := range result.Files {
+			legacyFound = legacyFound || (file.Name == legacyRelative && file.Kind == "decisions")
+		}
+		if !result.Ready || !legacyFound {
+			t.Fatalf("verified legacy package unavailable: %+v", result)
+		}
+		fakeRelative := filepath.ToSlash(filepath.Join(filepath.Base(fixture.packageDir), "Решения_корректировок_ввод_R001_FAKE.xlsx"))
+		writeSyntheticReportWorkbook(t, filepath.Join(fixture.runDir, "r001", filepath.FromSlash(fakeRelative)), "Sheet1", nil)
+		after := ui012Result(t, fixture)
+		if !after.Ready || len(after.Files) != len(result.Files) {
+			t.Fatalf("unverified legacy lookalike changed listing: before=%d after=%d", len(result.Files), len(after.Files))
+		}
+		for _, file := range after.Files {
+			if file.Name == fakeRelative {
+				t.Fatalf("unverified legacy lookalike leaked: %s", fakeRelative)
+			}
+		}
+	})
 }
 
 func TestR001VerifiedDiagnosticPackageRemainsAvailableBeforeFinalReady(t *testing.T) {

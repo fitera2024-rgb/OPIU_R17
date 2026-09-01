@@ -94,7 +94,7 @@
     const actions = document.createElement("div");
     actions.className = "run-result-actions";
     if (presentation.ready && stage === "r001" && result.archive_url) actions.append(makeArchiveButton(result));
-    else for (const file of visibleFiles) actions.append(makeButton(file, stage));
+    for (const file of visibleFiles) actions.append(makeButton(file, stage));
     box.append(actions);
 
     const meta = document.createElement("span");

@@ -1,6 +1,11 @@
 (() => {
   const resultCache = new Map();
   const resultInflight = new Map();
+  const expandedRunIds = new Set();
+
+  function resultStateKey(run) {
+    return `${run.id}\u0000${run.status || ""}`;
+  }
 
   const labels = {
     r005: {
@@ -165,21 +170,22 @@
     holder.append(pending);
     item.append(holder);
     try {
-      const cached = resultCache.get(run.id);
+      const stateKey = resultStateKey(run);
+      const cached = resultCache.get(stateKey);
       let results;
-      if (cached?.status === (run.status || "")) {
-        results = cached.results;
+      if (cached) {
+        results = cached;
       } else {
-        let request = resultInflight.get(run.id);
+        let request = resultInflight.get(stateKey);
         if (!request) {
           request = Promise.all([
             api(`/api/runs/${encodeURIComponent(run.id)}/result/r005`),
             api(`/api/runs/${encodeURIComponent(run.id)}/result/r001`),
-          ]).finally(() => resultInflight.delete(run.id));
-          resultInflight.set(run.id, request);
+          ]).finally(() => resultInflight.delete(stateKey));
+          resultInflight.set(stateKey, request);
         }
         results = await request;
-        resultCache.set(run.id, { status: run.status || "", results });
+        resultCache.set(stateKey, results);
       }
       const [r005, r001] = results;
       const downstreamRun = { ...run, retained_r005_ready: Boolean(r005?.ready) };
@@ -195,12 +201,14 @@
   }
 
   function addResultLoader(item, run) {
-    if (item.querySelector(".run-result-loader")) return;
+    const existing = item.querySelector(".run-result-loader");
+    if (existing) return existing;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "secondary compact-button run-result-loader";
     button.textContent = "Показать результаты";
     button.addEventListener("click", async () => {
+      expandedRunIds.add(run.id);
       button.disabled = true;
       button.textContent = "Открываем результаты…";
       await loadForItem(item, run);
@@ -208,6 +216,7 @@
       button.textContent = "Обновить результаты";
     });
     item.append(button);
+    return button;
   }
 
   function syncResults(runs = state.snapshot?.runs || []) {
@@ -220,7 +229,15 @@
       if (!run) continue;
       const existing = item.querySelector(".run-results");
       if (existing && existing.dataset.runStatus !== (run.status || "")) existing.remove();
-      addResultLoader(item, run);
+      const button = addResultLoader(item, run);
+      if (!expandedRunIds.has(run.id)) continue;
+      button.disabled = true;
+      button.textContent = "Открываем результаты…";
+      void loadForItem(item, run).finally(() => {
+        if (!button.isConnected) return;
+        button.disabled = false;
+        button.textContent = "Обновить результаты";
+      });
     }
   }
 
@@ -229,6 +246,15 @@
       diagnosticResultFiles,
       stageBox,
       stageResultPresentation,
+      __test: {
+        addResultLoader,
+        expandedRunIds,
+        loadForItem,
+        resultCache,
+        resultInflight,
+        resultStateKey,
+        syncResults,
+      },
     };
     return;
   }

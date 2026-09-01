@@ -40,15 +40,20 @@ test("UI-007 diagnostics consumes bootstrap events and owns no parallel runs pol
   assert.match(diagnostics, /\.slice\(0,\s*25\)/);
 });
 
-test("UI-007 historical results are lazy and fetched only from a user click", () => {
+test("UI-007 historical results are lazy and an opened result survives bootstrap redraw", () => {
   assert.doesNotMatch(results, /new\s+MutationObserver\s*\(/);
   assert.match(results, /textContent\s*=\s*"Показать результаты"/);
-  assert.match(results, /button\.addEventListener\("click",\s*async\s*\(\)\s*=>\s*\{[\s\S]*?await\s+loadForItem\(item,\s*run\)/);
+  assert.match(results, /button\.addEventListener\("click",\s*async\s*\(\)\s*=>\s*\{[\s\S]*?expandedRunIds\.add\(run\.id\)[\s\S]*?await\s+loadForItem\(item,\s*run\)/);
   const syncStart = results.indexOf("function syncResults");
   const exportStart = results.indexOf("if (typeof module", syncStart);
   assert.ok(syncStart >= 0 && exportStart > syncStart);
-  assert.doesNotMatch(results.slice(syncStart, exportStart), /loadForItem\s*\(/,
-    "a bootstrap render must not fetch every historical result");
-  assert.match(results, /resultInflight\.get\(run\.id\)/);
-  assert.match(results, /resultCache\.get\(run\.id\)/);
+  const syncBody = results.slice(syncStart, exportStart);
+  assert.match(syncBody, /if\s*\(!expandedRunIds\.has\(run\.id\)\)\s*continue/,
+    "a bootstrap render must not fetch unopened historical results");
+  assert.match(syncBody, /void\s+loadForItem\(item,\s*run\)\.finally/,
+    "an explicitly opened result must be restored after the run list is redrawn");
+  assert.match(results, /resultInflight\.get\(stateKey\)/);
+  assert.match(results, /resultCache\.get\(stateKey\)/);
+  assert.match(results, /return\s+`\$\{run\.id\}\\u0000\$\{run\.status\s*\|\|\s*""\}`/,
+    "cache and in-flight result identity must include the exact run status");
 });

@@ -176,8 +176,8 @@ test("normalizes Russian business text", () => {
 
 test("proves the Sakhalin advertising pair without using the article in the fingerprint", () => {
   const result = matchCrossJournalRows({
-    intalevRows: [intalevRow()],
-    erpRows: [erpRow()],
+    intalevRows: [intalevRow({ debit: "44.1" })],
+    erpRows: [erpRow({ debit: "44.1" })],
     period: "2025-01",
     intalevCatalogNodes,
     erpCatalogNodes,

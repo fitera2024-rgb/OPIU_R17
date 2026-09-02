@@ -245,6 +245,38 @@ def write_archive(
             info.external_attr = mode << 16
             info.create_system = 3
             archive.writestr(info, entries[name], compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+    provenance = json.loads(payloads["R17_BUILD_PROVENANCE.json"])
+    source_inventory_sha256 = provenance.get("source_binding", {}).get(
+        "complete_source_scope", {},
+    ).get("inventory_sha256", "0" * 64)
+    embedded_manifest = payloads["R17_PACKAGE_MANIFEST.json"]
+    executable = payloads[policy["executable_name"]]
+    release_document = {
+        "schema_version": "opiu-r17-release-attestation.v1",
+        "candidate_status": "REPORT_ONLY_ARCH_GATED",
+        "release_approved": False,
+        "source_branch": "release/r17",
+        "source_head": SOURCE_HEAD,
+        "source_inventory_sha256": source_inventory_sha256,
+        "contract_version": "0.5",
+        "contract_sha256": policy["contract"]["sha256"],
+        "policy": {"schema_version": policy["schema_version"], "sha256": POLICY_SHA},
+        "toolchains": policy["toolchains"],
+        "embedded_package_manifest": {
+            "path": "R17_PACKAGE_MANIFEST.json", "size": len(embedded_manifest),
+            "sha256": VERIFIER.sha256_bytes(embedded_manifest),
+        },
+        "executable": {
+            "path": policy["executable_name"], "size": len(executable),
+            "sha256": VERIFIER.sha256_bytes(executable),
+        },
+        "archive": {
+            "name": path.name, "size": path.stat().st_size,
+            "sha256": VERIFIER.sha256_file(path),
+        },
+        "safety": policy["safety"],
+    }
+    path.with_name("R17_RELEASE_MANIFEST.json").write_bytes(json_bytes(release_document))
 
 
 def make_valid(root: Path) -> tuple[Path, dict[str, object], dict[str, bytes]]:
@@ -253,6 +285,127 @@ def make_valid(root: Path) -> tuple[Path, dict[str, object], dict[str, bytes]]:
     archive = root / "OPIU_R17.zip"
     write_archive(archive, payloads, policy)
     return archive, policy, payloads
+
+
+def test_pack005_requires_one_canonical_post_archive_release_attestation() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        archive, policy, _payloads = make_valid(Path(raw))
+        attestation = archive.with_name("R17_RELEASE_MANIFEST.json")
+        assert attestation.is_file()
+        document = json.loads(attestation.read_text(encoding="utf-8"))
+        assert document["schema_version"] == "opiu-r17-release-attestation.v1"
+        assert document["source_branch"] == "release/r17"
+        assert document["source_head"] == SOURCE_HEAD
+        assert document["contract_version"] == "0.5"
+        assert document["contract_sha256"] == policy["contract"]["sha256"]
+        assert document["archive"] == {
+            "name": archive.name,
+            "size": archive.stat().st_size,
+            "sha256": VERIFIER.sha256_file(archive),
+        }
+        raw_bytes = attestation.read_bytes()
+        assert str(Path(raw).resolve()).encode("utf-8") not in raw_bytes
+        assert b"timestamp" not in raw_bytes and b"generated_at" not in raw_bytes
+        report = VERIFIER.verify_archive(
+            archive, policy, policy_sha256=POLICY_SHA,
+            expected_source_head=SOURCE_HEAD,
+            expected_source_inventory_sha256=document["source_inventory_sha256"],
+        )
+        assert report["release_attestation"]["path"] == "R17_RELEASE_MANIFEST.json"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "source_branch", "source_head", "source_inventory", "contract_version",
+        "contract_hash", "embedded_manifest_hash", "executable_size", "executable_hash",
+        "archive_size", "archive_hash", "safety", "policy", "toolchains",
+        "release_approved",
+    ],
+)
+def test_pack005_release_attestation_tamper_fails_closed(mutation: str) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        archive, policy, _payloads = make_valid(Path(raw))
+        attestation = archive.with_name("R17_RELEASE_MANIFEST.json")
+        document = json.loads(attestation.read_text(encoding="utf-8"))
+        if mutation == "source_branch":
+            document["source_branch"] = "fix/portable-manifest-release-identity"
+        elif mutation == "source_head":
+            document["source_head"] = "0" * 40
+        elif mutation == "source_inventory":
+            document["source_inventory_sha256"] = "0" * 64
+        elif mutation == "contract_version":
+            document["contract_version"] = "0.4"
+        elif mutation == "contract_hash":
+            document["contract_sha256"] = "0" * 64
+        elif mutation == "embedded_manifest_hash":
+            document["embedded_package_manifest"]["sha256"] = "0" * 64
+        elif mutation == "executable_size":
+            document["executable"]["size"] += 1
+        elif mutation == "executable_hash":
+            document["executable"]["sha256"] = "0" * 64
+        elif mutation == "archive_size":
+            document["archive"]["size"] += 1
+        elif mutation == "archive_hash":
+            document["archive"]["sha256"] = "0" * 64
+        elif mutation == "safety":
+            document["safety"]["release_allowed"] = True
+        elif mutation == "policy":
+            document["policy"]["sha256"] = "0" * 64
+        elif mutation == "toolchains":
+            document["toolchains"]["node"]["version_line"] = "v0.0.0"
+        else:
+            document["release_approved"] = True
+        attestation.write_bytes(json_bytes(document))
+        with pytest.raises(VERIFIER.VerificationError, match="RELEASE_MANIFEST_BINDING_MISMATCH"):
+            VERIFIER.verify_archive(
+                archive, policy, policy_sha256=POLICY_SHA,
+                expected_source_head=SOURCE_HEAD,
+                expected_source_inventory_sha256=json.loads(
+                    archive.with_name("R17_RELEASE_MANIFEST.json").read_text(encoding="utf-8")
+                )["source_inventory_sha256"] if mutation != "source_inventory" else None,
+            )
+
+
+def test_pack005_missing_or_noncanonical_release_attestation_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        archive, policy, _payloads = make_valid(Path(raw))
+        attestation = archive.with_name("R17_RELEASE_MANIFEST.json")
+        attestation.unlink()
+        with pytest.raises(VERIFIER.VerificationError, match="RELEASE_MANIFEST_MISSING_OR_PATH_INVALID"):
+            VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
+
+        write_archive(archive, _payloads, policy)
+        document = json.loads(attestation.read_text(encoding="utf-8"))
+        attestation.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+        with pytest.raises(VERIFIER.VerificationError, match="RELEASE_MANIFEST_NOT_CANONICAL_JSON"):
+            VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
+
+
+@pytest.mark.parametrize(
+    "field_path",
+    [
+        ("source_branch",), ("source_head",), ("source_inventory_sha256",),
+        ("contract_version",), ("contract_sha256",),
+        ("embedded_package_manifest", "sha256"), ("executable", "size"),
+        ("executable", "sha256"), ("archive", "size"), ("archive", "sha256"),
+        ("safety",), ("policy",), ("toolchains",), ("release_approved",),
+    ],
+)
+def test_pack005_required_release_attestation_field_omission_fails_closed(
+    field_path: tuple[str, ...],
+) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        archive, policy, _payloads = make_valid(Path(raw))
+        attestation = archive.with_name("R17_RELEASE_MANIFEST.json")
+        document = json.loads(attestation.read_text(encoding="utf-8"))
+        owner = document
+        for part in field_path[:-1]:
+            owner = owner[part]
+        owner.pop(field_path[-1])
+        attestation.write_bytes(json_bytes(document))
+        with pytest.raises(VERIFIER.VerificationError, match="RELEASE_MANIFEST_BINDING_MISMATCH"):
+            VERIFIER.verify_archive(archive, policy, policy_sha256=POLICY_SHA)
 
 
 def test_verifier_is_independent_of_the_builder_and_existing_packaging_base() -> None:

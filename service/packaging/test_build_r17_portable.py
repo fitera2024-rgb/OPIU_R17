@@ -19,6 +19,10 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(BUILDER)
 
 
+def write_synthetic_release_sidecar(output: Path, data: bytes = b"same attestation\n") -> None:
+    output.with_name(BUILDER.RELEASE_MANIFEST_NAME).write_bytes(data)
+
+
 def make_git_source_fixture(root: Path) -> tuple[dict[str, object], str]:
     policy = copy.deepcopy(BUILDER.load_policy())
     repository_root = Path(__file__).parents[2]
@@ -409,6 +413,43 @@ def test_runtime_dependency_closure_excludes_exact_inventory_node_modules_source
         assert result["edges"] == []
 
 
+def test_release_attestation_is_derived_from_actual_post_archive_bytes() -> None:
+    policy = BUILDER.load_policy()
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        stage = root / "stage"
+        stage.mkdir()
+        executable = b"MZ deterministic executable"
+        embedded_manifest = b'{"schema_version":"synthetic"}\n'
+        (stage / policy["executable_name"]).write_bytes(executable)
+        (stage / "R17_PACKAGE_MANIFEST.json").write_bytes(embedded_manifest)
+        archive = root / "OPIU_R17.zip"
+        BUILDER.write_deterministic_zip(stage, archive, policy)
+        attestation = BUILDER.write_release_attestation(
+            archive, policy, "C" * 64, "b" * 40, "A" * 64,
+        )
+        document = json.loads(attestation.read_text(encoding="utf-8"))
+        assert document["source_branch"] == "release/r17"
+        assert document["source_head"] == "b" * 40
+        assert document["source_inventory_sha256"] == "A" * 64
+        assert document["contract_version"] == "0.5"
+        assert document["contract_sha256"] == policy["contract"]["sha256"]
+        assert document["embedded_package_manifest"] == {
+            "path": "R17_PACKAGE_MANIFEST.json", "size": len(embedded_manifest),
+            "sha256": BUILDER.sha256_bytes(embedded_manifest),
+        }
+        assert document["executable"] == {
+            "path": policy["executable_name"], "size": len(executable),
+            "sha256": BUILDER.sha256_bytes(executable),
+        }
+        assert document["archive"] == {
+            "name": archive.name, "size": archive.stat().st_size,
+            "sha256": BUILDER.sha256_file(archive),
+        }
+        assert document["safety"] == policy["safety"]
+        assert document["release_approved"] is False
+
+
 def test_two_independent_zip_producers_are_byte_identical_atomic_and_no_overwrite() -> None:
     policy = BUILDER.load_policy()
     with tempfile.TemporaryDirectory() as raw:
@@ -422,6 +463,7 @@ def test_two_independent_zip_producers_are_byte_identical_atomic_and_no_overwrit
             stage.mkdir()
             (stage / "same.txt").write_bytes(b"same bytes")
             BUILDER.write_deterministic_zip(stage, output, policy)
+            write_synthetic_release_sidecar(output)
 
         def verifier(index: int, output: Path) -> dict[str, object]:
             verified.append(index)
@@ -437,7 +479,11 @@ def test_two_independent_zip_producers_are_byte_identical_atomic_and_no_overwrit
         assert verified == [0, 1]
         assert result["independent_complete_builds"] == 2
         assert result["atomic_no_overwrite"] is True
+        assert result["release_manifests_byte_identical"] is True
         assert first.read_bytes() == second.read_bytes()
+        assert first.with_name(BUILDER.RELEASE_MANIFEST_NAME).read_bytes() == second.with_name(
+            BUILDER.RELEASE_MANIFEST_NAME
+        ).read_bytes()
         with pytest.raises(BUILDER.BuildError, match="OUTPUT_ALREADY_EXISTS"):
             BUILDER.promote_independent_pair(
                 first, root / "C" / "OPIU_R17.zip", producer, "OPIU_R17.zip", verifier,
@@ -452,6 +498,7 @@ def test_pair_rolls_back_first_promotion_if_second_promotion_fails(monkeypatch: 
 
         def producer(_: int, output: Path) -> None:
             output.write_bytes(b"identical")
+            write_synthetic_release_sidecar(output)
 
         real_link = os.link
         calls = 0
@@ -459,7 +506,7 @@ def test_pair_rolls_back_first_promotion_if_second_promotion_fails(monkeypatch: 
         def fail_second(source: Path, target: Path) -> None:
             nonlocal calls
             calls += 1
-            if calls == 2:
+            if calls == 3:
                 raise OSError("synthetic second promotion failure")
             real_link(source, target)
 
@@ -470,6 +517,8 @@ def test_pair_rolls_back_first_promotion_if_second_promotion_fails(monkeypatch: 
             )
         assert not first.exists()
         assert not second.exists()
+        assert not first.with_name(BUILDER.RELEASE_MANIFEST_NAME).exists()
+        assert not second.with_name(BUILDER.RELEASE_MANIFEST_NAME).exists()
 
 
 def test_both_independent_archives_are_verified_before_any_promotion() -> None:
@@ -481,6 +530,7 @@ def test_both_independent_archives_are_verified_before_any_promotion() -> None:
 
         def producer(index: int, output: Path) -> None:
             output.write_bytes(b"same")
+            write_synthetic_release_sidecar(output)
 
         def reject_closure(index: int, _output: Path) -> dict[str, object]:
             verified.append(index)

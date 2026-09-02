@@ -163,6 +163,10 @@ import {
   unavailableCrossJournalEvidence,
 } from "./cross_journal_discrepancy_evidence.mjs";
 import {
+  derivePhysicalOrganizationScope,
+  loadAuthoritativeOrganizationHierarchy,
+} from "./physical_organization_scope.mjs";
+import {
   createUniqueRunWorkDir,
   persistImmutableErpJournalEvidence,
 } from "./run_workdir.mjs";
@@ -6338,6 +6342,28 @@ async function runReconciliation() {
     }
   }
 
+  let physicalOrganizationScope;
+  try {
+    const authoritativeOrganizationHierarchy = await loadAuthoritativeOrganizationHierarchy({
+      authoritySourcePath: path.resolve(appDir, config.erp_organization_hierarchy_path),
+      expectedSourceSha256: config.erp_organization_hierarchy_sha256,
+    });
+    physicalOrganizationScope = derivePhysicalOrganizationScope({
+      selectedOrganizationId: structuralInventoryScope.organization_id,
+      selectedOrganizationName: structuralInventoryScope.organization_name,
+      selectedOrganizationPath: structuralInventoryScope.organization_path,
+      authoritativeHierarchy: authoritativeOrganizationHierarchy,
+    });
+  } catch (error) {
+    physicalOrganizationScope = {
+      status: "BLOCKED_PHYSICAL_ORGANIZATION_SCOPE",
+      member_names: [],
+      member_identities: [],
+      blocker_codes: [normalizeText(error?.message ?? error)],
+    };
+  }
+  console.log(`PHYSICAL_ORGANIZATION_SCOPE_JSON=${JSON.stringify(physicalOrganizationScope)}`);
+
   if (periods.length === 1) {
     const crossJournalPeriod = periods[0];
     try {
@@ -6373,10 +6399,7 @@ async function runReconciliation() {
             || path.basename(erpSourceSet.journalPath),
           articleApprovalDocument,
           articleApprovalScope,
-          allowedPhysicalOrganizations: unique([
-            organization,
-            ...(profile.journalOrganizationAliases ?? []),
-          ]),
+          allowedPhysicalOrganizations: physicalOrganizationScope.member_names,
         });
       }
     } catch (error) {

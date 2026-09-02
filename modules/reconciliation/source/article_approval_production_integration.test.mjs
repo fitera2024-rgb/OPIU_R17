@@ -18,9 +18,17 @@ test("APPROVAL-003 production: approved JSON is loaded before cross-journal targ
   const selectCrossJournal = reconciliationSource.indexOf(
     "crossJournalEvidence = await buildCrossJournalDiscrepancyEvidence",
   );
+  const loadHierarchy = reconciliationSource.indexOf(
+    "await loadAuthoritativeOrganizationHierarchy",
+  );
+  const derivePhysicalScope = reconciliationSource.indexOf(
+    "physicalOrganizationScope = derivePhysicalOrganizationScope",
+  );
   assert.ok(loadApproval >= 0, "production approved loader is missing");
   assert.ok(selectCrossJournal >= 0, "production cross-journal builder is missing");
   assert.ok(loadApproval < selectCrossJournal, "approved JSON must load before cross-journal selection");
+  assert.ok(loadHierarchy >= 0 && loadHierarchy < selectCrossJournal);
+  assert.ok(derivePhysicalScope >= 0 && derivePhysicalScope < selectCrossJournal);
 
   const call = reconciliationSource.slice(
     selectCrossJournal,
@@ -28,7 +36,12 @@ test("APPROVAL-003 production: approved JSON is loaded before cross-journal targ
   );
   assert.match(call, /articleApprovalDocument/u);
   assert.match(call, /articleApprovalScope/u);
-  assert.match(call, /allowedPhysicalOrganizations/u);
+  assert.match(
+    call,
+    /allowedPhysicalOrganizations: physicalOrganizationScope\.member_names/u,
+  );
+  assert.doesNotMatch(call, /journalOrganizationAliases/u);
+  assert.doesNotMatch(call, /allowedPhysicalOrganizations: unique\(/u);
 });
 
 test("APPROVAL-003 production: cross-journal invokes A22 and keeps one shared reuse set", () => {

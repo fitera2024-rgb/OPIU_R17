@@ -7736,11 +7736,13 @@ function expandHierarchyWithOperations(
   presentationRows,
   financialOutlineLevels,
   operationEvidence,
+  crossJournalEvidence,
 ) {
   return buildOperationTreePresentation({
     presentationRows,
     financialOutlineLevels,
     operationEvidence,
+    crossJournalEvidence,
     normalize: normalizeText,
     fail,
   });
@@ -8163,7 +8165,11 @@ async function buildReportWorkbook(context) {
     presentationRows,
     financialOutlineLevels,
     operationEvidence,
+    crossJournalEvidence,
   );
+  if (crossJournalEvidence && typeof crossJournalEvidence === "object") {
+    crossJournalEvidence.main_tree_drilldown = treePresentation.crossJournalDrilldown;
+  }
   const treePresentationWithDeltaResiduals =
     expandHierarchyWithGroupDeltaResiduals(
       treePresentation,
@@ -8722,7 +8728,7 @@ async function buildReportWorkbook(context) {
         hierarchyProofPassed
           ? "Иерархия Инталева доказана текущим прогоном; ERP binding проверяется отдельно."
           : "Показан фактический путь Инталев; неоднозначные сопоставления не назначаются родителями и помечены HIERARCHY_UNPROVEN.",
-        `Операции: ${operationEvidence?.status ?? "NOT_APPLICABLE"}; source_contributor_rows=${operationEvidence?.source_contributor_rows ?? 0}; display_operation_rows=${operationEvidence?.display_operation_rows ?? 0}.`,
+        `Операции: ${operationEvidence?.status ?? "NOT_APPLICABLE"}; source_contributor_rows=${operationEvidence?.source_contributor_rows ?? 0}; legacy_display_operation_rows=${operationEvidence?.display_operation_rows ?? 0}; cross_journal_drilldown_rows=${treePresentation.crossJournalDrilldown?.display_rows ?? 0}.`,
         "REPORT_ONLY; correction_operation_rows=0; posting_rows=0; ready_to_upload=false; release_allowed=false.",
       ].join(" "),
     ]];
@@ -9103,12 +9109,13 @@ async function buildReportWorkbook(context) {
             : decision;
           const labelsDiffer =
             normalizeLabel(row.intalev_label) !== normalizeLabel(row.erp_label);
-          const childOperationCount = (operationEvidence?.rows ?? []).filter(
-            (operation) => operation.parent_code === row.code,
-          ).length;
-          const provenChildOperationCount = (operationEvidence?.rows ?? []).filter(
+          const childOperations = treeDisplayRows
+            .filter((item) => item.kind === "OPERATION")
+            .map((item) => item.operation)
+            .filter((operation) => operation.parent_code === row.code);
+          const childOperationCount = childOperations.length;
+          const provenChildOperationCount = childOperations.filter(
             (operation) =>
-              operation.parent_code === row.code &&
               operation.row_class !== "CANDIDATE_EXCLUDED" &&
               operation.proof_status !== "CANDIDATE_NOT_PROVEN" &&
               operation.proof_status !== "BLOCKED",
@@ -9201,6 +9208,19 @@ async function buildReportWorkbook(context) {
           operation.pair_status ? `Status=${operation.pair_status}` : "",
           operation.pair_role ? `Role=${operation.pair_role}` : "",
           operation.partner_range ? `Partner=${operation.partner_range}` : "",
+          operation.evidence_status ? `EvidenceStatus=${operation.evidence_status}` : "",
+          operation.cross_journal_case_id
+            ? `CrossJournalCaseID=${operation.cross_journal_case_id}`
+            : "",
+          operation.cross_journal_pair_id
+            ? `CrossJournalPairID=${operation.cross_journal_pair_id}`
+            : "",
+          operation.intalev_source_row_id
+            ? `IntalevSourceRowID=${operation.intalev_source_row_id}`
+            : "",
+          operation.intalev_report_node_id
+            ? `PresentationIdentity=${operation.intalev_report_node_id}`
+            : "",
           inactive ? "EXCLUDED_FROM_TOTAL" : "",
           candidate ? "CANDIDATE_NOT_PROVEN; EXCLUDED_FROM_TOTAL" : "",
         ].filter(Boolean).join("; ");
@@ -9430,6 +9450,19 @@ async function buildReportWorkbook(context) {
             operation.pair_status ? `Status=${operation.pair_status}` : "",
             operation.pair_role ? `Role=${operation.pair_role}` : "",
             operation.partner_range ? `Partner=${operation.partner_range}` : "",
+            operation.evidence_status ? `EvidenceStatus=${operation.evidence_status}` : "",
+            operation.cross_journal_case_id
+              ? `CrossJournalCaseID=${operation.cross_journal_case_id}`
+              : "",
+            operation.cross_journal_pair_id
+              ? `CrossJournalPairID=${operation.cross_journal_pair_id}`
+              : "",
+            operation.intalev_source_row_id
+              ? `IntalevSourceRowID=${operation.intalev_source_row_id}`
+              : "",
+            operation.intalev_report_node_id
+              ? `PresentationIdentity=${operation.intalev_report_node_id}`
+              : "",
             operation.comment ?? "",
             inactive ? "EXCLUDED_FROM_TOTAL" : "",
             candidate ? "CANDIDATE_NOT_PROVEN; EXCLUDED_FROM_TOTAL" : "",
@@ -9508,7 +9541,7 @@ async function buildReportWorkbook(context) {
           `Статус ERP: ${row.erp.status}`,
           `INTALEV_HIERARCHY: ${row.intalev_hierarchy_status}`,
           `ERP_BINDING: ${row.erp_binding_status}`,
-          `Операции: ${operationEvidence?.status ?? "NOT_APPLICABLE"}; child_operation_rows=${(operationEvidence?.rows ?? []).filter((operation) => operation.parent_code === row.code).length}.`,
+          `Операции: ${operationEvidence?.status ?? "NOT_APPLICABLE"}; child_operation_rows=${treeDisplayRows.filter((item) => item.kind === "OPERATION" && item.operation?.parent_code === row.code).length}; cross_journal_drilldown_rows=${treePresentation.crossJournalDrilldown?.display_rows ?? 0}.`,
           "posting_rows=0; ready_to_upload=false; release_allowed=false.",
         ].join("\n"),
       );

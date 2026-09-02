@@ -36,6 +36,10 @@ BuildError = BASE.BuildError
 SCHEMA_VERSION = "opiu-r17-package-manifest.v1"
 PROVENANCE_SCHEMA = "opiu-r17-build-provenance.v1"
 RUNTIME_SCHEMA = "opiu-r17-runtime-manifest.v1"
+RELEASE_SCHEMA = "opiu-r17-release-attestation.v1"
+RELEASE_MANIFEST_NAME = "R17_RELEASE_MANIFEST.json"
+RELEASE_SOURCE_BRANCH = "release/r17"
+CONTRACT_VERSION = "0.5"
 POLICY_SCHEMA = "opiu-r17-portable-policy.v1"
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 RUNTIME_LOGICAL_ROOT = "runtime"
@@ -819,6 +823,75 @@ def write_deterministic_zip(stage: Path, output: Path, policy: dict[str, Any]) -
             archive.writestr(info, item.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
 
 
+def release_attestation_value(
+    archive_path: Path, policy: dict[str, Any], policy_sha: str, source_head: str,
+    source_inventory_sha256: str,
+) -> dict[str, Any]:
+    """Bind actual post-archive bytes without creating a self-referential ZIP."""
+    if archive_path.name != policy["archive_name"] or not archive_path.is_file():
+        raise BuildError("RELEASE_ARCHIVE_NAME_OR_FILE_INVALID")
+    root = policy["archive_root"]
+    manifest_member = f"{root}/R17_PACKAGE_MANIFEST.json"
+    executable_member = f"{root}/{policy['executable_name']}"
+    try:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            embedded_manifest = archive.read(manifest_member)
+            executable = archive.read(executable_member)
+    except (OSError, KeyError, zipfile.BadZipFile) as error:
+        raise BuildError("RELEASE_ARCHIVE_BINDING_READ_FAILED") from error
+    return {
+        "schema_version": RELEASE_SCHEMA,
+        "candidate_status": "REPORT_ONLY_ARCH_GATED",
+        "release_approved": False,
+        "source_branch": RELEASE_SOURCE_BRANCH,
+        "source_head": source_head,
+        "source_inventory_sha256": source_inventory_sha256,
+        "contract_version": CONTRACT_VERSION,
+        "contract_sha256": policy["contract"]["sha256"],
+        "policy": {
+            "schema_version": policy["schema_version"],
+            "sha256": policy_sha,
+        },
+        "toolchains": policy["toolchains"],
+        "embedded_package_manifest": {
+            "path": "R17_PACKAGE_MANIFEST.json",
+            "size": len(embedded_manifest),
+            "sha256": sha256_bytes(embedded_manifest),
+        },
+        "executable": {
+            "path": policy["executable_name"],
+            "size": len(executable),
+            "sha256": sha256_bytes(executable),
+        },
+        "archive": {
+            "name": archive_path.name,
+            "size": archive_path.stat().st_size,
+            "sha256": sha256_file(archive_path),
+        },
+        "safety": policy["safety"],
+    }
+
+
+def write_release_attestation(
+    archive_path: Path, policy: dict[str, Any], policy_sha: str, source_head: str,
+    source_inventory_sha256: str,
+) -> Path:
+    target = archive_path.with_name(RELEASE_MANIFEST_NAME)
+    if target.exists() or target.is_symlink():
+        raise BuildError(f"OUTPUT_ALREADY_EXISTS:{target.name}")
+    data = canonical_json(release_attestation_value(
+        archive_path, policy, policy_sha, source_head, source_inventory_sha256,
+    ))
+    try:
+        with target.open("xb") as stream:
+            stream.write(data)
+    except OSError as error:
+        raise BuildError("RELEASE_MANIFEST_WRITE_FAILED") from error
+    if target.read_bytes() != data:
+        raise BuildError("RELEASE_MANIFEST_CANONICAL_WRITE_MISMATCH")
+    return target
+
+
 def verify_with_independent_verifier(
     archive_path: Path, policy: dict[str, Any], policy_sha: str, source_head: str,
     source_inventory_sha256: str,
@@ -850,8 +923,9 @@ def promote_independent_pair(
         raise BuildError("OUTPUT_NAME_MUST_BE_OPIU_R17_ZIP")
     if os.path.normcase(str(first)) == os.path.normcase(str(second)):
         raise BuildError("OUTPUT_PATHS_MUST_BE_DISTINCT")
-    for output in (first, second):
-        if output.exists():
+    release_outputs = [output.with_name(RELEASE_MANIFEST_NAME) for output in (first, second)]
+    for output in (*((first, second)), *release_outputs):
+        if output.exists() or output.is_symlink():
             raise BuildError(f"OUTPUT_ALREADY_EXISTS:{output.name}")
     temporaries: list[Path] = []
     temporary_directories: list[tempfile.TemporaryDirectory[str]] = []
@@ -866,6 +940,8 @@ def promote_independent_pair(
             temporary = Path(temporary_directory.name) / archive_name
             temporaries.append(temporary)
             producer(index, temporary)
+            if not temporary.with_name(RELEASE_MANIFEST_NAME).is_file():
+                raise BuildError("RELEASE_MANIFEST_MISSING_AFTER_ARCHIVE_BUILD")
         verification_reports: list[dict[str, Any]] = []
         verification_errors: list[tuple[int, Exception]] = []
         for index, temporary in enumerate(temporaries):
@@ -879,9 +955,19 @@ def promote_independent_pair(
         hashes = [sha256_file(path) for path in temporaries]
         if hashes[0] != hashes[1] or temporaries[0].read_bytes() != temporaries[1].read_bytes():
             raise BuildError("INDEPENDENT_OUTPUTS_NONDETERMINISTIC")
-        for temporary, output in zip(temporaries, (first, second), strict=True):
-            os.link(temporary, output)
-            promoted.append(output)
+        release_temporaries = [path.with_name(RELEASE_MANIFEST_NAME) for path in temporaries]
+        release_hashes = [sha256_file(path) for path in release_temporaries]
+        if (
+            release_hashes[0] != release_hashes[1]
+            or release_temporaries[0].read_bytes() != release_temporaries[1].read_bytes()
+        ):
+            raise BuildError("INDEPENDENT_RELEASE_MANIFESTS_NONDETERMINISTIC")
+        for temporary, release_temporary, output, release_output in zip(
+            temporaries, release_temporaries, (first, second), release_outputs, strict=True,
+        ):
+            for source, target in ((temporary, output), (release_temporary, release_output)):
+                os.link(source, target)
+                promoted.append(target)
     except Exception:
         for output in promoted:
             output.unlink(missing_ok=True)
@@ -895,6 +981,10 @@ def promote_independent_pair(
         "independent_complete_builds": 2, "atomic_no_overwrite": True,
         "independent_verification_before_promotion": True,
         "verified_archive_count": len(verification_reports),
+        "release_manifest_name": RELEASE_MANIFEST_NAME,
+        "release_manifest_sha256": release_hashes[0],
+        "release_manifest_size": release_outputs[0].stat().st_size,
+        "release_manifests_byte_identical": True,
     }
 
 
@@ -985,6 +1075,10 @@ def _build_one(
         if exact_git_source_inventory(repository, source_head, policy) != expected_source_record:
             raise BuildError("SOURCE_CHANGED_BEFORE_ARCHIVE_WRITE")
         write_deterministic_zip(stage, output, policy)
+        write_release_attestation(
+            output, policy, policy_sha, source_head,
+            expected_source_record["inventory_sha256"],
+        )
         if exact_git_source_inventory(repository, source_head, policy) != expected_source_record:
             raise BuildError("SOURCE_CHANGED_AFTER_ARCHIVE_WRITE")
 

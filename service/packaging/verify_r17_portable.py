@@ -24,6 +24,10 @@ POLICY_SCHEMA = "opiu-r17-portable-policy.v1"
 PACKAGE_SCHEMA = "opiu-r17-package-manifest.v1"
 PROVENANCE_SCHEMA = "opiu-r17-build-provenance.v1"
 RUNTIME_SCHEMA = "opiu-r17-runtime-manifest.v1"
+RELEASE_SCHEMA = "opiu-r17-release-attestation.v1"
+RELEASE_MANIFEST_NAME = "R17_RELEASE_MANIFEST.json"
+RELEASE_SOURCE_BRANCH = "release/r17"
+CONTRACT_VERSION = "0.5"
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 RUNTIME_LOGICAL_ROOT = "runtime"
 RUNTIME_EDGE_PATH_FORMAT = "POSIX_RELATIVE_TO_LOGICAL_ROOT"
@@ -64,6 +68,72 @@ def policy_value_sha256(value: dict[str, Any]) -> str:
 
 def canonical_json(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def verify_release_attestation(
+    archive_path: Path, payloads: dict[str, bytes], policy: dict[str, Any],
+    policy_sha256: str, source_head: str, source_inventory_sha256: str,
+) -> dict[str, Any]:
+    """Require the canonical external manifest and bind it to actual archive bytes."""
+    target = archive_path.with_name(RELEASE_MANIFEST_NAME)
+    if (
+        target.name != RELEASE_MANIFEST_NAME
+        or target.parent.resolve() != archive_path.parent.resolve()
+        or not target.is_file()
+        or target.is_symlink()
+        or bool(getattr(os.lstat(target), "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT)
+    ):
+        raise VerificationError("RELEASE_MANIFEST_MISSING_OR_PATH_INVALID")
+    try:
+        data = target.read_bytes()
+    except OSError as error:
+        raise VerificationError("RELEASE_MANIFEST_READ_FAILED") from error
+    document = _json_object(data, RELEASE_MANIFEST_NAME)
+    if data != canonical_json(document):
+        raise VerificationError("RELEASE_MANIFEST_NOT_CANONICAL_JSON")
+    embedded_manifest = payloads["R17_PACKAGE_MANIFEST.json"]
+    executable = payloads[policy["executable_name"]]
+    expected = {
+        "schema_version": RELEASE_SCHEMA,
+        "candidate_status": "REPORT_ONLY_ARCH_GATED",
+        "release_approved": False,
+        "source_branch": RELEASE_SOURCE_BRANCH,
+        "source_head": source_head,
+        "source_inventory_sha256": source_inventory_sha256,
+        "contract_version": CONTRACT_VERSION,
+        "contract_sha256": policy["contract"]["sha256"],
+        "policy": {
+            "schema_version": policy["schema_version"],
+            "sha256": policy_sha256,
+        },
+        "toolchains": policy["toolchains"],
+        "embedded_package_manifest": {
+            "path": "R17_PACKAGE_MANIFEST.json",
+            "size": len(embedded_manifest),
+            "sha256": sha256_bytes(embedded_manifest),
+        },
+        "executable": {
+            "path": policy["executable_name"],
+            "size": len(executable),
+            "sha256": sha256_bytes(executable),
+        },
+        "archive": {
+            "name": archive_path.name,
+            "size": archive_path.stat().st_size,
+            "sha256": sha256_file(archive_path),
+        },
+        "safety": policy["safety"],
+    }
+    if document != expected:
+        raise VerificationError("RELEASE_MANIFEST_BINDING_MISMATCH")
+    return {
+        "path": RELEASE_MANIFEST_NAME,
+        "size": len(data),
+        "sha256": sha256_bytes(data),
+        "schema_version": RELEASE_SCHEMA,
+        "source_branch": RELEASE_SOURCE_BRANCH,
+        "release_approved": False,
+    }
 
 
 def _json_object(data: bytes, label: str) -> dict[str, Any]:
@@ -740,6 +810,10 @@ def verify_archive(
     for document in (manifest, provenance, runtime_manifest):
         if document.get("dependency_closure") != dependency_closure:
             raise VerificationError("RUNTIME_DEPENDENCY_CLOSURE_EVIDENCE_MISMATCH")
+    release_attestation = verify_release_attestation(
+        archive_path, payloads, policy, expected_policy_sha, source_head,
+        source_binding["inventory_sha256"],
+    )
     report = {
         "status": "PASS_REPORT_ONLY_CANDIDATE", "archive": archive_path.name,
         "sha256": sha256_file(archive_path), "size": archive_path.stat().st_size,
@@ -750,6 +824,7 @@ def verify_archive(
         "legacy_rules_gate": legacy, "privacy": privacy,
         "dependency_closure": dependency_closure,
         "source_binding": source_binding,
+        "release_attestation": release_attestation,
     }
     if run_smoke:
         report["relocation_smoke"] = _run_two_relocation_smokes_after_static(
@@ -1113,11 +1188,21 @@ def verify_pair(
         raise VerificationError("INDEPENDENT_ARCHIVES_NOT_BYTE_IDENTICAL")
     if first["source_head"] != second["source_head"]:
         raise VerificationError("INDEPENDENT_ARCHIVES_SOURCE_HEAD_MISMATCH")
+    release_a = archive_a.with_name(RELEASE_MANIFEST_NAME)
+    release_b = archive_b.with_name(RELEASE_MANIFEST_NAME)
+    if (
+        first["release_attestation"]["sha256"] != second["release_attestation"]["sha256"]
+        or release_a.read_bytes() != release_b.read_bytes()
+    ):
+        raise VerificationError("INDEPENDENT_RELEASE_MANIFESTS_NOT_BYTE_IDENTICAL")
     return {
         "status": "PASS_REPORT_ONLY_CANDIDATE_PAIR", "archive_name": policy["archive_name"],
         "sha256": first["sha256"], "size": first["size"], "byte_identical": True,
         "independent_complete_builds": 2, "source_head": first["source_head"],
         "release_approved": False, "safety": policy["safety"],
+        "release_manifest_name": RELEASE_MANIFEST_NAME,
+        "release_manifest_sha256": first["release_attestation"]["sha256"],
+        "release_manifests_byte_identical": True,
     }
 
 

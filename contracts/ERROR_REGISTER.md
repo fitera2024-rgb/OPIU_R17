@@ -8,8 +8,9 @@
 
 ## Release-диспозиция на 02.09.2026
 
-- Текущая release-база: `e4fe35bfe9b5c8e31adeb984af918e8f371ebaa3`.
-- `R005-021`, `R005-022`, `R005-024` и `R005-025` завершены, проверены и входят в текущую release-базу.
+- Authoritative release ref: `release/r17`; его exact SHA является фактом Git на момент gate, а не постоянным значением в этом документе.
+- Историческая product-code baseline до последующих release-документационных merge: `e4fe35bfe9b5c8e31adeb984af918e8f371ebaa3`.
+- `R005-021`, `R005-022`, `R005-024` и `R005-025` завершены, проверены и входят в эту историческую продуктовую базу.
 - `R005-025` объединён через PR #39; Issue #35 закрыт со статусом `COMPLETED`.
 - Scope R17 заморожен: оставшаяся работа — только финальная release-валидация из `STATUS.md`.
 - `R005-026` / Issue #37 и закрытый без merge исторический PR #28 имеют статус `POST-R17`; они не являются объединёнными изменениями или текущими блокерами R17.
@@ -991,3 +992,18 @@
 - Обязательный RED: текущий builder не создаёт внешний release attestation, а verifier не может доказать Issue #42 release identity из одного канонического post-archive объекта.
 - Регрессионный тест: A/B ZIP из одного exact source остаются byte-identical; внешние attestations идентичны. Отдельно подменяются/удаляются source branch/head, contract version/hash, embedded manifest hash, source inventory hash, EXE size/hash, ZIP size/hash и safety; каждый случай отклоняется. В attestation запрещены timestamp, абсолютный путь, random/machine identity и `release_approved=true`.
 - PASS: canonical verifier без bypass проверяет фактические EXE/ZIP bytes, source/contract/inventory/policy/toolchains/safety; relocation smoke не меняется; `release_approved=false`; packaging contour, A/B determinism, `git diff --check` проходят. R005/R001/Service financial semantics, contract v0.5 и final release authorization вне scope.
+
+### GOV-002 — release-документация самоссылочно фиксирует pre-merge SHA как текущий HEAD
+
+- Дата: `02.09.2026`.
+- Статус: `VERIFIED`.
+- Сообщил: Issue #45, карточка `GOV-002_RELEASE_DOCS_SELF_REFERENCE`.
+- Наблюдаемое поведение: обязательные `STATUS.md` и `COORDINATION.md` называли известный документационному коммиту pre-merge SHA `e4fe35bfe9b5c8e31adeb984af918e8f371ebaa3` текущим `release/r17` / exact release commit. После merge такой текст немедленно становится устаревшим, потому что сам merge получает другой SHA.
+- Ожидаемое поведение: `release/r17` является authoritative release ref; известный прежний SHA может сохраняться только как явно историческая product-code baseline. Exact tested SHA определяется из Git при запуске финального gate, сверяется с intended `origin/release/r17` и сохраняется как фактическое evidence во внешнем gate-протоколе и release-manifest.
+- Доказательство до исправления: `STATUS.md` содержал «текущий `release/r17`: commit `e4fe35b...`», а `COORDINATION.md` — «exact release commit: `e4fe35b...`». Документационный commit не может знать SHA будущего merge-коммита, который будет содержать его сам.
+- Классификация первопричины: `SELF_REFERENTIAL_RELEASE_DOCUMENTATION`.
+- Затронутые пункты контракта: §§1, 13, 14, 16 и Приложение B; release manifest, SHA-256 и протокол тестирования остаются обязательными. Канонический контракт v0.5, SHA-256 `B2C7D11B8373E603D0FA0C9B9AF090CF3026085A4E80457B228336CEA3DFAB5A`, не изменяется.
+- Допустимый scope: только `STATUS.md`, `COORDINATION.md` и эта запись. Production-код, тесты, конфигурация, ресурсы, `contracts/CURRENT.md`, канонический DOCX, R005/R001/Service, Issue #42, EXE/ZIP и release merge запрещены.
+- Регрессионная проверка: release-документы не содержат immutable/current-head assertion с pre-merge SHA; любой сохранённый SHA явно исторический; `release/r17` назван authoritative ref; инструкция gate требует `git rev-parse HEAD`, равенства с `git rev-parse origin/release/r17` и фиксации exact tested SHA во внешнем gate/manifest evidence.
+- PASS: изменены только разрешённые Markdown-файлы; `contracts/CURRENT.md` и канонический DOCX неизменны; hash DOCX остаётся exact; safety semantics сохраняют `REPORT_ONLY=true`, `rules_service=false`, запрет автоматической загрузки/проведения в 1С, обязательное физическое ERP evidence и запрет повторного финансового использования одной физической ERP-строки; `git diff --check` и статический grep проходят.
+- Реализация: самоссылочная current-head формулировка заменена устойчивым разделением authoritative ref, исторической product-code baseline и exact SHA, получаемого и фиксируемого только в момент gate/build.

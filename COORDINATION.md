@@ -53,13 +53,14 @@
 
 ## Текущая release-координация
 
-- exact release commit: `e4fe35bfe9b5c8e31adeb984af918e8f371ebaa3`;
+- authoritative release ref: `release/r17`; документация не предсказывает SHA merge-коммита, который будет содержать её саму;
+- историческая product-code baseline до последующих release-документационных merge: `e4fe35bfe9b5c8e31adeb984af918e8f371ebaa3`;
 - `R005-021`, `R005-022`, `R005-024` и `R005-025` завершены;
 - `R005-025` объединён PR #39, Issue #35 закрыт как `COMPLETED`;
 - scope R17 заморожен: разрешена только финальная release-валидация, перечисленная в `STATUS.md`;
 - production-код, тесты, конфигурация, ресурсы и канонический DOCX в документационной задаче Issue #40 не изменяются.
 
-Финальный gate выполняется на одном exact commit в следующем составе:
+Финальный gate выполняется на одном exact commit. При запуске gate exact tested SHA получается из Git командой `git rev-parse HEAD`, проверяется на равенство `git rev-parse origin/release/r17` и записывается как фактическое evidence во внешний gate-протокол и release-manifest, а не предсказывается документационным коммитом. Состав gate:
 
 1. свежий Sakhalin R005 → immutable handoff → R001;
 2. UK October golden;

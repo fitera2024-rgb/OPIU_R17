@@ -251,6 +251,43 @@ function accountBlock(value) {
   return "";
 }
 
+function resolveIntalevEconomicBlock(row) {
+  const candidates = [
+    { side: "DEBIT", account: canonicalAccount(row?.debit) },
+    { side: "CREDIT", account: canonicalAccount(row?.credit) },
+  ]
+    .map((candidate) => ({ ...candidate, block: accountBlock(candidate.account) }))
+    .filter((candidate) => candidate.account && candidate.block);
+  const blocks = [...new Set(candidates.map((candidate) => normalizeBusinessText(candidate.block)))];
+  if (candidates.length === 0) {
+    return {
+      status: "NO_RECOGNIZED_EXPENSE_ACCOUNT",
+      expense_account: "",
+      expense_account_side: "",
+      economic_block: "",
+      candidates: [],
+    };
+  }
+  if (blocks.length !== 1) {
+    return {
+      status: "CONFLICTING_EXPENSE_BLOCKS",
+      expense_account: "",
+      expense_account_side: "",
+      economic_block: "",
+      candidates,
+    };
+  }
+  const accounts = [...new Set(candidates.map((candidate) => candidate.account))];
+  const sides = [...new Set(candidates.map((candidate) => candidate.side))];
+  return {
+    status: "PROVEN_EXPENSE_ACCOUNT",
+    expense_account: accounts.join(" | "),
+    expense_account_side: sides.length === 1 ? sides[0] : "BOTH",
+    economic_block: candidates[0].block,
+    candidates,
+  };
+}
+
 function rowAccounts(row) {
   const values = [
     row.disclosure,
@@ -485,7 +522,7 @@ function inferArticle(row, index, system = "") {
 }
 
 function selectTargetArticle({ intalevRow, intalevArticle, erpArticle, erpIndex }) {
-  const targetBlock = intalevArticle.block || businessBlockFromRow(intalevRow);
+  const targetBlock = text(intalevArticle.economic_block);
   const intalevTargetName = text(intalevArticle.article);
   const erpFallbackName = text(erpArticle.article);
   if (!targetBlock || (!intalevTargetName && !erpFallbackName)) {
@@ -788,7 +825,7 @@ function isPayrollIntalevRow(row) {
   const values = [...(row.debit_analytics ?? []), ...(row.credit_analytics ?? [])]
     .map(normalizeBusinessText);
   return values.some((value) => value.startsWith("фзп ") || value === "фзп")
-    && Boolean(businessBlockFromRow(row));
+    && Boolean(row.article_info?.economic_block);
 }
 
 function isNdfLIntalevRow(row) {
@@ -837,7 +874,7 @@ function buildPayrollReclassificationRows({
     !matchedIntalev.has(row.source_row_id) && isPayrollIntalevRow(row) && personKey(row));
   const byPersonDateBlock = new Map();
   for (const row of payrollIntalev) {
-    const key = [dateOnly(row.date_value || row.date), personKey(row), businessBlockFromRow(row)].join("|");
+    const key = [dateOnly(row.date_value || row.date), personKey(row), row.article_info.economic_block].join("|");
     if (!byPersonDateBlock.has(key)) byPersonDateBlock.set(key, []);
     byPersonDateBlock.get(key).push(row);
   }
@@ -858,8 +895,9 @@ function buildPayrollReclassificationRows({
       });
       return;
     }
-    const targetBlock = businessBlockFromRow(members[0]);
-    if (!targetBlock || members.some((member) => businessBlockFromRow(member) !== targetBlock)) return;
+    const targetBlock = text(members[0].article_info?.economic_block);
+    if (!targetBlock || members.some((member) =>
+      normalizeBusinessText(member.article_info?.economic_block) !== normalizeBusinessText(targetBlock))) return;
     const sourceBlock = erpRow.article_info.block;
     if (!sourceBlock || normalizeBusinessText(sourceBlock) === normalizeBusinessText(targetBlock)) return;
     const scopeRows = members.map((member) => ({
@@ -878,7 +916,7 @@ function buildPayrollReclassificationRows({
       ? null
       : selectTargetArticle({
           intalevRow: members[0],
-          intalevArticle: { ...members[0].article_info, block: targetBlock },
+          intalevArticle: { ...members[0].article_info, economic_block: targetBlock, block: targetBlock },
           erpArticle: erpRow.article_info,
           erpIndex,
         });
@@ -907,7 +945,7 @@ function buildPayrollReclassificationRows({
     });
     const targetArticle = approvalResult.target;
     const articles = summarizeArticles(
-      { ...members[0].article_info, block: targetBlock },
+      { ...members[0].article_info, economic_block: targetBlock, block: targetBlock },
       erpRow.article_info,
       targetArticle,
     );
@@ -952,6 +990,11 @@ function buildPayrollReclassificationRows({
       intalev_source_row_id: members.map((member) => member.source_row_id).join(" | "),
       erp_source_row_id: erpRow.source_row_id,
       intalev_path: [...new Set(members.flatMap((member) => member.article_info.paths))].join(" | "),
+      intalev_expense_account: members[0].article_info.expense_account,
+      intalev_expense_account_side: members[0].article_info.expense_account_side,
+      intalev_economic_block_status: members[0].article_info.economic_block_status,
+      intalev_economic_block: targetBlock,
+      intalev_presentation_block: members[0].article_info.presentation_block,
       erp_path: erpRow.article_info.paths.join(" | "),
       article_approval_status: approvalResult.approval.article_approval_status,
       article_approval_decision: approvalResult.approval.article_approval_decision ?? "",
@@ -1286,11 +1329,19 @@ export function matchCrossJournalRows({
     .map((row) => {
       const articleInfo = inferArticle(row, intalevIndex, "INTALEV");
       const reportPlacement = inferIntalevReportPlacement(row, intalevReportIndex);
+      const economicBlock = resolveIntalevEconomicBlock(row);
       return {
         ...row,
         article_info: {
           ...articleInfo,
-          block: reportPlacement.block || articleInfo.block,
+          catalog_block: articleInfo.block,
+          block: economicBlock.economic_block,
+          economic_block: economicBlock.economic_block,
+          economic_block_status: economicBlock.status,
+          expense_account: economicBlock.expense_account,
+          expense_account_side: economicBlock.expense_account_side,
+          expense_account_candidates: economicBlock.candidates,
+          presentation_block: reportPlacement.block,
           report_placement: reportPlacement,
         },
       };
@@ -1352,7 +1403,7 @@ export function matchCrossJournalRows({
   const matchedErp = new Set(accepted.map((edge) => edge.erpRow.source_row_id));
   const pairRows = accepted.map((edge) => {
     const scopeRows = [{
-      block: edge.intalevRow.article_info.block,
+      block: edge.intalevRow.article_info.economic_block,
       article: edge.intalevRow.article_info.article,
     }];
     const approval = resolveApprovalForScopes({
@@ -1436,6 +1487,12 @@ export function matchCrossJournalRows({
       intalev_source_row_id: edge.intalevRow.source_row_id,
       erp_source_row_id: edge.erpRow.source_row_id,
       intalev_path: edge.intalevRow.article_info.paths.join(" | "),
+      intalev_catalog_block: edge.intalevRow.article_info.catalog_block,
+      intalev_expense_account: edge.intalevRow.article_info.expense_account,
+      intalev_expense_account_side: edge.intalevRow.article_info.expense_account_side,
+      intalev_economic_block_status: edge.intalevRow.article_info.economic_block_status,
+      intalev_economic_block: edge.intalevRow.article_info.economic_block,
+      intalev_presentation_block: edge.intalevRow.article_info.presentation_block,
       intalev_report_placement_status:
         edge.intalevRow.article_info.report_placement?.status ?? "NOT_FOUND",
       intalev_report_block:

@@ -31,6 +31,7 @@ import {
   serializeSourceTreeProof,
 } from "./source_tree_proof.mjs";
 import { advanceIntalevOutlinePath } from "./intalev_outline_path.mjs";
+import { resolveAuthoritativeErpEntryNode } from "./erp_exact_catalog_path.mjs";
 import {
   bindTemplateRowsToTrees,
   buildErpOutlineTree,
@@ -2598,13 +2599,7 @@ async function parseErpArticleCatalog(workDir) {
   const nodes = [];
   const stack = [];
   const exactArticleNodes = new Map();
-  const expenseBlocks = new Map([
-    [normalizeLabel("Административные расходы"), "Административные расходы"],
-    [normalizeLabel("Коммерческие расходы"), "Коммерческие расходы"],
-    [normalizeLabel("Расходы на складскую логистику"), "Расходы на складскую логистику"],
-    [normalizeLabel("Расходы на транспортную логистику"), "Расходы на транспортную логистику"],
-  ]);
-  let activeExpenseBlock = "";
+  const exactEntryPathDiagnostics = [];
 
   for (let rowIndex = 0; rowIndex < values.length; rowIndex += 1) {
     const excelRow = bounds.startRow + rowIndex + 1;
@@ -2613,10 +2608,6 @@ async function parseErpArticleCatalog(workDir) {
     const level = outline.get(excelRow) ?? 0;
     const label = normalizeText(row[0]);
     const code = normalizeText(row[14]);
-
-    if (!code && expenseBlocks.has(normalizeLabel(label))) {
-      activeExpenseBlock = expenseBlocks.get(normalizeLabel(label));
-    }
 
     if (code) {
       const parent = stack[level - 1];
@@ -2633,29 +2624,27 @@ async function parseErpArticleCatalog(workDir) {
         parent.catalog_entries.push(entry);
       }
 
-      // В справочнике ERP строки кода хранят точное имя статьи в колонке N,
-      // тогда как outline служит визуальной свёрткой и не является обычным
-      // деревом parent -> child. Строим дополнительный канонический узел по
-      // фактической записи кода. Это различает одноимённые ФЗП/НДФЛ/ИТ/расходы
-      // на персонал внутри административного, коммерческого и логистических
-      // блоков и не позволяет склеить их только по отображаемому названию.
-      const exactArticle = entry.cash_flow_article;
-      if (activeExpenseBlock && exactArticle) {
-        const exactPath = `${activeExpenseBlock} / ${exactArticle}`;
+      // A code row is an exact physical entry of its immediate outline node.
+      // Preserve that physical node's entire proven chain for presentation;
+      // never synthesize a parent from an active block or a matching label.
+      const exactResolution = resolveAuthoritativeErpEntryNode({
+        stack,
+        entryLevel: level,
+        entry,
+        sourceFile: sourcePath,
+        sourceSheet: sheet.name,
+      });
+      entry.exact_parent_chain_status = exactResolution.status;
+      if (exactResolution.node) {
+        const exactPath = exactResolution.node.full_path;
         const exactKey = normalizeLabel(exactPath);
         if (!exactArticleNodes.has(exactKey)) {
-          exactArticleNodes.set(exactKey, {
-            level: 1,
-            label: exactArticle,
-            normalized_label: normalizeLabel(exactArticle),
-            parent_path: activeExpenseBlock,
-            full_path: exactPath,
-            catalog_entries: [],
-            source_row: excelRow,
-            exact_catalog_entry_node: true,
-          });
+          exactArticleNodes.set(exactKey, exactResolution.node);
+        } else {
+          exactArticleNodes.get(exactKey).catalog_entries.push(entry);
         }
-        exactArticleNodes.get(exactKey).catalog_entries.push(entry);
+      } else {
+        exactEntryPathDiagnostics.push(exactResolution.diagnostic);
       }
       continue;
     }
@@ -2707,6 +2696,7 @@ async function parseErpArticleCatalog(workDir) {
     sha256: sourceSha256,
     nodes: [...nodes, ...exactNodes],
     exact_article_nodes: exactNodes,
+    exact_entry_path_diagnostics: exactEntryPathDiagnostics,
     hierarchy_tree: hierarchyTree,
   };
 }

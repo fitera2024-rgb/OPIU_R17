@@ -157,13 +157,13 @@ function revalidateCanonicalRow(row) {
   return validated;
 }
 
-export function canonicalSpornoRowFromMaterializationCase(materializationCase) {
+function canonicalFinancialRowFromMaterializationCase(materializationCase, expectedRoute) {
   const operation = text(materializationCase?.action).toUpperCase();
   if (materializationCase?.schema_version !== "opiu-materialization-case.v1") {
-    fail("CANONICAL_CASE_REQUIRED", "SPORNO adapter requires a validated MaterializationCase");
+    fail("CANONICAL_CASE_REQUIRED", `${expectedRoute} adapter requires a validated MaterializationCase`);
   }
-  if (materializationCase.output_route !== "SPORNO" || !["STORNO", "REPOST"].includes(operation)) {
-    fail("SPORNO_DIRECTIONAL_CASE_REQUIRED", "Only explicit STORNO/REPOST MaterializationCase objects may enter the SPORNO adapter", {
+  if (materializationCase.output_route !== expectedRoute || !["STORNO", "REPOST"].includes(operation)) {
+    fail(`${expectedRoute}_DIRECTIONAL_CASE_REQUIRED`, `Only explicit STORNO/REPOST MaterializationCase objects may enter the ${expectedRoute} adapter`, {
       action: materializationCase.action,
       output_route: materializationCase.output_route,
     });
@@ -215,7 +215,7 @@ export function canonicalSpornoRowFromMaterializationCase(materializationCase) {
     "СубконтоКт2": resultAccounting.credit_analytics[1] || null,
     "СубконтоКт3": resultAccounting.credit_analytics[2] || null,
   });
-  const auditIdentity = `R001-SPORNO-${crypto.createHash("sha256").update(JSON.stringify([
+  const auditIdentity = `R001-${expectedRoute}-${crypto.createHash("sha256").update(JSON.stringify([
     materializationCase.case_id,
     materializationCase.pair_id,
     materializationCase.role,
@@ -226,14 +226,22 @@ export function canonicalSpornoRowFromMaterializationCase(materializationCase) {
   return createCanonicalPostingRow({
     materialization_case: materializationCase,
     operation,
-    output_route: "SPORNO",
-    materialization_state: "MATERIALIZED_SPORNO",
+    output_route: expectedRoute,
+    materialization_state: `MATERIALIZED_${expectedRoute}`,
     audit_identity: auditIdentity,
     amount: materializationCase.correction_amount,
     result_accounting: resultAccounting,
     loader,
     safety: REPORT_ONLY_SAFETY,
   });
+}
+
+export function canonicalSpornoRowFromMaterializationCase(materializationCase) {
+  return canonicalFinancialRowFromMaterializationCase(materializationCase, "SPORNO");
+}
+
+export function canonicalReadyRowFromMaterializationCase(materializationCase) {
+  return canonicalFinancialRowFromMaterializationCase(materializationCase, "READY");
 }
 
 function registryRow(row) {

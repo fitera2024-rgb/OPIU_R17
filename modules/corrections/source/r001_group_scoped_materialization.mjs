@@ -2,7 +2,10 @@ import {
   REPORT_ONLY_SAFETY,
   createMaterializationCase,
 } from "./r001_materialization_contract.mjs";
-import { canonicalSpornoRowFromMaterializationCase } from "./r001_canonical_output_contract.mjs";
+import {
+  canonicalReadyRowFromMaterializationCase,
+  canonicalSpornoRowFromMaterializationCase,
+} from "./r001_canonical_output_contract.mjs";
 import {
   buildGroupScopedStornoRepostPlan,
   selectGroupScopedErpArticle,
@@ -61,7 +64,7 @@ function exactFinancialAuthority(decision) {
     && bool(decision?.ECONOMIC_CORRECTION_PROVEN);
 }
 
-function caseFor({ decision, action, role, operation, targetAccounting, targetArticle, amount, reason, intalevSource }) {
+function caseFor({ decision, action, role, operation, targetAccounting, targetArticle, amount, reason, intalevSource, readyAuthority }) {
   return createMaterializationCase({
     case_id: `${text(decision.case_id)}-GROUP-${action}`,
     pair_id: text(decision.pair_id || decision.case_id),
@@ -77,10 +80,12 @@ function caseFor({ decision, action, role, operation, targetAccounting, targetAr
       source_article: operation.article,
       target_article: targetArticle.article,
     },
-    proof_status: "GROUP_SCOPED_ARTICLE_REPLACEMENT_PROVEN",
-    correction_allowed: false,
-    correction_authority: "GROUP_SCOPED_ARTICLE_REPLACEMENT",
-    output_route: "SPORNO",
+    proof_status: readyAuthority ? "PROVEN" : "GROUP_SCOPED_ARTICLE_REPLACEMENT_PROVEN",
+    correction_allowed: readyAuthority,
+    correction_authority: readyAuthority
+      ? "SERVICE_HANDOFF_GROUP_SCOPED_PHYSICAL_AUTHORITY"
+      : "GROUP_SCOPED_ARTICLE_REPLACEMENT",
+    output_route: readyAuthority ? "READY" : "SPORNO",
     physical_source: operation,
     target_accounting: targetAccounting,
     physical_proof: {
@@ -88,8 +93,8 @@ function caseFor({ decision, action, role, operation, targetAccounting, targetAr
       source_operation_proven: bool(decision?.SOURCE_OPERATION_PROVEN),
       physical_source_unique: bool(decision?.PHYSICAL_SOURCE_UNIQUE),
       target_classification_proven: true,
-      pinned_source_reopened: bool(decision?.pinned_source_reopened),
-      source_reuse_checked: bool(decision?.source_reuse_checked),
+      pinned_source_reopened: readyAuthority || bool(decision?.pinned_source_reopened),
+      source_reuse_checked: readyAuthority || bool(decision?.source_reuse_checked),
     },
     analytical_basis: {
       reconciliation_row: text(decision.reconciliation_row),
@@ -126,6 +131,7 @@ export function evaluateGroupScopedDecision({
   intalevPath = "",
   intalevReference = "",
   intalevAmount = null,
+  verifiedHandoffSourceRowIDs = [],
 } = {}) {
   const articleLabel = text(decision?.target_article || decision?.source_article || decision?.group);
   let targetArticle;
@@ -172,6 +178,14 @@ export function evaluateGroupScopedDecision({
 
   try {
     const operation = physicalOperation(decision);
+    const normalizedHandoffSourceRowIDs = Array.isArray(verifiedHandoffSourceRowIDs)
+      ? verifiedHandoffSourceRowIDs.map(text)
+      : [];
+    const handoffSourceRowIDsExact = normalizedHandoffSourceRowIDs.length > 0
+      && normalizedHandoffSourceRowIDs.every(Boolean)
+      && new Set(normalizedHandoffSourceRowIDs).size === normalizedHandoffSourceRowIDs.length;
+    const readyAuthority = handoffSourceRowIDsExact
+      && new Set(normalizedHandoffSourceRowIDs).has(operation.source_row_id);
     const correctionAmount = number(decision?.correction_amount);
     const partialAmountProven = bool(decision?.partial_source_amount_proven);
     const correctionCents = Math.round(Math.abs(correctionAmount ?? 0) * 100);
@@ -217,6 +231,7 @@ export function evaluateGroupScopedDecision({
       amount: plan.amount,
       reason,
       intalevSource,
+      readyAuthority,
     });
     const repostCase = caseFor({
       decision,
@@ -228,16 +243,16 @@ export function evaluateGroupScopedDecision({
       amount: plan.amount,
       reason,
       intalevSource,
+      readyAuthority,
     });
     return Object.freeze({
       schema_version: GROUP_SCOPED_MATERIALIZATION_SCHEMA,
       status: "MATERIALIZED_GROUP_SCOPED_STORNO_REPOST",
       target_article: targetArticle,
       plan,
-      canonical_posting_rows: Object.freeze([
-        canonicalSpornoRowFromMaterializationCase(stornoCase),
-        canonicalSpornoRowFromMaterializationCase(repostCase),
-      ]),
+      canonical_posting_rows: Object.freeze([stornoCase, repostCase].map((materializationCase) => readyAuthority
+        ? canonicalReadyRowFromMaterializationCase(materializationCase)
+        : canonicalSpornoRowFromMaterializationCase(materializationCase))),
       blockers: Object.freeze([]),
     });
   } catch (error) {

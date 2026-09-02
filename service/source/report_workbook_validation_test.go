@@ -2,12 +2,84 @@ package main
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestR005027ServiceValidatorAcceptsExactGroupScopedHandoffAuthorityOnly(t *testing.T) {
+	readyRow := func(authority string) map[string]string {
+		loader := make([]any, 27)
+		loader[16], loader[17], loader[18] = "26", "76.5", "ERP-ROW-R005-027"
+		loaderJSON, err := json.Marshal(loader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return map[string]string{
+			"Output route": "READY", "Операция": "STORNO", "Proof status": "PROVEN",
+			"Correction allowed": "TRUE", "Correction authority": authority,
+			"Организация источника ERP": "ПВ", "SourceRowID": "ERP-ROW-R005-027",
+			"ERP архив": "source.zip", "SHA256 ERP архива": "B2F97D3A7F320EE3BE3A62D0423D4BFB7A215ED92D7ED6A1A771FC04EBCF89D1",
+			"ERP файл в архиве": "journal.xlsx", "SHA256 ERP файла": "776D566495175191D1B394C2545FE10B11173C755A51879FD18726A91A40A504",
+			"Лист": "Лист_1", "ERP строка": "B1617:AG1617", "Дата источника": "2025-01-31",
+			"Регистратор/документ": "Трансляция 0000001782", "№ проводки": "8", "A:AA JSON": string(loaderJSON),
+		}
+	}
+
+	exact := "SERVICE_HANDOFF_GROUP_SCOPED_PHYSICAL_AUTHORITY"
+	if err := validateMaterializationRouting([]map[string]string{readyRow(exact)}, 1, 1, 0); err != nil {
+		t.Fatalf("exact verified Service handoff authority was rejected: %v", err)
+	}
+	actualGroupScopedProof := readyRow(exact)
+	actualGroupScopedProof["Proof status"] = "GROUP_SCOPED_ARTICLE_REPLACEMENT_PROVEN"
+	if err := validateMaterializationRouting([]map[string]string{actualGroupScopedProof}, 1, 1, 0); err == nil {
+		t.Fatal("group-scoped target proof was accepted as standalone READY proof")
+	}
+	for _, authority := range []string{
+		exact + "_FORGED",
+		"GROUP_SCOPED_ARTICLE_REPLACEMENT",
+		"UNKNOWN_SERVICE_AUTHORITY",
+	} {
+		if err := validateMaterializationRouting([]map[string]string{readyRow(authority)}, 1, 1, 0); err == nil {
+			t.Fatalf("non-exact Service handoff authority %q was accepted", authority)
+		}
+	}
+
+	sporno := readyRow(exact)
+	sporno["Output route"] = "SPORNO"
+	sporno["Correction allowed"] = "FALSE"
+	if err := validateMaterializationRouting([]map[string]string{sporno}, 1, 0, 1); err == nil {
+		t.Fatal("SPORNO row carrying executable Service handoff authority was accepted")
+	}
+
+	missingPhysical := readyRow(exact)
+	missingPhysical["Лист"] = ""
+	if err := validateMaterializationRouting([]map[string]string{missingPhysical}, 1, 1, 0); err == nil {
+		t.Fatal("Service handoff authority bypassed a missing physical field")
+	}
+	badSHA := readyRow(exact)
+	badSHA["SHA256 ERP файла"] = "NOT-A-SHA256"
+	if err := validateMaterializationRouting([]map[string]string{badSHA}, 1, 1, 0); err == nil {
+		t.Fatal("Service handoff authority bypassed an invalid physical source hash")
+	}
+	contradictorySourceRowID := readyRow(exact)
+	var contradictoryLoader []any
+	if err := json.Unmarshal([]byte(contradictorySourceRowID["A:AA JSON"]), &contradictoryLoader); err != nil {
+		t.Fatal(err)
+	}
+	contradictoryLoader[18] = "ERP-ROW-CONTRADICTS-AUDIT"
+	contradictoryJSON, err := json.Marshal(contradictoryLoader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contradictorySourceRowID["A:AA JSON"] = string(contradictoryJSON)
+	if err := validateMaterializationRouting([]map[string]string{contradictorySourceRowID}, 1, 1, 0); err == nil {
+		t.Fatal("Service handoff authority bypassed SourceRowID contradiction")
+	}
+}
 
 func TestValidateExactXLSXSheetUsesOOXMLPartSemantics(t *testing.T) {
 	const (

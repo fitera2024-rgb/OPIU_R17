@@ -372,7 +372,7 @@ test("STORNO cannot replace the exact physical source accounting tuple", () => {
   );
 });
 
-test("READY requires source analytics, departments, and amount", () => {
+test("READY preserves absent proven analytics as blank slots but requires explicit three-slot arrays", () => {
   for (const physicalSource of [
     physical({ debit_analytics: ["", "Дт-А2", "Дт-А3"] }),
     physical({ debit_analytics: ["Дт-А1", "", "Дт-А3"] }),
@@ -380,6 +380,33 @@ test("READY requires source analytics, departments, and amount", () => {
     physical({ credit_analytics: ["", "Кт-А2", "Кт-А3"] }),
     physical({ credit_analytics: ["Кт-А1", "", "Кт-А3"] }),
     physical({ credit_analytics: ["Кт-А1", "Кт-А2", ""] }),
+  ]) {
+    const value = materializationCase({ physical_source: physicalSource });
+    assert.equal(value.output_route, "READY");
+    assert.equal(value.physical_source.debit_analytics.length, 3);
+    assert.equal(value.physical_source.credit_analytics.length, 3);
+  }
+
+  for (const physicalSource of [
+    physical({ debit_analytics: undefined }),
+    physical({ credit_analytics: undefined }),
+  ]) {
+    throwsCode(
+      () => materializationCase({ physical_source: physicalSource }),
+      "READY_PHYSICAL_IDENTITY_INCOMPLETE",
+    );
+  }
+  for (const physicalSource of [
+    physical({ debit_analytics: ["Дт-А1", "Дт-А2"] }),
+    physical({ credit_analytics: ["Кт-А1", "Кт-А2", "Кт-А3", "Кт-А4"] }),
+  ]) {
+    throwsCode(
+      () => materializationCase({ physical_source: physicalSource }),
+      "INVALID_ANALYTICS_SLOTS",
+    );
+  }
+
+  for (const physicalSource of [
     physical({ debit_department: "" }),
     physical({ credit_department: "" }),
     physical({ amount: null }),

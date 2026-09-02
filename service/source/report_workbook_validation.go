@@ -537,7 +537,7 @@ func workbookBoolean(value string) bool {
 
 func executableCorrectionAuthority(value string) bool {
 	normalized := strings.ToUpper(strings.TrimSpace(value))
-	return normalized == "TRUE" || normalized == "1" || normalized == "ИСТИНА" || normalized == "EXACT_SOURCE" || normalized == "ECONOMIC_CORRECTION_PROVEN"
+	return normalized == "TRUE" || normalized == "1" || normalized == "ИСТИНА" || normalized == "EXACT_SOURCE" || normalized == "ECONOMIC_CORRECTION_PROVEN" || normalized == "SERVICE_HANDOFF_GROUP_SCOPED_PHYSICAL_AUTHORITY"
 }
 
 func physicalPlaceholder(value string) bool {

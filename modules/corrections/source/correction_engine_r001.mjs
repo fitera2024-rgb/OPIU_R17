@@ -2577,6 +2577,7 @@ async function main() {
       intalevPath: context.path,
       intalevReference: context.intalevReference,
       intalevAmount: context.intalevAmount,
+      verifiedHandoffSourceRowIDs: verifiedHandoff.sourceRowIDs,
     }));
   }
   const groupScopedCanonicalRows = [...groupScopedEvaluationByDecision.values()]

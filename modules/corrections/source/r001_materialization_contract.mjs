@@ -502,15 +502,6 @@ function assertReadyPhysicalSource(source) {
     code: "READY_PHYSICAL_IDENTITY_INCOMPLETE",
     message: "READY requires exact physical source identity",
   });
-  const missing = [];
-  for (const field of ["debit_analytics", "credit_analytics"]) {
-    source[field].forEach((value, index) => {
-      if (!clean(value)) missing.push(`${field}[${index}]`);
-    });
-  }
-  if (missing.length) {
-    fail("READY_PHYSICAL_IDENTITY_INCOMPLETE", `READY requires exact physical source identity: ${missing.join(", ")}`, { missing });
-  }
 }
 
 function assertBusinessContent(content) {
@@ -549,6 +540,17 @@ export function createMaterializationCase(input = {}) {
   const proofStatus = clean(input.proof_status);
   requireText(proofStatus, "proof_status");
   const correctionAllowed = optionalBoolean(input.correction_allowed, "correction_allowed");
+  if (outputRoute === "READY") {
+    const missingAnalyticsArrays = ["debit_analytics", "credit_analytics"]
+      .filter((field) => !Array.isArray(input.physical_source?.[field]));
+    if (missingAnalyticsArrays.length) {
+      fail(
+        "READY_PHYSICAL_IDENTITY_INCOMPLETE",
+        `READY requires explicit physical analytics arrays: ${missingAnalyticsArrays.join(", ")}`,
+        { missing: missingAnalyticsArrays },
+      );
+    }
+  }
   const physicalSource = normalizePhysicalSource(input.physical_source);
   const physicalProof = normalizePhysicalProof(input.physical_proof);
   const sourceScope = normalizeSourceScope(input.source_scope);

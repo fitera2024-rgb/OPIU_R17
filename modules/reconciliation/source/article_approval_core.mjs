@@ -749,6 +749,7 @@ function physicalOperationFields(row, exactSourceId) {
 
 export function evaluateArticleApprovalFinancialGate({
   approval,
+  deterministicTarget = null,
   physicalRows = [],
   amount = 0,
   sourceId = "",
@@ -763,11 +764,35 @@ export function evaluateArticleApprovalFinancialGate({
   if (approval?.article_approval_status === "APPROVAL_COMPOSITE_TARGET_CONFLICT") {
     return blockedFinancialGate("APPROVAL_COMPOSITE_TARGET_CONFLICT");
   }
-  if (approval?.article_approval_status !== "APPROVED_EXACT_SCOPE") return blockedFinancialGate("APPROVAL_NOT_FINAL");
-  const target = approval?.article_approval_target;
+  const manualAuthority = approval?.article_approval_status === "APPROVED_EXACT_SCOPE";
+  const deterministicAuthority = approval?.article_approval_status === "NO_APPROVED_VERSION"
+    && deterministicTarget?.status === "PROVEN_UNIQUE_TARGET_IN_INTALEV_BLOCK";
+  if (!manualAuthority && !deterministicAuthority) return blockedFinancialGate("APPROVAL_NOT_FINAL");
+  let target = manualAuthority ? approval?.article_approval_target : deterministicTarget;
   if (!target?.block || !target?.article || !target?.code) return blockedFinancialGate("APPROVAL_TARGET_INCOMPLETE");
+  if (deterministicAuthority) {
+    const expectedPeriod = month(scope?.period);
+    const expectedOrganizationId = text(scope?.organizationId ?? scope?.organization_id);
+    if (!expectedPeriod
+      || !expectedOrganizationId
+      || !text(scope?.block)
+      || !text(scope?.article)
+      || key(target.block) !== key(scope.block)) {
+      return blockedFinancialGate("DETERMINISTIC_TARGET_SCOPE_MISMATCH");
+    }
+  }
   const catalogTarget = resolveArticleApprovalCatalogTarget(target, erpCatalog);
   if (catalogTarget.count !== 1) return blockedFinancialGate("ERP_TARGET_NOT_UNIQUE");
+  if (deterministicAuthority) {
+    const canonicalTarget = catalogTarget.target;
+    if (!text(target.path)
+      || !text(canonicalTarget?.path)
+      || key(pathText(target.path)) !== key(pathText(canonicalTarget.path))
+      || key(canonicalTarget.block) !== key(scope.block)) {
+      return blockedFinancialGate("DETERMINISTIC_TARGET_CATALOG_MISMATCH");
+    }
+    target = canonicalTarget;
+  }
   const exactSourceId = String(sourceId ?? "");
   if (!exactSourceId || !(usedSourceIds instanceof Set)) {
     return blockedFinancialGate("PHYSICAL_REUSE_GUARD_REQUIRED");
@@ -785,13 +810,14 @@ export function evaluateArticleApprovalFinancialGate({
     return blockedFinancialGate("PHYSICAL_MATCH_PROOF_REQUIRED");
   }
   const approvalScope = approval?.article_approval_scope ?? {};
-  const expectedPeriod = month(scope?.period ?? approvalScope.period);
+  const expectedPeriod = month(scope?.period ?? (manualAuthority ? approvalScope.period : ""));
   const expectedOrganizationId = text(scope?.organizationId ?? scope?.organization_id);
-  if (!expectedPeriod
-    || approvalScope.period !== expectedPeriod
+  if (!expectedPeriod || (manualAuthority && (
+    approvalScope.period !== expectedPeriod
     || (expectedOrganizationId && approvalScope.organization_id !== expectedOrganizationId)
     || (scope?.block && key(approvalScope.block_intalev) !== key(scope.block))
-    || (scope?.article && key(approvalScope.article_intalev) !== key(scope.article))) {
+    || (scope?.article && key(approvalScope.article_intalev) !== key(scope.article))
+  ))) {
     return blockedFinancialGate("APPROVAL_RUNTIME_SCOPE_MISMATCH");
   }
   if (physicalPeriod(physicalRow) !== expectedPeriod || month(physicalProof?.period) !== expectedPeriod) {

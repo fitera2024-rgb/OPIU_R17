@@ -716,7 +716,10 @@ function resolveApprovedFinancialTarget({
   allowedPhysicalOrganizations,
 }) {
   const selectedTarget = targetSelectedWithApproval(automaticTarget, approval);
+  const hasDeterministicAuthority = approval?.article_approval_status === "NO_APPROVED_VERSION"
+    && automaticTarget?.status === "PROVEN_UNIQUE_TARGET_IN_INTALEV_BLOCK";
   const authoritativeTarget = approval?.article_approval_status === "APPROVED_EXACT_SCOPE"
+    || hasDeterministicAuthority
     ? resolveArticleApprovalCatalogTarget(selectedTarget, erpCatalogNodes).target
     : null;
   const target = authoritativeTarget
@@ -734,8 +737,9 @@ function resolveApprovedFinancialTarget({
   const hasApprovedExactScope = approval?.article_approval_status === "APPROVED_EXACT_SCOPE";
   const representativeScope = scopeRows?.[0] ?? {};
   const gate = !hasApprovedExactScope || requiresFinancialPair
-    ? evaluateArticleApprovalFinancialGate({
+      ? evaluateArticleApprovalFinancialGate({
         approval,
+        deterministicTarget: automaticTarget,
         physicalRows,
         amount,
         sourceId,

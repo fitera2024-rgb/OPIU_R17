@@ -577,6 +577,104 @@ test("proves NDFL group by employee, date and exact amount", () => {
   assert.equal(pair.target_article_code_erp, "COMM-NDFL");
 });
 
+test("R005-021: deterministic target inside the exact Intalev group produces a balanced REPORT_ONLY draft without manual approval", () => {
+  const fixture = approvedIntergroupFixture();
+  const result = matchCrossJournalRows(fixture);
+  const pair = result.rows.find((row) => row.row_type === "UNIQUE_PAIR");
+
+  assert.ok(pair);
+  assert.equal(pair.article_approval_status, "NO_APPROVED_VERSION");
+  assert.equal(pair.source_block_erp, "административные расходы");
+  assert.equal(pair.target_block_intalev, "коммерческие расходы");
+  assert.equal(pair.target_article_erp, "ФЗП");
+  assert.equal(pair.target_article_code_erp, "COMM-FZP");
+  assert.equal(pair.target_catalog_path, "Коммерческие расходы / ФЗП");
+  assert.equal(pair.target_operating_account, "44.1");
+  assert.equal(pair.target_status, "PROVEN_UNIQUE_TARGET_IN_INTALEV_BLOCK");
+  assert.equal(pair.target_selection_basis, "ERP_SAME_ARTICLE_IN_INTALEV_BLOCK");
+  assert.notEqual(pair.target_article_code_erp, "ADMIN-FZP");
+  assert.notEqual(pair.target_block_intalev, pair.source_block_erp);
+
+  assert.equal(pair.financial_gate_status, "ДОКАЗАНО");
+  assert.notEqual(pair.financial_gate_reason, "APPROVAL_NOT_FINAL");
+  assert.equal(pair.financial_pair_rows, 2);
+  assert.deepEqual(pair.correction_rows.map((row) => row.operation), ["STORNO", "REPOST"]);
+  assert.deepEqual(pair.correction_rows.map((row) => row.amount), [-100, 100]);
+  assert.deepEqual(pair.correction_rows.map((row) => row.article_code), ["ADMIN-FZP", "COMM-FZP"]);
+  assert.deepEqual(pair.correction_rows.map((row) => row.article_block), [
+    "административные расходы",
+    "Коммерческие расходы",
+  ]);
+  assert.equal(pair.correction_rows.reduce((sum, row) => sum + row.amount, 0), 0);
+  assert.deepEqual(
+    [...new Set(pair.correction_rows.map((row) => row.source_row_id))],
+    ["E-APPROVAL"],
+  );
+  assert.equal(result.counts.reused_erp_rows, 0);
+  assert.equal(result.counts.approved_balanced_pairs, 1);
+  assert.equal(result.counts.financial_pair_rows, 2);
+  assert.equal(pair.posting_rows, 0);
+  assert.equal(pair.live_rows, 0);
+  assert.equal(pair.executed_rows, 0);
+  assert.equal(result.counts.posting_rows, 0);
+  assert.equal(result.counts.live_rows, 0);
+  assert.equal(result.counts.executed_rows, 0);
+});
+
+test("R005-021: zero or multiple target-group candidates and explicit FORBIDDEN remain fail-closed", () => {
+  const fixture = approvedIntergroupFixture();
+  const noTarget = matchCrossJournalRows({
+    ...fixture,
+    erpCatalogNodes: fixture.erpCatalogNodes.filter((node) =>
+      node.catalog_entries?.[0]?.code !== "COMM-FZP"),
+  });
+  const missingPair = noTarget.rows.find((row) => row.row_type === "UNIQUE_PAIR");
+  assert.equal(missingPair.target_status, "BLOCKED_TARGET_NOT_FOUND");
+  assert.equal(missingPair.financial_gate_status, "СПОРНО");
+  assert.deepEqual(missingPair.correction_rows, []);
+  assert.equal(missingPair.financial_pair_rows, 0);
+
+  const ambiguousTarget = matchCrossJournalRows({
+    ...fixture,
+    erpCatalogNodes: [
+      ...fixture.erpCatalogNodes,
+      {
+        label: "ФЗП",
+        full_path: "Коммерческие расходы / ФЗП",
+        exact_catalog_entry_node: true,
+        catalog_entries: [{ code: "COMM-FZP-SECOND", account: "44.2" }],
+      },
+    ],
+  });
+  const ambiguousPair = ambiguousTarget.rows.find((row) => row.row_type === "UNIQUE_PAIR");
+  assert.equal(ambiguousPair.target_status, "BLOCKED_TARGET_AMBIGUOUS");
+  assert.equal(ambiguousPair.financial_gate_status, "СПОРНО");
+  assert.deepEqual(ambiguousPair.correction_rows, []);
+  assert.equal(ambiguousPair.financial_pair_rows, 0);
+
+  const forbiddenDocument = approvalDocument([
+    approvalDecision({ decision: "ЗАПРЕТИТЬ" }),
+  ], fixture.erpCatalogNodes);
+  const forbidden = matchCrossJournalRows({
+    ...fixture,
+    articleApprovalDocument: forbiddenDocument,
+  });
+  const forbiddenPair = forbidden.rows.find((row) => row.row_type === "UNIQUE_PAIR");
+  assert.equal(forbiddenPair.article_approval_status, "FORBIDDEN");
+  assert.equal(forbiddenPair.target_status, "APPROVAL_FORBIDDEN");
+  assert.equal(forbiddenPair.financial_gate_reason, "APPROVAL_FORBIDDEN");
+  assert.deepEqual(forbiddenPair.correction_rows, []);
+  assert.equal(forbiddenPair.financial_pair_rows, 0);
+
+  for (const result of [noTarget, ambiguousTarget, forbidden]) {
+    assert.equal(result.counts.approved_balanced_pairs, 0);
+    assert.equal(result.counts.financial_pair_rows, 0);
+    assert.equal(result.counts.posting_rows, 0);
+    assert.equal(result.counts.live_rows, 0);
+    assert.equal(result.counts.executed_rows, 0);
+  }
+});
+
 test("APPROVAL-003: УТВЕРЖДАЮ overrides the automatic target before production A22 selection", () => {
   const fixture = approvedIntergroupFixture();
   const document = approvalDocument([

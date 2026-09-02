@@ -159,6 +159,22 @@ function financialGateInput(overrides = {}) {
   };
 }
 
+function deterministicFinancialGateInput(overrides = {}) {
+  return financialGateInput({
+    approval: { article_approval_status: "NO_APPROVED_VERSION" },
+    deterministicTarget: {
+      status: "PROVEN_UNIQUE_TARGET_IN_INTALEV_BLOCK",
+      block: "Коммерческие расходы",
+      article: "Реклама",
+      path: "Статьи ОПИУ / Коммерческие расходы / Реклама",
+      code: "ERP-10",
+      account: "44.1",
+    },
+    erpCatalog: productionCatalog,
+    ...overrides,
+  });
+}
+
 test("A17: 01_Правила has exact columns and only one valid candidate is proposed", () => {
   const rows = buildArticleApprovalRows({ ...scope, aggregateRows: [sourceRow()] , erpCatalog: catalog });
   assert.equal(rows.length, 1);
@@ -445,6 +461,105 @@ test("A22: exact physical identity, match proof, period, organization, amount an
   assert.equal(evaluateArticleApprovalFinancialGate(financialGateInput({ amount: 80 })).reason, "PHYSICAL_AMOUNT_MISMATCH");
   assert.equal(evaluateArticleApprovalFinancialGate(financialGateInput({ usedSourceIds: null })).reason, "PHYSICAL_REUSE_GUARD_REQUIRED");
   assert.equal(evaluateArticleApprovalFinancialGate(financialGateInput({ approval: { article_approval_status: "FORBIDDEN" } })).reason, "APPROVAL_FORBIDDEN");
+});
+
+test("R005-021: deterministic machine authority consumes one physical SourceRowID only after every safety check", () => {
+  const usedSourceIds = new Set();
+  const proven = evaluateArticleApprovalFinancialGate(
+    deterministicFinancialGateInput({ usedSourceIds }),
+  );
+  assert.equal(proven.status, "ДОКАЗАНО");
+  assert.notEqual(proven.reason, "APPROVAL_NOT_FINAL");
+  assert.deepEqual(proven.correction_rows.map((row) => row.operation), ["STORNO", "REPOST"]);
+  assert.deepEqual(proven.correction_rows.map((row) => row.amount), [-100.12, 100.12]);
+  assert.deepEqual(proven.correction_rows.map((row) => row.article_code), ["ERP-OLD", "ERP-10"]);
+  assert.equal(proven.correction_rows.reduce((sum, row) => sum + row.amount, 0), 0);
+  assert.deepEqual([...usedSourceIds], ["ERP-ROW-1"]);
+  assert.equal(proven.financial_pair_rows, 2);
+  assert.equal(proven.posting_rows, 0);
+  assert.equal(proven.live_rows, 0);
+  assert.equal(proven.executed_rows, 0);
+
+  const reused = evaluateArticleApprovalFinancialGate(
+    deterministicFinancialGateInput({ usedSourceIds }),
+  );
+  assert.equal(reused.reason, "PHYSICAL_ERP_ROW_ALREADY_USED");
+  assert.deepEqual(reused.correction_rows, []);
+  assert.deepEqual([...usedSourceIds], ["ERP-ROW-1"]);
+});
+
+test("R005-021: deterministic authority keeps catalog and physical negative cases fail-closed", () => {
+  const cases = [
+    [
+      "zero target catalog candidates",
+      { erpCatalog: { nodes: productionCatalog.nodes.slice(1) } },
+      "ERP_TARGET_NOT_UNIQUE",
+    ],
+    [
+      "multiple target catalog candidates",
+      {
+        erpCatalog: {
+          nodes: [
+            productionCatalog.nodes[0],
+            {
+              ...productionCatalog.nodes[0],
+              full_path: "Другое дерево / Коммерческие расходы / Реклама",
+            },
+          ],
+        },
+      },
+      "ERP_TARGET_NOT_UNIQUE",
+    ],
+    ["physical SourceRowID missing", { sourceId: "" }, "PHYSICAL_REUSE_GUARD_REQUIRED"],
+    ["physical row absent", { physicalRows: [] }, "PHYSICAL_ERP_ROW_NOT_UNIQUE"],
+    [
+      "physical row not unique",
+      { physicalRows: [physicalErpRow(), physicalErpRow()] },
+      "PHYSICAL_ERP_ROW_NOT_UNIQUE",
+    ],
+    ["physical proof missing", { physicalProof: null }, "PHYSICAL_MATCH_PROOF_REQUIRED"],
+    [
+      "physical period mismatch",
+      { physicalRows: [physicalErpRow({ period: "2024-12", date: "31.12.2024" })] },
+      "PHYSICAL_PERIOD_SCOPE_MISMATCH",
+    ],
+    [
+      "physical organization mismatch",
+      { allowedPhysicalOrganizations: ["Чужая"] },
+      "PHYSICAL_ORGANIZATION_SCOPE_MISMATCH",
+    ],
+    [
+      "physical row incomplete",
+      { physicalRows: [physicalErpRow({ document: "" })] },
+      "PHYSICAL_ERP_ROW_INCOMPLETE",
+    ],
+    ["physical amount mismatch", { amount: 80 }, "PHYSICAL_AMOUNT_MISMATCH"],
+    [
+      "explicit forbidden approval",
+      { approval: { article_approval_status: "FORBIDDEN" } },
+      "APPROVAL_FORBIDDEN",
+    ],
+    [
+      "conflicting manual approval",
+      { approval: { article_approval_status: "APPROVAL_COMPOSITE_TARGET_CONFLICT" } },
+      "APPROVAL_COMPOSITE_TARGET_CONFLICT",
+    ],
+  ];
+
+  for (const [label, overrides, reason] of cases) {
+    const usedSourceIds = new Set();
+    const blocked = evaluateArticleApprovalFinancialGate(
+      deterministicFinancialGateInput({ usedSourceIds, ...overrides }),
+    );
+    assert.equal(blocked.status, "СПОРНО", label);
+    assert.equal(blocked.reason, reason, label);
+    assert.deepEqual(blocked.correction_rows, [], label);
+    assert.equal(blocked.financial_pair_rows, 0, label);
+    assert.equal(blocked.posting_rows, 0, label);
+    assert.equal(blocked.live_rows, 0, label);
+    assert.equal(blocked.executed_rows, 0, label);
+    assert.equal(usedSourceIds.size, 0, label);
+  }
 });
 
 test("matrix reader keeps round-trip header and rows", () => {

@@ -993,6 +993,18 @@
 - Регрессионный тест: A/B ZIP из одного exact source остаются byte-identical; внешние attestations идентичны. Отдельно подменяются/удаляются source branch/head, contract version/hash, embedded manifest hash, source inventory hash, EXE size/hash, ZIP size/hash и safety; каждый случай отклоняется. В attestation запрещены timestamp, абсолютный путь, random/machine identity и `release_approved=true`.
 - PASS: canonical verifier без bypass проверяет фактические EXE/ZIP bytes, source/contract/inventory/policy/toolchains/safety; relocation smoke не меняется; `release_approved=false`; packaging contour, A/B determinism, `git diff --check` проходят. R005/R001/Service financial semantics, contract v0.5 и final release authorization вне scope.
 
+### PACK-006 — packaging ожидает удалённый Rules-engine overlay
+
+- Дата: `03.09.2026`.
+- Статус: `OPEN`.
+- Сообщил: карточка `R17_PACKAGING_RULES_OVERLAY_EXPECTATIONS`.
+- Наблюдаемое поведение: broader packaging gate на exact base `ddd3057d12429a17a95fc5ac04ee67edb563cf93` требует отсутствующие файлы `modules/rules-engine/...`, включая `r005_adapter.mjs`, и завершается девятью ошибками в `test_build_reimplemented_service_bundle.py` и `test_prepare_integrated_review_runtime.py`. В drift-проверке устаревшая проверка отсутствия Rules-engine останавливается раньше ожидаемой проверки hash drift актуального R001 source.
+- Ожидаемое поведение: packaging соответствует текущей прямой цепочке `R005 → immutable handoff → R001`; удалённые Rules-engine sources и их hashes не являются release authority и не требуются для сборки/подготовки runtime. Hash/provenance проверки текущих источников `modules/corrections/source` и `modules/reconciliation/source` сохраняются fail-closed; missing и drift актуального source дают собственные диагностические коды и не маскируются устаревшим кластером.
+- Доказательство RED: targeted pytest на exact base — `9 failed`; первые пять ошибок `FileNotFoundError` для `modules/rules-engine/source/adapters/r005_adapter.mjs`, ещё две — `RULES_OVERLAY_SOURCE_MISSING:modules/rules-engine/source/adapters/r005_adapter.test.mjs`, а correction drift получил `RULES_OVERLAY_SOURCE_MISSING` вместо `CORRECTIONS_OVERLAY_SOURCE_HASH_MISMATCH`.
+- Классификация: `CONTRACT_EXPECTATION_UNSUPPORTED`; commit `b3f2a124724a174c96681903ff64ca77b333c14e` удалил Rules-engine из release-архитектуры, текущая packaging policy запрещает его в repository/package. Rules-engine code не восстанавливается.
+- Затронутые пункты контракта: §§1, 6, 12.4, 13–14, 16 и Приложение B; `REPORT_ONLY=true`, `rules_service=false`, `posting_rows=0`, `executed_posting_rows=0`, `live_posting_rows=0`, release approval и 1С upload/posting остаются запрещёнными.
+- Обязательный регрессионный тест: текущий runtime overlay не содержит и не требует `modules/rules-engine`; актуальные R001/R005 source pins и provenance materialize при совпадении; drift/missing актуального source fail-closed с точным кодом; corrections hash drift не маскируется отсутствующим legacy source.
+
 ### GOV-002 — release-документация самоссылочно фиксирует pre-merge SHA как текущий HEAD
 
 - Дата: `02.09.2026`.

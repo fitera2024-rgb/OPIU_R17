@@ -993,6 +993,20 @@
 - Регрессионный тест: A/B ZIP из одного exact source остаются byte-identical; внешние attestations идентичны. Отдельно подменяются/удаляются source branch/head, contract version/hash, embedded manifest hash, source inventory hash, EXE size/hash, ZIP size/hash и safety; каждый случай отклоняется. В attestation запрещены timestamp, абсолютный путь, random/machine identity и `release_approved=true`.
 - PASS: canonical verifier без bypass проверяет фактические EXE/ZIP bytes, source/contract/inventory/policy/toolchains/safety; relocation smoke не меняется; `release_approved=false`; packaging contour, A/B determinism, `git diff --check` проходят. R005/R001/Service financial semantics, contract v0.5 и final release authorization вне scope.
 
+### PACK-009 — exact-owner verification выбирает evidence-каталог вместо Git checkout
+
+- Дата: `03.09.2026`.
+- Статус: `OPEN`.
+- Сообщил: карточка `R17_PACKAGING_EXACT_OWNER_REPO_ROOT`.
+- Наблюдаемое поведение: `ExactOwnerRuntimeGoldenTest.test_golden_overlay_rows_match_exact_repository_sources` использует `REPO_ROOT = SCRIPT.parents[3]`. В auxiliary layout `C:\OPIU\GATE_RERUN_ddd3057\build_repo_clean\service\packaging\...` это даёт `C:\OPIU\GATE_RERUN_ddd3057`, хотя Git checkout находится в `C:\OPIU\GATE_RERUN_ddd3057\build_repo_clean`; вызов `git -C C:\OPIU\GATE_RERUN_ddd3057 show ...` возвращает `fatal: not a git repository` и `INTEGRATION_OVERLAY_BLOB_READ_ERROR`.
+- Ожидаемое поведение: exact-owner verification определяет authoritative Git root через Git metadata от переданного/current source location, работает в обычном и auxiliary checkout и отклоняет отсутствие/невалидность repository authority без доверия к произвольным working-tree bytes.
+- Доказательство RED: на exact base `ddd3057d12429a17a95fc5ac04ee67edb563cf93` auxiliary clean checkout `C:\OPIU\GATE_RERUN_ddd3057\build_repo_clean` имеет Git root `C:\OPIU\GATE_RERUN_ddd3057\build_repo_clean`, но target test завершился `1 failed, 10 deselected`; ошибка — `INTEGRATION_OVERLAY_BLOB_READ_ERROR:commit=7dc94e1cb9102f2e7effd974b94f6f6a64840903:path=modules/corrections/source/correction_engine_r001.mjs:stderr=fatal: not a git repository (or any of the parent directories): .git`.
+- Подтверждённая первопричина: `WORKTREE_GIT_ASSUMPTION`; fixed `Path.parents` depth от script/evidence location не является repository authority. Исправление должно быть portable, без hardcoded `C:\OPIU` или `C:\Users\NB-FIT`.
+- Затронутые пункты контракта: §§1, 13–14, 16 и Приложение B; exact tracked source/blob evidence, manifest/SHA-256 и test protocol обязательны. `REPORT_ONLY=true`, `rules_service=false`, автоматическая загрузка/проведение в 1С запрещены. Канонический контракт v0.5, SHA-256 `B2C7D11B8373E603D0FA0C9B9AF090CF3026085A4E80457B228336CEA3DFAB5A`, не изменяется.
+- Scope: только repository-root resolution и соответствующие exact-owner packaging tests; PACK-006, PACK-007, PACK-008, R005/R001 business/financial logic, ignored Excel inventory, canonical DOCX, `contracts/CURRENT.md` и `release/r17` вне scope.
+- Регрессионный тест: с `OPIU_EXACT_OWNER_SOURCE_ROOT`, указывающим на authoritative source checkout, обычный workspace даёт `12 passed`, а target даёт `1 passed, 11 deselected`; изолированный auxiliary Git worktree на pinned source commit даёт target `1 passed, 11 deselected`; resolver возвращает Git root через `git rev-parse --show-toplevel`; temporary/non-repository source root отклоняется `EXACT_OWNER_GIT_ROOT_UNAVAILABLE`; tracked blob SHA остаётся проверкой через `git show <pinned-commit>:<repo-relative-path>`.
+- PASS: изменены только разрешённые packaging/test/ERROR_REGISTER файлы; exact-owner normal и auxiliary GREEN, invalid authority FAIL CLOSED, safety и финансовая логика не изменены, `git diff --check` проходит.
+
 ### GOV-002 — release-документация самоссылочно фиксирует pre-merge SHA как текущий HEAD
 
 - Дата: `02.09.2026`.

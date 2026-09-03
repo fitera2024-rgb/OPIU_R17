@@ -996,7 +996,7 @@
 ### PACK-006 — packaging ожидает удалённый Rules-engine overlay
 
 - Дата: `03.09.2026`.
-- Статус: `OPEN`.
+- Статус: `VERIFIED`.
 - Сообщил: карточка `R17_PACKAGING_RULES_OVERLAY_EXPECTATIONS`.
 - Наблюдаемое поведение: broader packaging gate на exact base `ddd3057d12429a17a95fc5ac04ee67edb563cf93` требует отсутствующие файлы `modules/rules-engine/...`, включая `r005_adapter.mjs`, и завершается девятью ошибками в `test_build_reimplemented_service_bundle.py` и `test_prepare_integrated_review_runtime.py`. В drift-проверке устаревшая проверка отсутствия Rules-engine останавливается раньше ожидаемой проверки hash drift актуального R001 source.
 - Ожидаемое поведение: packaging соответствует текущей прямой цепочке `R005 → immutable handoff → R001`; удалённые Rules-engine sources и их hashes не являются release authority и не требуются для сборки/подготовки runtime. Hash/provenance проверки текущих источников `modules/corrections/source` и `modules/reconciliation/source` сохраняются fail-closed; missing и drift актуального source дают собственные диагностические коды и не маскируются устаревшим кластером.
@@ -1004,6 +1004,7 @@
 - Классификация: `CONTRACT_EXPECTATION_UNSUPPORTED`; commit `b3f2a124724a174c96681903ff64ca77b333c14e` удалил Rules-engine из release-архитектуры, текущая packaging policy запрещает его в repository/package. Rules-engine code не восстанавливается.
 - Затронутые пункты контракта: §§1, 6, 12.4, 13–14, 16 и Приложение B; `REPORT_ONLY=true`, `rules_service=false`, `posting_rows=0`, `executed_posting_rows=0`, `live_posting_rows=0`, release approval и 1С upload/posting остаются запрещёнными.
 - Обязательный регрессионный тест: текущий runtime overlay не содержит и не требует `modules/rules-engine`; актуальные R001/R005 source pins и provenance materialize при совпадении; drift/missing актуального source fail-closed с точным кодом; corrections hash drift не маскируется отсутствующим legacy source.
+- Верификация integration: targeted PACK-006 — `24 passed`; clean integrated packaging — `230 passed / 0 failed / 2 skipped`; tested integration HEAD — `2eadbc3b914b335d58474571fbe9658d4b8c2101`; Rules-engine не восстанавливался; safety сохранён: `REPORT_ONLY=true`, `rules_service=false`.
 ### PACK-008 — packaging R005 catalog pin не соответствует current release source
 
 - Дата: `03.09.2026`.
@@ -1022,7 +1023,7 @@
 ### PACK-009 — exact-owner verification выбирает evidence-каталог вместо Git checkout
 
 - Дата: `03.09.2026`.
-- Статус: `OPEN`.
+- Статус: `VERIFIED`.
 - Сообщил: карточка `R17_PACKAGING_EXACT_OWNER_REPO_ROOT`.
 - Наблюдаемое поведение: `ExactOwnerRuntimeGoldenTest.test_golden_overlay_rows_match_exact_repository_sources` использует `REPO_ROOT = SCRIPT.parents[3]`. В auxiliary layout `C:\OPIU\GATE_RERUN_ddd3057\build_repo_clean\service\packaging\...` это даёт `C:\OPIU\GATE_RERUN_ddd3057`, хотя Git checkout находится в `C:\OPIU\GATE_RERUN_ddd3057\build_repo_clean`; вызов `git -C C:\OPIU\GATE_RERUN_ddd3057 show ...` возвращает `fatal: not a git repository` и `INTEGRATION_OVERLAY_BLOB_READ_ERROR`.
 - Ожидаемое поведение: exact-owner verification определяет authoritative Git root через Git metadata от переданного/current source location, работает в обычном и auxiliary checkout и отклоняет отсутствие/невалидность repository authority без доверия к произвольным working-tree bytes.
@@ -1032,6 +1033,7 @@
 - Scope: только repository-root resolution и соответствующие exact-owner packaging tests; PACK-006, PACK-007, PACK-008, R005/R001 business/financial logic, ignored Excel inventory, canonical DOCX, `contracts/CURRENT.md` и `release/r17` вне scope.
 - Регрессионный тест: с `OPIU_EXACT_OWNER_SOURCE_ROOT`, указывающим на authoritative source checkout, обычный workspace даёт `12 passed`, а target даёт `1 passed, 11 deselected`; изолированный auxiliary Git worktree на pinned source commit даёт target `1 passed, 11 deselected`; resolver возвращает Git root через `git rev-parse --show-toplevel`; temporary/non-repository source root отклоняется `EXACT_OWNER_GIT_ROOT_UNAVAILABLE`; tracked blob SHA остаётся проверкой через `git show <pinned-commit>:<repo-relative-path>`.
 - PASS: изменены только разрешённые packaging/test/ERROR_REGISTER файлы; exact-owner normal и auxiliary GREEN, invalid authority FAIL CLOSED, safety и финансовая логика не изменены, `git diff --check` проходит.
+- Верификация integration: exact-owner suite — `12 passed`; explicit/auxiliary-root regression — `2 passed, 10 deselected`; clean integrated packaging — `230 passed / 0 failed / 2 skipped`; tested integration HEAD — `2eadbc3b914b335d58474571fbe9658d4b8c2101`; invalid repository authority remains fail-closed; safety unchanged.
 
 ### GOV-002 — release-документация самоссылочно фиксирует pre-merge SHA как текущий HEAD
 

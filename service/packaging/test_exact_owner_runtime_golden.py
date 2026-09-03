@@ -3,7 +3,9 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -17,8 +19,42 @@ SPEC.loader.exec_module(BUNDLE)
 GOLDEN_PATH = (
     Path(__file__).with_name("golden") / "REL13B_EXACT_OWNER_RUNTIME.json"
 )
-REPO_ROOT = SCRIPT.parents[3]
-SOURCE_ROOT = SCRIPT.parents[2]
+
+
+def resolve_git_root(start: Path) -> Path:
+    candidate = start.resolve()
+    if not candidate.is_dir():
+        candidate = candidate.parent
+    for ancestor in (candidate, *candidate.parents):
+        result = subprocess.run(
+            ["git", "-C", str(ancestor), "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return Path(result.stdout.decode("utf-8").strip()).resolve()
+    raise AssertionError(f"EXACT_OWNER_GIT_ROOT_UNAVAILABLE:start={candidate}")
+
+
+def resolve_authority_source_root(start: Path) -> tuple[Path, Path]:
+    configured = os.environ.get("OPIU_EXACT_OWNER_SOURCE_ROOT", "").strip()
+    source_root = Path(configured).resolve() if configured else resolve_git_root(start)
+    repository_root = resolve_git_root(source_root)
+    nested_source_root = repository_root / "development" / "OPIU_1.9.4"
+    if source_root == repository_root and nested_source_root.is_dir():
+        source_root = nested_source_root.resolve()
+    try:
+        source_root.relative_to(repository_root)
+    except ValueError as error:
+        raise AssertionError(
+            "EXACT_OWNER_SOURCE_ROOT_OUTSIDE_REPOSITORY:"
+            f"source={source_root}:root={repository_root}"
+        ) from error
+    return repository_root, source_root
+
+
+REPO_ROOT, SOURCE_ROOT = resolve_authority_source_root(Path(__file__))
 
 
 class ExactOwnerRuntimeGoldenTest(unittest.TestCase):
@@ -37,12 +73,21 @@ class ExactOwnerRuntimeGoldenTest(unittest.TestCase):
 
     @staticmethod
     def git_blob_bytes(source_root: Path, commit: str, relative: str) -> bytes:
-        blob_path = f"{REPO_ROOT.name}/{source_root.name}/{relative}"
+        source_root = source_root.resolve()
+        repository_root = resolve_git_root(source_root)
+        try:
+            source_relative = source_root.relative_to(repository_root)
+        except ValueError as error:
+            raise AssertionError(
+                "INTEGRATION_OVERLAY_SOURCE_ROOT_OUTSIDE_REPOSITORY:"
+                f"source={source_root}:root={repository_root}"
+            ) from error
+        blob_path = (source_relative / Path(relative)).as_posix()
         result = subprocess.run(
             [
                 "git",
                 "-C",
-                str(REPO_ROOT),
+                str(repository_root),
                 "show",
                 f"{commit}:{blob_path}",
             ],
@@ -164,6 +209,18 @@ class ExactOwnerRuntimeGoldenTest(unittest.TestCase):
                 expected_hash,
                 f"INTEGRATION_OVERLAY_BLOB_MISMATCH:commit={overlay_source_commit}:path={relative}:expected={expected_hash}:actual={actual_blob_hash}",
             )
+
+    def test_non_repository_source_root_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            with self.assertRaisesRegex(
+                AssertionError,
+                "EXACT_OWNER_GIT_ROOT_UNAVAILABLE",
+            ):
+                self.git_blob_bytes(
+                    Path(raw),
+                    self.golden["integration_overlay_source_commit"],
+                    "modules/corrections/source/correction_engine_r001.mjs",
+                )
 
     def test_432_to_433_fails(self) -> None:
         with self.assertRaisesRegex(

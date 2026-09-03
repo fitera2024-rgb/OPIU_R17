@@ -341,17 +341,17 @@ class IntegratedRuntimePrepareTest(unittest.TestCase):
             ):
                 INTEGRATED.overlay_integrated_changes(runtime)
 
+    @patch.dict(INTEGRATED.RULES_OVERLAY_HASHES, {}, clear=True)
+    @patch.dict(INTEGRATED.RULES_SAFETY_OVERLAY_HASHES, {}, clear=True)
+    @patch.dict(INTEGRATED.CORRECTIONS_OVERLAY_HASHES, {}, clear=True)
+    @patch.dict(INTEGRATED.INTEGRATION_RELEASE_OVERLAY_HASHES, {}, clear=True)
     def test_r005_catalog_source_hash_drift_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             runtime = self.make_prepared_runtime(root)
             source_root, catalog_hashes = self.make_catalog_source_root(root)
             base_hash = INTEGRATED.sha256_file(runtime / "MANIFEST.json")
-            first = next(
-                relative
-                for relative in catalog_hashes
-                if relative not in INTEGRATED.INTEGRATION_RELEASE_OVERLAY_HASHES
-            )
+            first = next(iter(catalog_hashes))
             catalog_hashes[first] = "0" * 64
             with (
                 patch.object(
@@ -377,6 +377,7 @@ class IntegratedRuntimePrepareTest(unittest.TestCase):
             ):
                 INTEGRATED.overlay_integrated_changes(runtime)
 
+    @patch.dict(INTEGRATED.INTEGRATION_RELEASE_OVERLAY_HASHES, {}, clear=True)
     def test_r005_catalog_repository_sources_match_pins_after_rebase(self) -> None:
         missing = [
             relative

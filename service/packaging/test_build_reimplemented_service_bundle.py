@@ -23,10 +23,8 @@ class ReimplementedBundleTest(unittest.TestCase):
         files = {
             "runtime/node/node.exe": b"node",
             "modules/reconciliation/source/opiu_reconcile.mjs": b"r005",
-            "modules/rules-engine/source/cli.mjs": b"rules",
             "modules/corrections/source/correction_engine_r001.mjs": b"r001",
             "modules/corrections/source/node_modules/jszip/package.json": b"{}",
-            "data/defaults/rules.json": b"{}",
             "data/defaults/settings.json": b"{}",
             "resources/reference/reference.txt": b"reference",
             "VERSION.txt": b"1.9.4\n",
@@ -73,33 +71,9 @@ class ReimplementedBundleTest(unittest.TestCase):
         payload: Path,
         rows: dict[str, dict[str, object]],
     ) -> None:
-        source_root = SCRIPT.parents[2]
-        for (
-            relative,
-            expected_hash,
-        ) in BUNDLE.EXPECTED_INTEGRATION_RELEASE_OVERLAY_HASHES.items():
-            data = (source_root / Path(relative)).read_bytes()
-            if BUNDLE.sha256_bytes(data) != expected_hash:
-                repo_relative = (
-                    Path("development") / "OPIU_1.9.4" / Path(relative)
-                ).as_posix()
-                data = subprocess.check_output(
-                    [
-                        "git",
-                        "show",
-                        f"{BUNDLE.EXPECTED_INTEGRATION_RELEASE_BASE_COMMIT}:{repo_relative}",
-                    ],
-                    cwd=SCRIPT.parents[4],
-                )
-            self.assertEqual(BUNDLE.sha256_bytes(data), expected_hash)
-            path = payload / Path(relative)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-            rows[relative] = {
-                "path": relative,
-                "size": len(data),
-                "sha256": expected_hash,
-            }
+        # Kept as a compatibility helper: the retired historical carrier
+        # overlay is intentionally empty.
+        self.assertEqual(BUNDLE.EXPECTED_INTEGRATION_RELEASE_OVERLAY_HASHES, {})
 
     def make_integrated_payload(
         self,
@@ -118,15 +92,6 @@ class ReimplementedBundleTest(unittest.TestCase):
         for relative, expected_hash in BUNDLE.EXPECTED_RULES_REPORT_CONTROLS_HASHES.items():
             source = source_root / Path(relative)
             data = source.read_bytes()
-            if BUNDLE.sha256_bytes(data) != expected_hash:
-                repo_relative = (
-                    Path("development") / "OPIU_1.9.4" / Path(relative)
-                ).as_posix()
-                data = subprocess.check_output([
-                    "git",
-                    "show",
-                    f"bf3e2f073648269e6dd31645994967ff179d2942:{repo_relative}",
-                ], cwd=SCRIPT.parents[4])
             self.assertEqual(BUNDLE.sha256_bytes(data), expected_hash)
             path = payload / Path(relative)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,15 +104,6 @@ class ReimplementedBundleTest(unittest.TestCase):
         for relative, expected_hash in BUNDLE.EXPECTED_R001_CORRECTIONS_HASHES.items():
             source = source_root / Path(relative)
             data = source.read_bytes()
-            if BUNDLE.sha256_bytes(data) != expected_hash:
-                repo_relative = (
-                    Path("development") / "OPIU_1.9.4" / Path(relative)
-                ).as_posix()
-                data = subprocess.check_output([
-                    "git",
-                    "show",
-                    f"da024306c7edb515df1ae57a1ee219067b06faed:{repo_relative}",
-                ], cwd=SCRIPT.parents[4])
             self.assertEqual(BUNDLE.sha256_bytes(data), expected_hash)
             path = payload / Path(relative)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,6 +119,8 @@ class ReimplementedBundleTest(unittest.TestCase):
         runtime_safety = json.loads(safety_path.read_text())
         runtime_safety.update({
             "execution_allowed": False,
+            "rules_report_controls_changed": False,
+            "rules_output_safety_passport_fix": False,
             "r001_cross_source_dedup_fix": True,
             "r001_financial_logic_changed": True,
             "r001_change_request": "CR-R001-20260816-CROSS-SOURCE-DEDUP-001",
@@ -178,7 +136,9 @@ class ReimplementedBundleTest(unittest.TestCase):
         manifest["safety"].update({
             "execution_allowed": False,
             "live_1c_allowed": False,
+            "rules_report_controls_changed": False,
             "rules_financial_logic_changed": False,
+            "rules_output_safety_passport_fix": False,
             "r001_cross_source_dedup_fix": True,
             "r001_financial_logic_changed": True,
             "financial_correctness_verified": False,
@@ -188,14 +148,12 @@ class ReimplementedBundleTest(unittest.TestCase):
             "prepared_r005_manifest_sha256": BUNDLE.EXPECTED_PREPARED_R005_MANIFEST_SHA256,
             "change_requests": BUNDLE.EXPECTED_INTEGRATED_CHANGE_REQUESTS,
             "rules_overlay_hashes": BUNDLE.EXPECTED_RULES_REPORT_CONTROLS_HASHES,
-            "integration_release_work_id":
-                BUNDLE.EXPECTED_INTEGRATION_RELEASE_WORK_ID,
-            "integration_release_base_commit":
-                BUNDLE.EXPECTED_INTEGRATION_RELEASE_BASE_COMMIT,
             "integration_release_overlay_hashes":
                 BUNDLE.EXPECTED_INTEGRATION_RELEASE_OVERLAY_HASHES,
-            "integration_release_packaging_only": True,
-            "rules_report_controls_fix": True,
+            "integration_release_packaging_only": False,
+            "rules_safety_overlay_hashes": BUNDLE.EXPECTED_RULES_OUTPUT_SAFETY_HASHES,
+            "rules_report_controls_fix": False,
+            "rules_output_safety_passport_fix": False,
             "rules_financial_logic_changed": False,
             "r001_base_commit": BUNDLE.EXPECTED_R001_BASE_COMMIT,
             "r001_result_commit": BUNDLE.EXPECTED_R001_RESULT_COMMIT,
@@ -225,44 +183,27 @@ class ReimplementedBundleTest(unittest.TestCase):
         }
         rows = {str(row["path"]): row for row in manifest["files"]}
         source_root = SCRIPT.parents[2]
-        for hashes in (
-            BUNDLE.EXPECTED_RULES_OUTPUT_SAFETY_HASHES,
-            BUNDLE.EXPECTED_R005_CATALOG_HASHES,
-        ):
-            for relative, expected_hash in hashes.items():
-                data = (source_root / Path(relative)).read_bytes()
-                if BUNDLE.sha256_bytes(data) != expected_hash:
-                    commit = (
-                        "349e57a2c07aa25f645a8d5b1cdc16181f2739d3"
-                        if hashes is BUNDLE.EXPECTED_RULES_OUTPUT_SAFETY_HASHES
-                        else "0848141cbe67b7f891f547cce9e25fcf8dea017d"
-                    )
-                    repo_relative = (
-                        Path("development") / "OPIU_1.9.4" / Path(relative)
-                    ).as_posix()
-                    data = subprocess.check_output([
-                        "git",
-                        "show",
-                        f"{commit}:{repo_relative}",
-                    ], cwd=SCRIPT.parents[4])
-                self.assertEqual(BUNDLE.sha256_bytes(data), expected_hash)
-                path = payload / Path(relative)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
-                rows[relative] = {
-                    "path": relative,
-                    "size": len(data),
-                    "sha256": expected_hash,
-                }
+        catalog_hashes = {}
+        for relative in BUNDLE.EXPECTED_R005_CATALOG_HASHES:
+            data = (source_root / Path(relative)).read_bytes()
+            expected_hash = BUNDLE.sha256_bytes(data)
+            catalog_hashes[relative] = expected_hash
+            path = payload / Path(relative)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            rows[relative] = {
+                "path": relative,
+                "size": len(data),
+                "sha256": expected_hash,
+            }
         self.apply_integration_release_overlay(payload, rows)
 
         safety_path = payload / "SAFETY.json"
         runtime_safety = json.loads(safety_path.read_text())
         runtime_safety.update({
             "execution_allowed": False,
-            "rules_output_safety_passport_fix": True,
-            "rules_safety_change_request":
-                "CR-RULES-20260817-OUTPUT-SAFETY-PASSPORT-001",
+            "rules_report_controls_changed": False,
+            "rules_output_safety_passport_fix": False,
             "r005_intalev_catalog_auto_binding": True,
             "r005_catalog_financial_logic_changed": False,
             "r005_organization_crosswalk_verified": False,
@@ -283,15 +224,13 @@ class ReimplementedBundleTest(unittest.TestCase):
             "prepared_r005_manifest_sha256":
                 BUNDLE.EXPECTED_R005_CATALOG_PREPARED_R005_MANIFEST_SHA256,
             "change_requests": BUNDLE.EXPECTED_R005_CATALOG_CHANGE_REQUESTS,
-            "rules_safety_base_commit": BUNDLE.EXPECTED_RULES_SAFETY_BASE_COMMIT,
-            "rules_safety_result_commit": BUNDLE.EXPECTED_RULES_SAFETY_RESULT_COMMIT,
             "rules_safety_overlay_hashes":
                 BUNDLE.EXPECTED_RULES_OUTPUT_SAFETY_HASHES,
-            "rules_output_safety_passport_fix": True,
+            "rules_output_safety_passport_fix": False,
             "r005_catalog_base_commit": BUNDLE.EXPECTED_R005_CATALOG_BASE_COMMIT,
             "r005_catalog_result_commit": BUNDLE.EXPECTED_R005_CATALOG_RESULT_COMMIT,
             "r005_catalog_handoff_head": BUNDLE.EXPECTED_R005_CATALOG_HANDOFF_HEAD,
-            "r005_catalog_overlay_hashes": BUNDLE.EXPECTED_R005_CATALOG_HASHES,
+            "r005_catalog_overlay_hashes": catalog_hashes,
             "r005_intalev_catalog_auto_binding": True,
             "r005_catalog_financial_logic_changed": False,
             "r005_organization_crosswalk_verified": False,
@@ -302,7 +241,8 @@ class ReimplementedBundleTest(unittest.TestCase):
         })
         manifest["files"] = list(rows.values())
         manifest["safety"].update({
-            "rules_output_safety_passport_fix": True,
+            "rules_report_controls_changed": False,
+            "rules_output_safety_passport_fix": False,
             "r005_intalev_catalog_auto_binding": True,
             "r005_catalog_financial_logic_changed": False,
             "r005_organization_crosswalk_verified": False,
@@ -342,6 +282,19 @@ class ReimplementedBundleTest(unittest.TestCase):
             service.write_bytes(b"service")
             with self.assertRaises(BUNDLE.BundleError):
                 BUNDLE.build(payload, service, root / "out")
+
+    def test_retired_rules_runtime_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            payload = self.make_payload(root)
+            legacy = payload / "modules/rules-engine/source/cli.mjs"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_bytes(b"legacy-rules")
+            with self.assertRaisesRegex(
+                BUNDLE.BundleError,
+                "LEGACY_RULES_RUNTIME_PRESENT:modules/rules-engine",
+            ):
+                BUNDLE.validate_payload(payload)
 
     def test_owner_green_service_is_recorded_without_changing_safety(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -484,13 +437,13 @@ class ReimplementedBundleTest(unittest.TestCase):
             self.assertFalse(provenance["green_ui_assets_identical"])
             self.assertTrue(provenance["source_persistence_fix"])
             self.assertTrue(provenance["rules_bulk_decision_fix"])
-            self.assertTrue(provenance["rules_report_controls_fix"])
+            self.assertFalse(provenance["rules_report_controls_fix"])
             self.assertTrue(provenance["r001_result_contract_fix"])
             self.assertTrue(provenance["r001_result_readiness_fix"])
             self.assertTrue(provenance["r001_cross_source_dedup_fix"])
             self.assertTrue(provenance["r001_financial_logic_changed"])
             self.assertTrue(provenance["embedded_web_assets_changed"])
-            self.assertTrue(provenance["runtime_rules_changed"])
+            self.assertFalse(provenance["runtime_rules_changed"])
             self.assertEqual(
                 provenance["runtime_change_requests"],
                 BUNDLE.EXPECTED_INTEGRATED_CHANGE_REQUESTS,
@@ -503,14 +456,8 @@ class ReimplementedBundleTest(unittest.TestCase):
                 provenance["runtime_corrections_overlay_hashes"],
                 BUNDLE.EXPECTED_R001_CORRECTIONS_HASHES,
             )
-            self.assertEqual(
-                provenance["runtime_integration_release_work_id"],
-                BUNDLE.EXPECTED_INTEGRATION_RELEASE_WORK_ID,
-            )
-            self.assertEqual(
-                provenance["runtime_integration_release_base_commit"],
-                BUNDLE.EXPECTED_INTEGRATION_RELEASE_BASE_COMMIT,
-            )
+            self.assertEqual(provenance["runtime_integration_release_work_id"], "")
+            self.assertEqual(provenance["runtime_integration_release_base_commit"], "")
             self.assertEqual(
                 provenance["runtime_integration_release_overlay_hashes"],
                 BUNDLE.EXPECTED_INTEGRATION_RELEASE_OVERLAY_HASHES,
@@ -605,6 +552,14 @@ class ReimplementedBundleTest(unittest.TestCase):
             with (
                 patch.object(
                     BUNDLE,
+                    "EXPECTED_R005_CATALOG_HASHES",
+                    {
+                        relative: BUNDLE.sha256_file(SCRIPT.parents[2] / Path(relative))
+                        for relative in BUNDLE.EXPECTED_R005_CATALOG_HASHES
+                    },
+                ),
+                patch.object(
+                    BUNDLE,
                     "EXPECTED_R005_CATALOG_MATERIALIZED_PAYLOAD_FILE_COUNT",
                     change["materialized_payload_file_count"],
                 ),
@@ -637,7 +592,7 @@ class ReimplementedBundleTest(unittest.TestCase):
             provenance = json.loads(
                 (Path(result["bundle_root"]) / "BUNDLE_PROVENANCE.json").read_text()
             )
-            self.assertTrue(provenance["rules_output_safety_passport_fix"])
+            self.assertFalse(provenance["rules_output_safety_passport_fix"])
             self.assertTrue(provenance["r005_intalev_catalog_auto_binding"])
             self.assertFalse(provenance["r005_catalog_financial_logic_changed"])
             self.assertFalse(provenance["r005_organization_crosswalk_verified"])
@@ -662,6 +617,14 @@ class ReimplementedBundleTest(unittest.TestCase):
             change["r005_organization_crosswalk_verified"] = True
             manifest_path.write_text(json.dumps(manifest) + "\n")
             with (
+                patch.object(
+                    BUNDLE,
+                    "EXPECTED_R005_CATALOG_HASHES",
+                    {
+                        relative: BUNDLE.sha256_file(SCRIPT.parents[2] / Path(relative))
+                        for relative in BUNDLE.EXPECTED_R005_CATALOG_HASHES
+                    },
+                ),
                 patch.object(
                     BUNDLE,
                     "EXPECTED_R005_CATALOG_MATERIALIZED_PAYLOAD_FILE_COUNT",

@@ -33,8 +33,10 @@ REQUIRED_RUNTIME_FILES = (
     "SAFETY.json",
     "runtime/node/node.exe",
     "modules/reconciliation/source/opiu_reconcile.mjs",
-    "modules/rules-engine/source/cli.mjs",
     "modules/corrections/source/correction_engine_r001.mjs",
+)
+LEGACY_RULES_RUNTIME_PATHS = (
+    "modules/rules-engine",
     "data/defaults/rules.json",
 )
 RUNTIME_DIRS = (
@@ -100,11 +102,9 @@ RULES_BULK_DECISION_IMPLEMENTATIONS = {
     INTEGRATED_R005_CATALOG_TEST_IMPLEMENTATION,
 }
 
-RULES_REPORT_CONTROLS_IMPLEMENTATIONS = {
-    INTEGRATED_RESULT_CONTRACT_IMPLEMENTATION,
-    INTEGRATED_R001_DEDUP_IMPLEMENTATION,
-    INTEGRATED_R005_CATALOG_TEST_IMPLEMENTATION,
-}
+# The historical Rules-engine implementation was retired. These compatibility
+# fields remain false in bundle evidence and carry no source/hash expectations.
+RULES_REPORT_CONTROLS_IMPLEMENTATIONS: set[str] = set()
 
 R001_RESULT_CONTRACT_IMPLEMENTATIONS = {
     INTEGRATED_RESULT_CONTRACT_IMPLEMENTATION,
@@ -117,9 +117,7 @@ R001_CROSS_SOURCE_DEDUP_IMPLEMENTATIONS = {
     INTEGRATED_R005_CATALOG_TEST_IMPLEMENTATION,
 }
 
-RULES_OUTPUT_SAFETY_PASSPORT_IMPLEMENTATIONS = {
-    INTEGRATED_R005_CATALOG_TEST_IMPLEMENTATION,
-}
+RULES_OUTPUT_SAFETY_PASSPORT_IMPLEMENTATIONS: set[str] = set()
 
 R005_CATALOG_BINDING_IMPLEMENTATIONS = {
     INTEGRATED_R005_CATALOG_TEST_IMPLEMENTATION,
@@ -226,129 +224,58 @@ EXPECTED_R005_CATALOG_OWNER_MANIFEST_DRIFT = {
 }
 EXPECTED_RESULT_CONTRACT_CHANGE_REQUESTS = [
     "CR-R005-20260815-UK9-001",
-    "CR-RULES-20260816-REPORT-CONTROLS-001",
+    "CR-R001-20260816-CROSS-SOURCE-DEDUP-001",
 ]
 EXPECTED_INTEGRATED_CHANGE_REQUESTS = [
     "CR-R005-20260815-UK9-001",
-    "CR-RULES-20260816-REPORT-CONTROLS-001",
     "CR-R001-20260816-CROSS-SOURCE-DEDUP-001",
 ]
 EXPECTED_R005_CATALOG_CHANGE_REQUESTS = [
     "CR-R005-20260815-UK9-001",
-    "CR-RULES-20260816-REPORT-CONTROLS-001",
     "CR-R001-20260816-CROSS-SOURCE-DEDUP-001",
-    "CR-RULES-20260817-OUTPUT-SAFETY-PASSPORT-001",
     "CR-R005-20260817-INTALEV-CATALOG-AUTO-BINDING-001",
 ]
 EXPECTED_R001_BASE_COMMIT = "6d1386e5d9a10a22a75c483845f62ce28ce6b496"
 EXPECTED_R001_RESULT_COMMIT = "da024306c7edb515df1ae57a1ee219067b06faed"
-EXPECTED_RULES_SAFETY_BASE_COMMIT = "e09022d2b27b4f0f668d4fc8351231b4ab2c0c1d"
-EXPECTED_RULES_SAFETY_RESULT_COMMIT = "349e57a2c07aa25f645a8d5b1cdc16181f2739d3"
 EXPECTED_R005_CATALOG_BASE_COMMIT = "8789974ed0bdd4a5c18c3c3973ceff2ae787f064"
 EXPECTED_R005_CATALOG_RESULT_COMMIT = "0848141cbe67b7f891f547cce9e25fcf8dea017d"
 EXPECTED_R005_CATALOG_HANDOFF_HEAD = "ee78a5fed6fd897dbf4c9da4bd0da1a2f41b9185"
-EXPECTED_INTEGRATION_RELEASE_WORK_ID = (
-    "OPIU-2026-08-17-INTEGRATION-RELEASE-READINESS-19"
-)
+# Compatibility metadata for the separate exact-owner golden test. It is not
+# used as a current overlay source or validation requirement.
 EXPECTED_INTEGRATION_RELEASE_BASE_COMMIT = (
     "7dc94e1cb9102f2e7effd974b94f6f6a64840903"
 )
-EXPECTED_RULES_REPORT_CONTROLS_HASHES = {
-    "modules/rules-engine/source/adapters/r005_adapter.mjs":
-        "CD0B329BE8962D16017293FA02B4F7ED870E791CA45FCD2912C7AA721ADD84CF",
-    "modules/rules-engine/source/adapters/r005_adapter.test.mjs":
-        "7A797262A9343A8F62CEB77EC6F1BE1CBBCD85C4874E98E9111D19A7598572A0",
-    "modules/rules-engine/source/adapters/r005_identity_guard.mjs":
-        "4E4F99A37E3000E40859FBA6E66ABEF0B03DADB0E300DCE232921AFA5FD0D864",
-    "modules/rules-engine/source/adapters/r005_identity_guard.test.mjs":
-        "A9819E7C6689838FAB7462C542A770E3CB479B8B917015C84C4B8C6963A13604",
-    "modules/rules-engine/source/engine.mjs":
-        "2B9FF9B73C46591D9250281DD3721998C9B66BB57B5A398343EE37F4D08D8075",
-}
+EXPECTED_RULES_REPORT_CONTROLS_HASHES: dict[str, str] = {}
 
 EXPECTED_R001_CORRECTIONS_HASHES = {
     "modules/corrections/source/correction_engine_r001.mjs":
-        "D124B195834938001CBF4EAAEA6EB8C2B543287D16572B416BC54D3B3AD939A7",
+        "C8CDF64603C129E0102154402309A7EE82A8E605A246FA42237748169ED87C8B",
     "modules/corrections/source/r001_cross_source_dedup.mjs":
         "95ACE2F283B5086943D78F58785B64185C6F3C3487F85BE18ACBE2B4423A3EAC",
     "modules/corrections/source/r001_cross_source_dedup.test.mjs":
         "6D8BF7DDAF51EDA2F627F91AA1AC760C7B8B2775426CE204D0D5F32FB38DC010",
     "modules/corrections/source/rules_application_handoff.mjs":
-        "3C839F6CBE334D877DBE15D3D9D3524B9C4DE4491A81086AF8F4E4DC5B8AB3E4",
+        "189332AAFF98DD1321A29F4F17534F82F65505A14E972F65AA13185375F66932",
     "modules/corrections/source/rules_application_handoff.test.mjs":
-        "76F46727970D0C18A7FA9AEAE19D298E9A1F577C2E065E6DC2D4840EA931FF4B",
+        "4FEE124783EEE3EFADD5AA9B22E6EE6DC53EF21CAFE39CACC264FA7849EC1709",
 }
 
-EXPECTED_RULES_OUTPUT_SAFETY_HASHES = {
-    "modules/rules-engine/source/engine.mjs":
-        "2A7276CF0D4062CAC54FC1F0FFD6010B8F1E898611EDADC2874700F33A38025D",
-    "modules/rules-engine/source/engine.safety.test.mjs":
-        "C9CF94B03C0CF9A61C0B7FB5F21E69923DB179BE130400E2D2A3AD4E959ACA73",
-}
+EXPECTED_RULES_OUTPUT_SAFETY_HASHES: dict[str, str] = {}
 
 EXPECTED_R005_CATALOG_HASHES = {
     "modules/reconciliation/source/opiu_reconcile.mjs":
-        "1D7031C36CD337B5ACC31B357CE7B40ACDB2C1F05BDCA4005D158C2FC0D89B6F",
+        "66C2587238D4CD2BACE280AD857E917D088851228477C547702D2F247328FD80",
     "modules/reconciliation/source/reference_catalog_manifest.mjs":
         "85094D961FE12895A122B1EEE5EF9DC502D46E791A4406921FB2158B993C6748",
     "modules/reconciliation/source/intalev_catalog_binding.mjs":
-        "846C1A2BBFC8E7CDA577FC151A23E039FF3A36281F7EC488EC63D927525EAEAF",
+        "DB7D3B97711227ACDE8A1D5396EFE919A4E4042563C2C1A688D50F05247DE4B4",
     "modules/reconciliation/source/intalev_catalog_binding.test.mjs":
-        "AA7C43700E55B85B4A7B3B2E9BD469651C455F0704F0DD02BD51D6A295EA6E73",
+        "5ABCF2632CC14AE559282E84AE6A5EA4F9795AB00946227CA8F32E1E562888E6",
     "modules/reconciliation/source/intalev_catalog_workbook_semantics.test.mjs":
-        "7E40F283A8AF4DB1B6EDD32704EC24671A0B75634C3D972BDBFEE45AE0AD4811",
+        "00C55C1B4671FA7722F5084BE37E63BAFE74B3F62406A836C067037C28B22F82",
 }
 
-EXPECTED_INTEGRATION_RELEASE_OVERLAY_HASHES = {
-    "modules/corrections/source/correction_engine_r001.mjs":
-        "85C1C8514B5B49F17D43EF97C2754CBAFDEB2E64867569200917BEC34D5F86C9",
-    "modules/corrections/source/r001_audit_registry_export.mjs":
-        "39B20D821B18D9CAAAB70C72B1216CB9F707C3D80748ECEBB543A912D774E006",
-    "modules/corrections/source/r001_audit_registry_export.test.mjs":
-        "4C1172D58F8DF87B54B6F6FC66D4E78D6ABAE5B2AE8F942FDB5EB050777E3FFF",
-    "modules/corrections/source/r005_review_routing.mjs":
-        "A17B7456F405CBE77A538B3C7BA2DE746EEA7CF38E8E24C7CBAF655DB8400A57",
-    "modules/corrections/source/r005_review_routing.test.mjs":
-        "65DCDF9784DD817D3E35732BD6930C9ADEB5B1CF7DD06D6A65FE63401DB55FCD",
-    "modules/corrections/source/rules_application_handoff.mjs":
-        "88999EE1BE36377331A5B0E8DBBB96B38B599549F9F9EB172A725FB39D0399EE",
-    "modules/corrections/source/rules_application_handoff.test.mjs":
-        "202EEDCCD40FCAF03CDDAE6513D2C93CEDD28E1CF76D4F32BB41F47224D564B4",
-    "modules/reconciliation/source/config.json":
-        "C9971819ABF97C1883692ED6F5B1DCB9E8FA076B1DF8286F7251765A8E1DEC23",
-    "modules/reconciliation/source/hierarchy_tree.mjs":
-        "9637061D0AA78D2207158080E475FB514222EE766ACC5CF04E4DF54957F57824",
-    "modules/reconciliation/source/opiu_reconcile.mjs":
-        "E87A4C2415216C6DA688A6A98B7FF1AC0D95C7E0ADAE75BD447C12DB21E90990",
-    "modules/reconciliation/source/reconciliation_decision_engine.mjs":
-        "AD4BDA2E5F96D1F67F0ED2851DC2C9475D8CFC25A50BA3DAF879D790164A74C0",
-    "modules/reconciliation/source/r005_binding_status.test.mjs":
-        "797FF7337DBAFDD4634FF61362B9927822E216BD3FD2CFB511BCB60CF1B6F266",
-    "modules/reconciliation/source/r005_intalev_template_graph.current.json":
-        "6013C269E395F09230B078A17ECDFA808F6F53F1B7603001B5FCCAD1D54B7F7C",
-    "modules/reconciliation/source/r005_intalev_template_graph.mjs":
-        "AA3A3FB21BF94A087FEE5C14D0941A80C9C6AB6EDCB40A75F5C977B7F51CC4E5",
-    "modules/reconciliation/source/r005_intalev_tree_presentation.mjs":
-        "2C0FB29265ACE472EA9C943EE2CEF574FE18E36FDF61049ACC44C3102A5B2987",
-    "modules/reconciliation/source/r005_reconciliation_status.mjs":
-        "5233D02AD3F6E4D98EAD61F1E6E85B6478EFF1D33E4286019829866AC8D41ED2",
-    "modules/reconciliation/source/r005_reconciliation_status.test.mjs":
-        "97B461972F7EE2BB2BC93A915EACD98CF5C913E5DD5140712FB33A6C49389FE0",
-    "modules/reconciliation/source/r005_tree_hierarchy.test.mjs":
-        "23D2C16CA2163900275A3F602BFD54A79069A329C819C31F53CBF201A8080CE9",
-    "modules/reconciliation/source/source_trace_guard.mjs":
-        "DB1F95C056107ED7D0A55F1727B4E4CF2EC99C9495688013652D6B4BB430D404",
-    "modules/rules-engine/source/adapters/r005_adapter.mjs":
-        "B5547B2DED7C07B83318850DBF2ECFD98173DEC906831C13F215A5C0AF816EDB",
-    "modules/rules-engine/source/adapters/r005_identity_guard.test.mjs":
-        "658779035A285CBBE97BE764A4733264CD6E3C4AA88910C8F1B335C87F096215",
-    "modules/rules-engine/source/engine.mjs":
-        "C3688C8C72B6873B5BD67BE13B835A4D76D8C7848D0EF72AF9DB1BD2DD72A875",
-    "modules/rules-engine/source/handoff.mjs":
-        "EB4E8E7AD3B65149E72F574103D6E4568D16F751965BCFD660ED821E42CC281C",
-    "modules/rules-engine/source/handoff.test.mjs":
-        "544ED66F6609878D92AC1581601DF3B9371A6891E76BB25A0A88EB7350E17E66",
-}
+EXPECTED_INTEGRATION_RELEASE_OVERLAY_HASHES: dict[str, str] = {}
 
 BYTE_IDENTICAL_GREEN_UI_IMPLEMENTATIONS = {
     "OWNER_GREEN_SERVICE_EXACT",
@@ -385,6 +312,9 @@ def require_regular(path: Path, label: str) -> None:
 
 
 def validate_payload(payload_root: Path) -> dict[str, Any]:
+    for relative in LEGACY_RULES_RUNTIME_PATHS:
+        if (payload_root / Path(relative)).exists():
+            raise BundleError(f"LEGACY_RULES_RUNTIME_PRESENT:{relative}")
     for relative in REQUIRED_RUNTIME_FILES:
         require_regular(payload_root / Path(relative), "RUNTIME")
 
@@ -421,9 +351,9 @@ def validate_payload(payload_root: Path) -> dict[str, Any]:
     }
     for relative in REQUIRED_RUNTIME_FILES:
         if relative not in expected:
-            # The payload manifest intentionally excludes the manifest itself,
-            # the Node executable and the mutable rules registry. They are still
-            # required, inventoried and bound by the resulting bundle manifest.
+            # The payload manifest intentionally excludes the manifest itself
+            # and the Node executable. They are still required, inventoried and
+            # bound by the resulting bundle manifest.
             if relative in {"MANIFEST.json", "runtime/node/node.exe"}:
                 continue
             raise BundleError(f"RUNTIME_FILE_NOT_IN_MANIFEST:{relative}")
@@ -656,9 +586,6 @@ def validate_implementation_payload(
         return
 
     r001_dedup = implementation in R001_CROSS_SOURCE_DEDUP_IMPLEMENTATIONS
-    rules_output_safety = (
-        implementation in RULES_OUTPUT_SAFETY_PASSPORT_IMPLEMENTATIONS
-    )
     r005_catalog = implementation in R005_CATALOG_BINDING_IMPLEMENTATIONS
     expected_change_requests = (
         EXPECTED_R005_CATALOG_CHANGE_REQUESTS
@@ -707,25 +634,19 @@ def validate_implementation_payload(
         raise BundleError("INTEGRATED_RUNTIME_CHANGE_REQUESTS_MISMATCH")
     if change.get("rules_overlay_hashes") != EXPECTED_RULES_REPORT_CONTROLS_HASHES:
         raise BundleError("INTEGRATED_RUNTIME_RULES_HASH_SET_MISMATCH")
-    if (
-        change.get("integration_release_work_id")
-        != EXPECTED_INTEGRATION_RELEASE_WORK_ID
-    ):
-        raise BundleError("INTEGRATED_RUNTIME_RELEASE_WORK_ID_MISMATCH")
-    if (
-        change.get("integration_release_base_commit")
-        != EXPECTED_INTEGRATION_RELEASE_BASE_COMMIT
-    ):
-        raise BundleError("INTEGRATED_RUNTIME_RELEASE_BASE_COMMIT_MISMATCH")
+    if change.get("rules_safety_overlay_hashes") != EXPECTED_RULES_OUTPUT_SAFETY_HASHES:
+        raise BundleError("INTEGRATED_RUNTIME_RULES_SAFETY_HASH_SET_MISMATCH")
     if (
         change.get("integration_release_overlay_hashes")
         != EXPECTED_INTEGRATION_RELEASE_OVERLAY_HASHES
     ):
         raise BundleError("INTEGRATED_RUNTIME_RELEASE_HASH_SET_MISMATCH")
-    if change.get("integration_release_packaging_only") is not True:
+    if change.get("integration_release_packaging_only") is not False:
         raise BundleError("INTEGRATED_RUNTIME_RELEASE_SCOPE_INVALID")
-    if change.get("rules_report_controls_fix") is not True:
-        raise BundleError("INTEGRATED_RUNTIME_RULES_CONTROLS_FIX_MISSING")
+    if change.get("rules_report_controls_fix") is not False:
+        raise BundleError("INTEGRATED_RUNTIME_RULES_CONTROLS_FIX_INVALID")
+    if change.get("rules_output_safety_passport_fix") is not False:
+        raise BundleError("INTEGRATED_RUNTIME_RULES_SAFETY_FIX_INVALID")
     if change.get("rules_financial_logic_changed") is not False:
         raise BundleError("INTEGRATED_RUNTIME_RULES_FINANCIAL_SCOPE_INVALID")
     if change.get("materialized_payload_file_count") != expected_file_count:
@@ -760,16 +681,6 @@ def validate_implementation_payload(
         if change.get("financial_correctness_verified") is not False:
             raise BundleError("INTEGRATED_RUNTIME_FINANCIAL_QA_CLAIM_INVALID")
 
-    if rules_output_safety:
-        if change.get("rules_safety_base_commit") != EXPECTED_RULES_SAFETY_BASE_COMMIT:
-            raise BundleError("INTEGRATED_RUNTIME_RULES_SAFETY_BASE_COMMIT_MISMATCH")
-        if change.get("rules_safety_result_commit") != EXPECTED_RULES_SAFETY_RESULT_COMMIT:
-            raise BundleError("INTEGRATED_RUNTIME_RULES_SAFETY_RESULT_COMMIT_MISMATCH")
-        if change.get("rules_safety_overlay_hashes") != EXPECTED_RULES_OUTPUT_SAFETY_HASHES:
-            raise BundleError("INTEGRATED_RUNTIME_RULES_SAFETY_HASH_SET_MISMATCH")
-        if change.get("rules_output_safety_passport_fix") is not True:
-            raise BundleError("INTEGRATED_RUNTIME_RULES_SAFETY_FIX_MISSING")
-
     if r005_catalog:
         if change.get("r005_catalog_base_commit") != EXPECTED_R005_CATALOG_BASE_COMMIT:
             raise BundleError("INTEGRATED_RUNTIME_R005_CATALOG_BASE_COMMIT_MISMATCH")
@@ -800,8 +711,6 @@ def validate_implementation_payload(
         if isinstance(row, dict) and row.get("path")
     }
     expected_materialized_rules_hashes = dict(EXPECTED_RULES_REPORT_CONTROLS_HASHES)
-    if rules_output_safety:
-        expected_materialized_rules_hashes.update(EXPECTED_RULES_OUTPUT_SAFETY_HASHES)
     for relative, expected_hash in expected_materialized_rules_hashes.items():
         if relative in EXPECTED_INTEGRATION_RELEASE_OVERLAY_HASHES:
             continue
@@ -886,7 +795,9 @@ def validate_implementation_payload(
         or safety.get("financial_correctness_verified") is not False
     ):
         raise BundleError("INTEGRATED_RUNTIME_R001_MANIFEST_SAFETY_FAILED")
-    if rules_output_safety and safety.get("rules_output_safety_passport_fix") is not True:
+    if safety.get("rules_report_controls_changed") is not False:
+        raise BundleError("INTEGRATED_RUNTIME_RULES_CONTROLS_MANIFEST_FAILED")
+    if safety.get("rules_output_safety_passport_fix") is not False:
         raise BundleError("INTEGRATED_RUNTIME_RULES_SAFETY_MANIFEST_FAILED")
     if r005_catalog and (
         safety.get("r005_intalev_catalog_auto_binding") is not True
@@ -913,7 +824,9 @@ def validate_implementation_payload(
         != "CR-R001-20260816-CROSS-SOURCE-DEDUP-001"
     ):
         raise BundleError("INTEGRATED_RUNTIME_R001_SAFETY_PASSPORT_FAILED")
-    if rules_output_safety and runtime_safety.get("rules_output_safety_passport_fix") is not True:
+    if runtime_safety.get("rules_report_controls_changed") is not False:
+        raise BundleError("INTEGRATED_RUNTIME_RULES_CONTROLS_PASSPORT_FAILED")
+    if runtime_safety.get("rules_output_safety_passport_fix") is not False:
         raise BundleError("INTEGRATED_RUNTIME_RULES_SAFETY_PASSPORT_FAILED")
     if r005_catalog and (
         runtime_safety.get("r005_intalev_catalog_auto_binding") is not True

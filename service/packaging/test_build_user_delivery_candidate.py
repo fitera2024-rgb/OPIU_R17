@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,18 +18,58 @@ SPEC.loader.exec_module(BUILDER)
 
 
 class CandidateBuilderContractTest(unittest.TestCase):
+    def test_repository_authority_is_checkout_local(self) -> None:
+        self.assertEqual(BUILDER.REPO_ROOT, SCRIPT.resolve().parents[2])
+        for path in (
+            BUILDER.RUNTIME_SOURCE_ROOT,
+            BUILDER.OVERLAY_ROOT,
+            BUILDER.BACKEND_PROVENANCE,
+            BUILDER.UI_OVERLAY_ROOT,
+            BUILDER.UI_PROVENANCE,
+        ):
+            path.resolve().relative_to(BUILDER.REPO_ROOT.resolve())
+        builder_source = SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("Path.home()", builder_source)
+        self.assertNotIn("C:\\Users\\NB-FIT", builder_source)
+
     def test_runtime_source_pins_resolve_and_match(self) -> None:
-        root = BUILDER.REPO_ROOT / "development" / "OPIU_1.9.4"
+        root = BUILDER.RUNTIME_SOURCE_ROOT
         for relative, expected in BUILDER.RUNTIME_SOURCE_PINS.items():
             path = root / Path(relative)
             self.assertTrue(path.is_file(), relative)
             self.assertEqual(BUILDER.sha256_file(path), expected, relative)
 
     def test_require_hash_fails_closed(self) -> None:
-        path = BUILDER.REPO_ROOT / "development" / "OPIU_1.9.4" / Path(next(iter(BUILDER.RUNTIME_SOURCE_PINS)))
+        path = BUILDER.RUNTIME_SOURCE_ROOT / Path(next(iter(BUILDER.RUNTIME_SOURCE_PINS)))
         BUILDER.require_hash(path, BUILDER.sha256_file(path), "TEST")
         with self.assertRaises(BUILDER.BuildError):
             BUILDER.require_hash(path, "0" * 64, "TEST")
+        with self.assertRaisesRegex(BUILDER.BuildError, r"TEST_MISSING:missing\.mjs"):
+            BUILDER.require_hash(path.with_name("missing.mjs"), "0" * 64, "TEST")
+
+    def test_missing_authoritative_provenance_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            missing = Path(temporary) / "BASELINE_PROVENANCE.json"
+            with patch.object(BUILDER, "UI_PROVENANCE", missing):
+                with self.assertRaisesRegex(
+                    BUILDER.BuildError, r"UI_PROVENANCE_MISSING:BASELINE_PROVENANCE\.json"
+                ):
+                    BUILDER.load_ui_overlay_provenance()
+
+    def test_mismatched_authoritative_provenance_fails_closed(self) -> None:
+        value = json.loads(BUILDER.UI_PROVENANCE.read_text(encoding="utf-8"))
+        value["files"][0]["overlay_sha256"] = "0" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            provenance = Path(temporary) / "BASELINE_PROVENANCE.json"
+            provenance.write_text(json.dumps(value), encoding="utf-8")
+            with (
+                patch.object(BUILDER, "UI_PROVENANCE", provenance),
+                patch.object(BUILDER, "PINNED_UI_PROVENANCE_SHA256", BUILDER.sha256_file(provenance)),
+            ):
+                with self.assertRaisesRegex(
+                    BUILDER.BuildError, "UI_PROVENANCE_FILE_SET_MISMATCH"
+                ):
+                    BUILDER.load_ui_overlay_provenance()
 
     def test_staging_materializes_allowlist_only(self) -> None:
         fake_common = SimpleNamespace(
@@ -130,16 +172,16 @@ class CandidateBuilderContractTest(unittest.TestCase):
 
     def test_pr72_backend_overlay_provenance_is_exact(self) -> None:
         provenance = BUILDER.verify_backend_overlay()
-        self.assertEqual(provenance["change_request"], "CR-SVC-20260811-005")
+        self.assertEqual(provenance["change_request"], BUILDER.OVERLAY_CHANGE_REQUEST)
         self.assertEqual(provenance["overlay_files"], BUILDER.EXPECTED_OVERLAY)
         self.assertIn("pre_run_source_proof_ui.go", BUILDER.EXPECTED_OVERLAY)
         self.assertIn("pre_run_source_proof_ui_test.go", BUILDER.EXPECTED_OVERLAY)
         self.assertIn("main.go", BUILDER.EXPECTED_OVERLAY)
-        self.assertEqual(len(BUILDER.EXPECTED_OVERLAY), 13)
+        self.assertEqual(len(BUILDER.EXPECTED_OVERLAY), 17)
 
     def test_pr72_ui_overlay_provenance_is_exact(self) -> None:
         provenance = BUILDER.load_ui_overlay_provenance()
-        self.assertEqual(provenance["change_request"], "CR-SVC-20260811-005")
+        self.assertEqual(provenance["change_request"], BUILDER.OVERLAY_CHANGE_REQUEST)
         self.assertEqual(set(BUILDER.EXPECTED_UI_OVERLAY), {
             "web/app.js", "web/app.css", "web/index.html",
         })
@@ -163,7 +205,7 @@ class CandidateBuilderContractTest(unittest.TestCase):
     def test_pr72_static_verifier_matches_builder(self) -> None:
         verifier = VERIFIER_SCRIPT.read_text(encoding="utf-8")
         self.assertIn(BUILDER.SOURCE_PRODUCT_HEAD.lower(), verifier.lower())
-        self.assertIn("CR-SVC-20260811-005", verifier)
+        self.assertIn(BUILDER.OVERLAY_CHANGE_REQUEST, verifier)
         self.assertIn("PR72_UI_CHANGE_MISSING", verifier)
         self.assertNotIn("PR66_UI_CHANGE_MISSING", verifier)
         for expected in BUILDER.EXPECTED_UI_OVERLAY.values():
